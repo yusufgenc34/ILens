@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>ILens.Dependency</AssemblyName><Deterministic>true</Deterministic><Optimize>true</Optimize></PropertyGroup></Project>

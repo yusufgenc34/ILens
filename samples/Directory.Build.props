@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <!-- Distributed inspection fixtures do not need debug symbols or host paths. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))=/_/ILens</PathMap>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+</Project>

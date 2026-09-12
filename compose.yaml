@@ -1,0 +1,23 @@
+name: ilens
+
+services:
+  app:
+    image: ilens:local
+    build:
+      context: .
+      target: runtime
+    init: true
+    ports:
+      - "${ILENS_BIND_ADDRESS:-127.0.0.1}:${ILENS_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      RUST_LOG: ${RUST_LOG:-warn}
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 10s

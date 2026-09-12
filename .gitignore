@@ -1,0 +1,35 @@
+# Installed dependencies and generated application output
+/node_modules/
+/dist/
+/target/
+/src/wasm/
+
+# C# compiler intermediates (small fixture DLLs are intentionally versioned)
+/samples/bin/
+/samples/**/bin/
+/samples/**/obj/
+
+# Browser test output and local caches
+/test-results/
+/playwright-report/
+/coverage/
+/.cache/
+/.rari/
+*.tsbuildinfo
+
+# Local configuration, scratch files and editor state
+.env
+.env.*
+!.env.example
+/tmp/
+/temp/
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+*~
+.DS_Store
+Thumbs.db
+/.idea/
+/.vscode/

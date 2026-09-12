@@ -1,0 +1,54 @@
+{
+  "name": "ilens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "npm run build:wasm && node node_modules/rari/dist/cli.mjs dev",
+    "build": "npm run build:wasm && npm run build:app",
+    "start": "node node_modules/rari/dist/cli.mjs start",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "test": "npm run test:rust && npm run test:frontend",
+    "test:rust": "cargo test --workspace --locked",
+    "test:frontend": "vitest run",
+    "test:e2e": "playwright test",
+    "test:production": "playwright test --config playwright.production.config.ts",
+    "fixtures": "node scripts/build-fixtures.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "vp lint src tests && cargo clippy --workspace --all-targets -- -D warnings",
+    "build:app": "node node_modules/rari/dist/cli.mjs build",
+    "format:check": "cargo fmt --all -- --check"
+  },
+  "dependencies": {
+    "@codemirror/commands": "^6.8.1",
+    "@codemirror/language": "^6.11.3",
+    "@codemirror/legacy-modes": "^6.5.1",
+    "@codemirror/search": "^6.5.11",
+    "@codemirror/state": "^6.5.2",
+    "@codemirror/view": "^6.38.6",
+    "@lezer/highlight": "^1.2.3",
+    "lucide-react": "^0.577.0",
+    "rari": "0.15.17",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "oxlint": "^1.55.0",
+    "typescript": "^7.0.2",
+    "vite-plus": "^0.3.1",
+    "vitest": "^4.0.18"
+  },
+  "description": "A browser-based .NET assembly explorer and decompiler.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yusufgenc34/ILens.git"
+  }
+}

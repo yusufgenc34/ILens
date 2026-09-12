@@ -1,0 +1,47 @@
+{
+  "name": "ILens",
+  "features": {
+    "ghcr.io/devcontainers/features/node:2": {
+      "version": "22.23.1",
+      "pnpmVersion": "none"
+    },
+    "ghcr.io/devcontainers/features/rust:1": {
+      "version": "1.92.0",
+      "targets": "wasm32-unknown-unknown",
+      "components": "rustfmt,clippy,rust-src"
+    }
+  },
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "ILENS_DEV_HOST": "0.0.0.0"
+  },
+  "forwardPorts": [
+    5173
+  ],
+  "portsAttributes": {
+    "5173": {
+      "label": "ILens development",
+      "onAutoForward": "notify"
+    },
+    "3000": {
+      "label": "Rari internal backend",
+      "onAutoForward": "ignore"
+    }
+  },
+  "postCreateCommand": "npm ci && npm run build:wasm",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "oxc.oxc-vscode",
+        "EditorConfig.EditorConfig"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  },
+  "build": {
+    "dockerfile": "Dockerfile"
+  }
+}
