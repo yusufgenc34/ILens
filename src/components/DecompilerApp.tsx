@@ -201,7 +201,7 @@ export default function DecompilerApp() {
     return [...unique].slice(0, 100)
   }, [method])
   async function copy() {try {await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1600)} catch (error) {report(error)}}
-  async function openSample() {try {const response = await fetch('/samples/ILens.Patterns.dll'); if (!response.ok) throw new Error('The sample assembly could not be loaded.'); const blob = await response.blob(); await openFiles([new File([blob], 'ILens.Patterns.dll')])} catch (error) {report(error)}}
+  async function openSample() {try {const response = await fetch(`${import.meta.env.BASE_URL}samples/ILens.Patterns.dll`); if (!response.ok) throw new Error('The sample assembly could not be loaded.'); const blob = await response.blob(); await openFiles([new File([blob], 'ILens.Patterns.dll')])} catch (error) {report(error)}}
   const resolvedDefinition = metadata?.resolved_definition as {assembly: number; token: number} | null | undefined
   const selectedLabel = activeDeclaration?.name ?? (selected === -1 ? 'Assembly references' : selected === -2 ? 'Manifest resources' : selected === 0 ? 'Assembly overview' : metadata?.name ? String(metadata.name) : 'Select a member')
   return <div data-ready={ready} className={cn(`application bg-background text-foreground font-sans text-[13px] font-normal flex flex-col h-dvh min-w-165 leading-[1.5] ${theme}`)} onDragOver={e => {e.preventDefault(); if (e.dataTransfer.types.includes('Files')) setDragging(true)}} onDragLeave={e => {if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false)}} onDrop={drop}>

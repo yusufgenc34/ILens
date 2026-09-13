@@ -1,5 +1,7 @@
 # ILens
 
+[Open ILens in your browser](https://yusufgenc34.github.io/ILens/)
+
 A browser-based .NET assembly explorer and decompiler. Open a managed DLL or EXE, browse its types and members, inspect CIL, and reconstruct readable C# for supported methods.
 
 ILens uses **Rari, React, and TypeScript** for the interface and a **Rust WebAssembly core** inside a browser worker for static analysis. Assembly contents stay in the browser and are never executed.
@@ -69,6 +71,17 @@ ILENS_PORT=8080 docker compose up --build -d
 Optional settings are documented in [.env.example](.env.example). The default binding is loopback. For access through another host or an HTTPS reverse proxy, configure `ILENS_BIND_ADDRESS` and `ILENS_PORT` for your environment.
 
 The multi-stage image compiles Rust/WASM and the Rari application, then runs the production server as an unprivileged user. Compose includes a health check, a read-only application filesystem, and a temporary `/tmp`. It requires no database, volume, credentials, or assembly storage. Docker serves the application; assembly analysis still runs in the browser.
+
+## GitHub Pages
+
+The hosted application is available at [yusufgenc34.github.io/ILens](https://yusufgenc34.github.io/ILens/). A separate static entry reuses the same React interface and browser worker; Rari remains the default development and Docker target.
+
+```sh
+npm run build:pages
+npm run preview:pages
+```
+
+Open `http://127.0.0.1:4173/ILens/`. Pushes to `main` build, test, and deploy the Pages target through GitHub Actions. See [Pages setup and base paths](docs/github-pages.md) for forks, custom domains, and verification.
 
 ## GitHub Codespaces and Dev Containers
 
@@ -160,7 +173,7 @@ To test a running Docker instance:
 PLAYWRIGHT_BASE_URL=http://localhost:3000 npm run test:production
 ```
 
-Stop a separately running server before tests that start their own server. GitHub Actions checks formatting, types, lint, native/worker behavior, browser styling, production builds, and the Docker application. It does not deploy or publish images.
+Stop a separately running server before tests that start their own server. GitHub Actions checks formatting, types, lint, native/worker behavior, browser styling, production builds, and the Docker application. The separate Pages workflow deploys the static site after its browser tests pass. No workflow publishes Docker images.
 
 ## Architecture
 
@@ -174,11 +187,12 @@ React interface
        -> independent IL view
 ```
 
-`decompiler-core` contains framework-independent parsing and analysis. `decompiler-wasm` exposes coarse operations through `wasm-bindgen`. Rari renders the shell and serves assets; it does not receive assembly bytes. Methods are analyzed on selection and recent results are cached.
+`decompiler-core` contains framework-independent parsing and analysis. `decompiler-wasm` exposes coarse operations through `wasm-bindgen`. Rari renders the shell and serves assets for the default target; the optional Pages entry renders the same interface entirely in the browser. Neither target receives assembly bytes on the server. Methods are analyzed on selection and recent results are cached.
 
 | Directory | Contents |
 | --- | --- |
 | `src/app` | Rari routes, root layout, and global styles |
+| `pages` | Static entry for GitHub Pages |
 | `src/components` | Workspace, explorer, code viewer, and settings |
 | `src/lib`, `src/workers` | Typed worker RPC and browser orchestration |
 | `crates/decompiler-core` | PE/CLI parsing, metadata, CIL, analysis, and emission |
@@ -208,6 +222,7 @@ A current desktop Chromium browser is tested. Current Firefox and Safari provide
 - [Source export and assembly editing roadmap](docs/roadmap.md)
 - [Architecture and worker API](docs/architecture.md)
 - [Development and container setup](docs/development.md)
+- [GitHub Pages deployment](docs/github-pages.md)
 - [Security model and resource limits](docs/security.md)
 - [Framework and obfuscation inspection](docs/assembly-inspection.md)
 - [Parser evaluation](docs/parser-evaluation.md)

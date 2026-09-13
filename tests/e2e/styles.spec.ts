@@ -8,9 +8,9 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
   page.on('response', response => {
     if (/\.css(?:\?|$)/.test(response.url())) cssResponses.push({url: response.url(), status: response.status(), type: response.headers()['content-type'] ?? ''})
   })
-  await page.goto('/')
+  await page.goto('./')
   // Inspect the delivered shell, so hydration alone cannot hide a missing SSR stylesheet.
-  const shell = await (await page.request.get('/')).text()
+  const shell = await (await page.request.get('./')).text()
   const links = [...shell.matchAll(/<link\b(?=[^>]*\brel=["']stylesheet["'])[^>]*\bhref=["']([^"']+)["'][^>]*>/gi)].map(match => match[1])
   expect(links.length).toBeGreaterThan(0)
   for (const href of links) {const css = await page.request.get(href, {headers: {Accept: 'text/css'}}); expect(css.ok()).toBe(true); expect(css.headers()['content-type']).toContain('text/css')}

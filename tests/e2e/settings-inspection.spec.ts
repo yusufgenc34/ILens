@@ -6,7 +6,7 @@ const fixture = (name: string) => path.resolve(`samples/fixtures/ILens.${name}.d
 test('editor settings change real highlighting, persist, and leave the workspace neutral', async ({page}, testInfo) => {
   const failures: string[] = []
   page.on('pageerror', error => failures.push(error.message))
-  await page.goto('/')
+  await page.goto('./')
   await expect(page.getByLabel('Open assembly files')).toBeEnabled(); await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Settings…', exact: true}).click()
   const dialog = page.getByRole('dialog', {name: 'Settings', exact: true})
   await expect(dialog).toBeVisible()
@@ -73,7 +73,7 @@ test('editor settings change real highlighting, persist, and leave the workspace
 test('framework versions and obfuscation warnings come from the selected assembly metadata', async ({page}, testInfo) => {
   const failures: string[] = []
   page.on('pageerror', error => failures.push(error.message))
-  await page.goto('/')
+  await page.goto('./')
   await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(fixture('Patterns'))
   await expect(page.getByTestId('target-framework')).toHaveText('.NET 10.0')

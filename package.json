@@ -18,9 +18,13 @@
     "test:production": "playwright test --config playwright.production.config.ts",
     "fixtures": "node scripts/build-fixtures.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "vp lint src tests build vite.config.ts && cargo clippy --workspace --all-targets -- -D warnings",
+    "lint": "vp lint src pages tests build vite.config.ts vite.pages.config.ts playwright.pages.config.ts && cargo clippy --workspace --all-targets -- -D warnings",
     "build:app": "node node_modules/rari/dist/cli.mjs build",
-    "format:check": "cargo fmt --all -- --check"
+    "format:check": "cargo fmt --all -- --check",
+    "build:pages": "npm run build:wasm && npm run build:pages:app",
+    "build:pages:app": "npm run typecheck && vp build --config vite.pages.config.ts",
+    "preview:pages": "vp preview --config vite.pages.config.ts",
+    "test:pages": "playwright test --config playwright.pages.config.ts"
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.1",

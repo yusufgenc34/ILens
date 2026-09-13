@@ -4,7 +4,7 @@ const fixture = path.resolve('samples/fixtures/ILens.Patterns.dll')
 test('real browser WASM: open, navigate, reconstruct, search, dependencies, privacy, close', async ({page}) => {
  const sent: string[] = []
  page.on('request', request => {if (request.method() !== 'GET') sent.push(`${request.method()} ${request.url()}`)})
- await page.goto('/')
+ await page.goto('./')
  await expect(page.getByRole('heading', {name: /Look inside/})).toBeVisible()
  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
  await page.getByLabel('Open assembly files').setInputFiles(fixture)
@@ -42,7 +42,7 @@ test('real browser WASM: open, navigate, reconstruct, search, dependencies, priv
  await expect(page.getByRole('heading', {name: /Look inside/})).toBeVisible()
 })
 test('a malformed DLL produces a diagnostic and a subsequent valid file still opens', async ({page}) => {
- await page.goto('/')
+ await page.goto('./')
  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
  await page.getByLabel('Open assembly files').setInputFiles({name: 'hostile.dll', mimeType: 'application/octet-stream', buffer: Buffer.from('Not a PE file')})
  await expect(page.getByRole('alert')).toContainText('not a valid Windows PE')

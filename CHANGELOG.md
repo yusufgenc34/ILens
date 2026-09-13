@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added GitHub Pages hosting with the same explorer, decompiler, export, and IL editor.
+- Added automatic static-site deployment and browser checks for repository subpaths.
+
 ## 2026-09-13
 
 - Added project export with Visual Studio solutions, C# projects, resources, and dependency references.

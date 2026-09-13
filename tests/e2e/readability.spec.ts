@@ -7,7 +7,7 @@ test('worker output simplifies a message array and saves C# that compiles', asyn
   test.setTimeout(90_000)
   const errors: string[] = []
   page.on('pageerror', error => errors.push(error.message))
-  await page.goto('/')
+  await page.goto('./')
   await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(path.resolve('samples/fixtures/ILens.Readability.dll'))
   await expect(page.getByLabel('Primary assembly')).toHaveValue('1')

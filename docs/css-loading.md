@@ -22,3 +22,7 @@ The tests also verify computed typography, Tailwind classes, pane geometry, the 
 Use **localhost:5173** for `npm run dev`; port 3000 is its internal Rari backend. After building, `npm start` serves production on **localhost:3000**. The production CSP permits WASM compilation. Run `npm run test:e2e` and `npm run test:production`; HTML rendering alone is not sufficient validation.
 
 References: [Tailwind with Vite](https://tailwindcss.com/docs/installation/using-vite), [Tailwind source detection](https://tailwindcss.com/docs/detecting-classes-in-source-files), [Rari project conventions](https://rari.build/docs/getting-started).
+
+## Static Pages entry
+
+`pages/main.tsx` imports `src/app/globals.css` through the standard Vite/Tailwind pipeline. This entry is not processed by Rari's SSR bundler and does not use the `rariStyles` manifest adapter. The default Rari entry still uses the stylesheet link/manifest mechanism described above. Both entries share the same stylesheet and component utilities.

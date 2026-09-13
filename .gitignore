@@ -1,6 +1,7 @@
 # Installed dependencies and generated application output
 /node_modules/
 /dist/
+/dist-pages/
 /target/
 /src/wasm/
 

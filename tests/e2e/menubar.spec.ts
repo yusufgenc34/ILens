@@ -1,7 +1,7 @@
 import {expect, test} from '@playwright/test'
 import path from 'node:path'
 test('top menus support keyboard navigation, disabled actions and view settings', async ({page}, testInfo) => {
-  await page.goto('/'); await expect(page.getByLabel('Open assembly files')).toBeEnabled()
+  await page.goto('./'); await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   const file = page.getByRole('menuitem', {name: 'File', exact: true})
   const brand = page.locator('.app-menubar .app-name')
   await expect(brand).toHaveText('ILens')

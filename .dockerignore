@@ -4,6 +4,7 @@
 node_modules
 target
 dist
+dist-pages
 src/wasm
 samples/bin
 samples/**/bin

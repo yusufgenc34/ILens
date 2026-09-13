@@ -60,6 +60,10 @@ jobs:
         run: npm run build:app
       - name: Test production application
         run: npm run test:production
+      - name: Build static application
+        run: npm run build:pages:app
+      - name: Test static application
+        run: npm run test:pages
       - name: Upload browser diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -47,7 +47,7 @@ docker compose down
 
 Compose defaults to `127.0.0.1:3000`. Copy `.env.example` to `.env` if you want persistent local overrides, or set `ILENS_PORT` and `ILENS_BIND_ADDRESS` on the command line. The `.env` file is ignored by Git and Docker. These settings control serving only; assembly analysis remains inside the browser.
 
-A remote installation should use HTTPS, normally through a reverse proxy. Map the host binding and port deliberately for that installation. The repository provides no automatic deployment or registry publishing.
+A remote installation should use HTTPS, normally through a reverse proxy. Map the host binding and port deliberately for that installation. Docker deployment remains manual and no container registry is published. The separate [GitHub Pages workflow](github-pages.md) automatically deploys the static target.
 
 ## Tests and CI
 

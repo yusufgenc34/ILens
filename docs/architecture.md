@@ -22,6 +22,10 @@ The core uses pinned **goblin 0.10.7** for PE headers/sections and **clrmeta 0.1
 
 The referenced historical [mono-wasm](https://github.com/migueldeicaza/mono-wasm) repository was studied before implementation. Its explicit browser bootstrap, in-memory assembly loading, memory-view lifetime and boundary ownership are relevant. Its Mono execution runtime, syscall emulation and historical LLVM build are not needed. **No Mono runtime or mono-wasm code is included.** See [the mono-wasm study](mono-wasm-notes.md) for source-specific findings and the inspected commit.
 
+### Static hosting target
+
+`pages/main.tsx` is a client-only entry for the same `DecompilerApp`. A separate Vite configuration builds it into `dist-pages`, using the same Tailwind stylesheet and module worker, without Rari server endpoints. The Rari routes and Docker runtime remain the default target. Asset URLs use the configured site base, including the optional sample download. See [GitHub Pages](github-pages.md).
+
 ### Worker API and lifetime
 
 `src/lib/types.ts` defines the RPC contract; `src/lib/rpc.ts` owns IDs, pending promises, transferable buffers, cancellation and the watchdog. The WASM `Decompiler` exposes:

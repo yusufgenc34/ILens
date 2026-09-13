@@ -3,7 +3,7 @@ import path from 'node:path'
 import {execFileSync} from 'node:child_process'
 
 async function open(page: Page, fixture: string) {
-  await page.goto('/')
+  await page.goto('./')
   await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(path.resolve(`samples/fixtures/ILens.${fixture}.dll`))
   await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
