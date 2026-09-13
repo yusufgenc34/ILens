@@ -15,6 +15,17 @@ export interface XrefPage { hits: {token: number; name: string; offset: number}[
 export interface TypeView { declaration: string; metadata: Record<string, unknown> }
 export interface Overview { info: AssemblyInfo; pe: Record<string, unknown>; streams: {name: string; offset: number; size: number}[]; tables: {name: string; id: number; rows: number}[]; references: Reference[]; resources: {token: number; name: string; embedded: boolean; offset: number; flags: number}[] }
 export interface Operations {
+  beginProjectExport: {input: {options: import('./export-types').ProjectExportOptions}; output: import('./export-types').ExportProgress}
+  beginExport: {input: {assembly: number; options: import('./export-types').ExportOptions}; output: import('./export-types').ExportProgress}
+  stepExport: {input: {job: number}; output: import('./export-types').ExportProgress}
+  finishExport: {input: {job: number}; output: import('./export-types').ExportResult}
+  cancelExport: {input: {job: number}; output: null}
+  openMethodEdit: {input: {assembly: number; token: number}; output: EditPreview}
+  applyMethodEdit: {input: {assembly: number; token: number; revision: number; instructions: EditableInstruction[]}; output: EditPreview}
+  discardMethodEdit: {input: {assembly: number; token: number; revision: number}; output: EditPreview}
+  getEdits: {input: {assembly: number}; output: EditsInfo}
+  getOpcodes: {input: Record<string, never>; output: [string, string][]}
+  exportModifiedAssembly: {input: {assembly: number; revision: number}; output: {buffer: ArrayBuffer}}
   load: { input: {buffer: ArrayBuffer}; output: Loaded }
   getTree: { input: {assembly: number}; output: Declaration[] }
   getInfo: { input: {assembly: number}; output: Overview }
@@ -29,6 +40,9 @@ export interface Operations {
   close: { input: {assembly: number}; output: null }
   dispose: { input: Record<string, never>; output: null }
 }
+export interface EditableInstruction {id: string; opcode: string; operand: string}
+export interface EditPreview {token: number; revision: number; instructions: EditableInstruction[]; original: EditableInstruction[]; changed: boolean; il: string; max_stack: number; code_size: number}
+export interface EditsInfo {revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null}
 export type Operation = keyof Operations
 export type Request = { [K in Operation]: {id: number; op: K} & Operations[K]['input'] }[Operation]
 export type Response = { id: number; kind: 'success'; result: unknown } | {id: number; kind: 'error'; error: Diagnostic} | {id: number; kind: 'fatal'; error: Diagnostic} | {id: number; kind: 'progress'; message: string}

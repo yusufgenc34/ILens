@@ -1,16 +1,18 @@
 import path from 'node:path'
 import { rari } from 'rari/vite'
 import { defineConfig } from 'vite-plus'
+import tailwindcss from '@tailwindcss/vite'
+import {rariStyles} from './build/rari-styles'
 
 const codespaceHost = process.env.CODESPACE_NAME && process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN
   ? `${process.env.CODESPACE_NAME}-5173.${process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}`
   : undefined
 
 export default defineConfig({
-  plugins: [rari({
+  plugins: [tailwindcss(), rari({
     csp: {scriptSrc: ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"], workerSrc: ["'self'"]},
     cacheControl: {routes: {'/': 'no-cache'}},
-  })],
+  }), rariStyles()],
   // Rari discovers client components dynamically; prebundle their dependencies
   // before the first browser request to avoid a dependency-discovery reload.
   optimizeDeps: {include: ['react', 'react-dom', 'react-dom/client', 'lucide-react', '@codemirror/commands', '@codemirror/language', '@codemirror/legacy-modes/mode/clike', '@codemirror/search', '@codemirror/state', '@codemirror/view', '@lezer/highlight']},

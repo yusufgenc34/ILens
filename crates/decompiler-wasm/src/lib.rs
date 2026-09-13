@@ -89,4 +89,72 @@ impl Decompiler {
     pub fn dispose(&mut self) {
         self.session.dispose();
     }
+    pub fn export_plan(&self, id: u32, token: u32) -> Result<JsValue, JsValue> {
+        let types = decompiler_core::export::plan(
+            self.session.assembly(id).map_err(error)?,
+            if token == 0 { None } else { Some(token) },
+        )
+        .map_err(error)?;
+        js(&serde_json::json!({"revision":self.session.revision,"types":types}))
+    }
+    pub fn export_member(&self, id: u32, token: u32, revision: u32) -> Result<JsValue, JsValue> {
+        self.session.check_revision(revision).map_err(error)?;
+        js(
+            &decompiler_core::export::member(self.session.assembly(id).map_err(error)?, token)
+                .map_err(error)?,
+        )
+    }
+    pub fn export_resource(&self, id: u32, token: u32, revision: u32) -> Result<Vec<u8>, JsValue> {
+        self.session.check_revision(revision).map_err(error)?;
+        decompiler_core::export::resource(self.session.assembly(id).map_err(error)?, token)
+            .map_err(error)
+    }
+    pub fn export_dependency(&self, id: u32, revision: u32) -> Result<Vec<u8>, JsValue> {
+        self.session.check_revision(revision).map_err(error)?;
+        Ok(self.session.assembly(id).map_err(error)?.bytes.clone())
+    }
+    pub fn open_method_edit(&self, id: u32, token: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.open_edit(id, token).map_err(error)?)
+    }
+    pub fn apply_method_edit(
+        &mut self,
+        id: u32,
+        token: u32,
+        revision: u32,
+        instructions: &str,
+    ) -> Result<JsValue, JsValue> {
+        if instructions.len() > 1024 * 1024 {
+            return Err(error(Error::limit("Edit input exceeds 1 MiB")));
+        }
+        let rows = serde_json::from_str(instructions).map_err(|e| {
+            error(Error::new(
+                decompiler_core::error::ErrorCode::InvalidEdit,
+                e.to_string(),
+            ))
+        })?;
+        js(&self
+            .session
+            .apply_edit(id, token, revision, rows)
+            .map_err(error)?)
+    }
+    pub fn discard_method_edit(
+        &mut self,
+        id: u32,
+        token: u32,
+        revision: u32,
+    ) -> Result<JsValue, JsValue> {
+        js(&self
+            .session
+            .discard_edit(id, token, revision)
+            .map_err(error)?)
+    }
+    pub fn get_edits(&self, id: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.edits_info(id).map_err(error)?)
+    }
+    pub fn get_opcodes(&self) -> Result<JsValue, JsValue> {
+        js(&decompiler_core::cil_encode::catalog())
+    }
+    pub fn export_modified_assembly(&self, id: u32, revision: u32) -> Result<Vec<u8>, JsValue> {
+        self.session.export_modified(id, revision).map_err(error)
+    }
 }

@@ -17,6 +17,8 @@ pub struct Session {
     next_id: u32,
     cache: VecDeque<((u32, u32), MethodAnalysis, usize)>,
     cache_bytes: usize,
+    edits: BTreeMap<(u32, u32), crate::edit::ValidatedEdit>,
+    pub revision: u32,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -25,6 +27,8 @@ impl Default for Session {
             next_id: 1,
             cache: VecDeque::new(),
             cache_bytes: 0,
+            edits: BTreeMap::new(),
+            revision: 0,
         }
     }
 }
@@ -49,6 +53,7 @@ impl Session {
             .ok_or_else(|| Error::limit("Assembly ID space exhausted"))?;
         let info = a.info.clone();
         self.assemblies.insert(id, a);
+        self.bump_revision();
         Ok(Loaded { id, info })
     }
     pub fn assembly(&self, id: u32) -> Result<&Assembly> {
@@ -179,9 +184,11 @@ impl Session {
                 let row = source.metadata().type_specs.get(rid)?;
                 let ty = crate::signature::type_spec(source.blob(row.signature).ok()?).ok()?;
                 let base = match ty {
-                    crate::signature::Type::Named(t) => t,
+                    crate::signature::Type::Named(t) | crate::signature::Type::ValueType(t) => t,
                     crate::signature::Type::GenericInstance { base, .. } => {
-                        if let crate::signature::Type::Named(t) = *base {
+                        if let crate::signature::Type::Named(t)
+                        | crate::signature::Type::ValueType(t) = *base
+                        {
                             t
                         } else {
                             return None;
@@ -296,6 +303,8 @@ impl Session {
     }
     pub fn close(&mut self, id: u32) {
         self.assemblies.remove(&id);
+        self.edits.retain(|(a, _), _| *a != id);
+        self.bump_revision();
         self.cache.retain(|((a, _), _, _)| *a != id);
         self.cache_bytes = self.cache.iter().map(|(_, _, n)| n).sum();
     }
@@ -303,5 +312,81 @@ impl Session {
         self.assemblies.clear();
         self.cache.clear();
         self.cache_bytes = 0;
+        self.edits.clear();
+        self.bump_revision();
+    }
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.cache.clear();
+        self.cache_bytes = 0;
+    }
+    pub fn check_revision(&self, revision: u32) -> Result<()> {
+        if self.revision != revision {
+            return Err(Error::new(
+                crate::error::ErrorCode::Cancelled,
+                "Workspace changed during the operation; start it again",
+            ));
+        }
+        Ok(())
+    }
+    pub fn open_edit(&self, id: u32, token: u32) -> Result<crate::edit::EditPreview> {
+        crate::edit::preview(
+            self.assembly(id)?,
+            token,
+            self.revision,
+            self.edits.get(&(id, token)),
+        )
+    }
+    pub fn apply_edit(
+        &mut self,
+        id: u32,
+        token: u32,
+        revision: u32,
+        rows: Vec<crate::cil_encode::EditableInstruction>,
+    ) -> Result<crate::edit::EditPreview> {
+        self.check_revision(revision)?;
+        if self.edits.len() >= 256 && !self.edits.contains_key(&(id, token)) {
+            return Err(Error::limit("At most 256 method edits per workspace"));
+        }
+        let a = self.assembly(id)?;
+        let edit = crate::edit::validate(a, token, &rows)?;
+        let original = a
+            .body(token)?
+            .ok_or_else(|| Error::cil("Missing method body"))?;
+        let original_code = crate::cil_encode::encode(&crate::cil_encode::from_body(&original))?;
+        if original_code == edit.code {
+            self.edits.remove(&(id, token));
+        } else {
+            self.edits.insert((id, token), edit);
+        }
+        self.bump_revision();
+        self.open_edit(id, token)
+    }
+    pub fn discard_edit(
+        &mut self,
+        id: u32,
+        token: u32,
+        revision: u32,
+    ) -> Result<crate::edit::EditPreview> {
+        self.check_revision(revision)?;
+        self.edits.remove(&(id, token));
+        self.bump_revision();
+        self.open_edit(id, token)
+    }
+    pub fn edits_info(&self, id: u32) -> Result<Value> {
+        let a = self.assembly(id)?;
+        Ok(
+            json!({"revision":self.revision,"methods":self.edits.iter().filter(|((assembly,_),_)|*assembly==id).map(|((_,token),edit)|json!({"token":token,"name":a.resolve(*token),"code_size":edit.code.len()})).collect::<Vec<_>>(),"writer_error":crate::pe_write::capability(a).err()}),
+        )
+    }
+    pub fn export_modified(&self, id: u32, revision: u32) -> Result<Vec<u8>> {
+        self.check_revision(revision)?;
+        let edits = self
+            .edits
+            .iter()
+            .filter(|((assembly, _), _)| *assembly == id)
+            .map(|((_, token), edit)| (*token, edit.clone()))
+            .collect();
+        crate::pe_write::write(self.assembly(id)?, &edits)
     }
 }

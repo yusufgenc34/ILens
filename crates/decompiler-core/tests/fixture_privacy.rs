@@ -21,6 +21,14 @@ const FIXTURES: &[(&str, &[u8])] = &[
         "public sample",
         include_bytes!("../../../public/samples/ILens.Patterns.dll"),
     ),
+    (
+        "Editing",
+        include_bytes!("../../../samples/fixtures/ILens.Editing.dll"),
+    ),
+    (
+        "Readability",
+        include_bytes!("../../../samples/fixtures/ILens.Readability.dll"),
+    ),
 ];
 
 #[test]

@@ -13,12 +13,15 @@ This is an early decompiler release. Reconstructed code is not the original sour
 - Local search across declarations and strings, dependency loading, and reference navigation.
 - Declared .NET target and CLR metadata versions displayed separately.
 - Obfuscator marker inspection with evidence and clearly labeled naming heuristics.
-- Dark and light appearance, six code themes, syntax highlighting controls, and saved editor preferences.
+- Tailwind-based dark and light appearance, six code themes, syntax highlighting controls, and saved editor preferences.
 - Bounds-checked parsing, structured diagnostics, cancellation, and explicit workspace cleanup.
+- Project export with a Visual Studio solution, per-assembly C# projects, namespace folders, resources and project references.
+- Separate method/type source downloads and inspection archives with IL and completeness reports.
+- A scoped IL editor with undo/redo, write validation, and modified DLL/EXE downloads for supported unsigned assemblies.
 
 ## Quick start
 
-Install Node.js **22.23.1** and Rust through [rustup](https://rustup.rs/). The repository selects Rust **1.92.0**, its WASM target, and formatting/linting components automatically. The .NET SDK is only needed to regenerate the included test fixtures.
+Install Node.js **22.23.1** and Rust through [rustup](https://rustup.rs/). The repository selects Rust **1.92.0**, its WASM target, and formatting/linting components automatically. Running the app does not require .NET. Export verification tests and fixture regeneration require the .NET 10 SDK; ZIP conformance tests use Python 3.
 
 ```sh
 git clone https://github.com/yusufgenc34/ILens.git
@@ -31,11 +34,13 @@ Open [localhost:5173](http://localhost:5173). If you use nvm, run `nvm install` 
 
 The first build installs the matching `wasm-bindgen-cli` and compiles the WASM core. It needs network access and may take several minutes. Generated bindings are placed automatically in `src/wasm`.
 
-1. Open a managed assembly or drag files onto the application.
+1. Choose File > Open Assembly or drag managed assemblies onto the application.
 2. Select a type or method in the Assembly Explorer.
 3. Switch between C#, IL, Metadata, and Hex.
-4. Add dependency assemblies when you want to resolve external definitions.
-5. Open Settings to customize the code viewer.
+4. Choose File > Add Dependencies when you want to resolve external definitions.
+5. Choose Edit > Settings to customize the code viewer.
+6. Choose File > Export to Project to download a solution with one project per selected assembly. Use File > Save Code for individual source downloads.
+7. Open the IL tab on a supported method and choose Edit IL, validate/apply changes, then File > Save Module to download the modified assembly.
 
 Use `Ctrl/Cmd K` for metadata search, `Ctrl/Cmd F` inside the editor, and `Ctrl/Cmd`-click a metadata token to navigate. Refreshing clears the loaded assemblies; editor preferences are retained.
 
@@ -94,6 +99,17 @@ These images show the running application analyzing the compiled C# fixture incl
 ![Editor settings with an independent code theme and live syntax preview](docs/screenshots/settings.png)
 
 <details>
+<summary>Source export and IL editing</summary>
+
+![File menu with separate project export, code saving and module saving actions](docs/screenshots/top-menu.png)
+
+![Project export with assembly selection, solution creation and reconstruction reports](docs/screenshots/export.png)
+
+![IL editor showing a validated change to the MakeArray fixture](docs/screenshots/il-editor.png)
+
+</details>
+
+<details>
 <summary>Light appearance and start screen</summary>
 
 ![Light workspace with the same reconstructed method](docs/screenshots/light.png)
@@ -131,6 +147,7 @@ Install the browser once before browser tests:
 
 ```sh
 npx playwright install --with-deps chromium
+dotnet tool restore
 npm run build:wasm
 npm run test:e2e
 npm run build
@@ -153,7 +170,7 @@ React interface
   -> dedicated browser worker
   -> Rust/WASM session and metadata index
   -> CIL -> control-flow graph -> stack analysis -> typed IR
-  -> AST -> simplification -> C# emitter
+  -> IR simplification -> AST -> C# emitter
        -> independent IL view
 ```
 
@@ -174,23 +191,29 @@ React interface
 
 IL-only managed PE DLLs and EXEs are supported, including compatible .NET Framework and modern .NET assemblies. Metadata support covers generics, nested types, fields, methods, constructors, properties, events, attributes, P/Invoke declarations, references, resources, and exception regions.
 
-Common arithmetic, calls, fields, arrays, conditionals, loops, switches, and conservative try/catch/finally patterns can produce C#-like output. Complex async/iterator state machines, closure synthesis, nested exception patterns, and other unsupported constructs remain annotated IL. Some methods retain labels, gotos, or synthetic stack/local variables; output is intended for inspection and is not always standalone compilable source.
+Common arithmetic, calls, fields, arrays, conditionals, loops, switches, and conservative try/catch/finally patterns can produce C#-like output. Complex async/iterator state machines, closure synthesis, nested exception patterns, and other unsupported constructs remain annotated IL. Some methods retain labels, gotos, or synthetic stack/local variables; output is intended for inspection and is not always standalone compilable source. Single-use copies and safe complete array initializers are simplified while preserving evaluation order. External property accessors may still appear as `get_Text()` calls; their names alone do not establish property semantics. See [source-readability rules](docs/architecture.md#source-readability-and-evaluation-order).
 
 ReadyToRun and mixed-mode inputs receive unsupported-native diagnostics. NativeAOT normally lacks the CLI metadata this parser needs. WebCIL, PDB loading, type forwarding, and multi-module resolution are not implemented. Missing dependencies do not prevent inspection, and dependencies are never downloaded automatically.
 
 Obfuscation detection recognizes selected metadata markers and naming heuristics. It is not a universal detector or deobfuscator; missing markers do not prove a file is unobfuscated. See [inspection rules](docs/assembly-inspection.md).
 
+Source exports can be partial; generated solutions and projects are not guaranteed to compile. IL editing supports nongeneric static/instance reference-class methods, vectors and jagged arrays, primitive boxing/casts, local fields and supported calls. Generics, constructor bodies, custom value types and exception handlers remain read-only. Binary output is restricted to supported unsigned x86/x64 managed PE layouts. See [export and editing support](docs/export-edit.md) for exact limits.
+
 A current desktop Chromium browser is tested. Current Firefox and Safari provide the required WebAssembly/module-worker APIs but have not been validated in this release. Use localhost HTTP or HTTPS; opening files through `file://` is unsupported. No browser extension, managed runtime, or shared-memory configuration is required.
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md)
+- [Source export and IL editing](docs/export-edit.md)
+- [Source export and assembly editing roadmap](docs/roadmap.md)
 - [Architecture and worker API](docs/architecture.md)
 - [Development and container setup](docs/development.md)
 - [Security model and resource limits](docs/security.md)
 - [Framework and obfuscation inspection](docs/assembly-inspection.md)
 - [Parser evaluation](docs/parser-evaluation.md)
 - [mono-wasm study](docs/mono-wasm-notes.md)
-- [CSS integration](docs/css-loading.md)
+- [Tailwind and Rari CSS integration](docs/css-loading.md)
+- [dnSpy project export study](docs/dnspy-export-notes.md)
 - [Performance notes](docs/performance.md)
 - [Contributing](CONTRIBUTING.md)
 
@@ -205,7 +228,11 @@ A current desktop Chromium browser is tested. Current Firefox and Safari provide
 | [.NET runtime opcode definitions](https://github.com/dotnet/runtime/blob/main/src/coreclr/inc/opcode.def) | Source of the checked-in opcode table; license attribution is preserved |
 | [goblin](https://crates.io/crates/goblin) and [clrmeta](https://crates.io/crates/clrmeta) | Parser dependencies behind ILens's validation and metadata abstractions |
 | [wasm-bindgen](https://wasm-bindgen.github.io/wasm-bindgen/) | Rust/JavaScript bindings and WASM memory ownership |
+| [Tailwind CSS](https://tailwindcss.com/docs/installation/using-vite) | Utility-based interface styling, semantic theme tokens and Vite compilation |
 | [CodeMirror](https://codemirror.net/) | Read-only code views, highlighting, and editor search |
+| [dnSpy](https://github.com/dnSpy/dnSpy) | Workflow reference for source export and IL editing; its code is not embedded |
+| [ILVerify](https://github.com/dotnet/runtime/tree/main/src/coreclr/tools/ILVerify) | Independent static verification of test fixture outputs; a test-only tool |
+| [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT) | ZIP32 archive format reference |
 | [ILSpy](https://github.com/icsharpcode/ILSpy) | Reference for decompiler navigation and inspection workflows; ILens does not embed its decompiler |
 
 ## License

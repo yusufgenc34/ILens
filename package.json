@@ -18,7 +18,7 @@
     "test:production": "playwright test --config playwright.production.config.ts",
     "fixtures": "node scripts/build-fixtures.mjs",
     "typecheck": "tsc --noEmit",
-    "lint": "vp lint src tests && cargo clippy --workspace --all-targets -- -D warnings",
+    "lint": "vp lint src tests build vite.config.ts && cargo clippy --workspace --all-targets -- -D warnings",
     "build:app": "node node_modules/rari/dist/cli.mjs build",
     "format:check": "cargo fmt --all -- --check"
   },
@@ -33,14 +33,17 @@
     "lucide-react": "^0.577.0",
     "rari": "0.15.17",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "tailwind-merge": "^3.7.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
+    "@tailwindcss/vite": "4.3.3",
     "@types/node": "^26.4.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "oxlint": "^1.55.0",
+    "tailwindcss": "4.3.3",
     "typescript": "^7.0.2",
     "vite-plus": "^0.3.1",
     "vitest": "^4.0.18"

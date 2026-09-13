@@ -58,6 +58,10 @@ pub enum ExprKind {
         element: Type,
         length: Box<Expr>,
     },
+    ArrayInitializer {
+        element: Type,
+        values: Vec<Expr>,
+    },
     Length(Box<Expr>),
     Cast {
         mode: String,

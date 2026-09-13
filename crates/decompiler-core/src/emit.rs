@@ -7,7 +7,7 @@ use crate::{
     ir::*,
     signature::Type,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write;
 fn safe_comment(s: &str) -> String {
     s.replace("*/", "* /").replace(['\r', '\n'], " ")
@@ -166,6 +166,20 @@ pub fn expression(a: &Assembly, context: u32, e: &Expr) -> Result<String> {
         NewArray { element, length } => {
             format!("new {}[{}]", type_name(a, element, context), expr(length)?)
         }
+        ArrayInitializer { element, values } => {
+            let elements = values.iter().map(expr).collect::<Result<Vec<_>>>()?;
+            let contents = if values.len() <= 4 {
+                format!("{{ {} }}", elements.join(", "))
+            } else {
+                format!("\n{{\n    {}\n}}", elements.join(",\n    "))
+            };
+            format!(
+                "new {}[{}]{}{contents}",
+                type_name(a, element, context),
+                values.len(),
+                if values.len() <= 4 { " " } else { "" }
+            )
+        }
         Length(v) => format!("((nuint){}.Length)", expr(v)?),
         Cast {
             mode,
@@ -237,7 +251,9 @@ fn statement(a: &Assembly, token: u32, s: &Statement) -> Result<String> {
     })
 }
 fn line(out: &mut String, indent: usize, text: &str) {
-    let _ = writeln!(out, "{}{}", "    ".repeat(indent), text);
+    for text in text.lines() {
+        let _ = writeln!(out, "{}{}", "    ".repeat(indent), text);
+    }
 }
 fn nodes(
     a: &Assembly,
@@ -362,17 +378,29 @@ fn nodes(
     }
     Ok(())
 }
-fn flat_block(ir: &IrBlock, cfg: &ControlFlowGraph) -> Vec<Ast> {
+fn flat_block(
+    ir: &IrBlock,
+    cfg: &ControlFlowGraph,
+    fallthrough: Option<usize>,
+    labels: &HashSet<usize>,
+) -> Vec<Ast> {
     let edge = |e: &Edge| -> Vec<Ast> {
         let mut s = crate::ast::edge_assignments(e, cfg);
         s.push(Ast::Goto(e.target));
         s
     };
-    let mut out = vec![Ast::Label(ir.id)];
+    let mut out = if labels.contains(&ir.id) {
+        vec![Ast::Label(ir.id)]
+    } else {
+        vec![]
+    };
     out.extend(ir.statements.iter().cloned().map(Ast::Statement));
     out.push(match &ir.terminator {
         Terminator::Jump(e) => {
-            out.extend(edge(e));
+            out.extend(crate::ast::edge_assignments(e, cfg));
+            if Some(e.target) != fallthrough {
+                out.push(Ast::Goto(e.target));
+            }
             return out;
         }
         Terminator::Condition { condition, yes, no } => Ast::If {
@@ -432,7 +460,45 @@ fn exception_body(
         }
         previous_end = next;
     }
-    for b in &ir.blocks {
+    // A completed try/catch naturally continues after all sibling handlers in
+    // C#. Keep only branches that differ from this lexical fallthrough. In
+    // particular, do not emit a goto from an outer block into a try statement.
+    let fallthroughs: Vec<_> = ir
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let mut next = ir.blocks.get(i + 1).map(|n| n.offset)?;
+            for ((_, end), handlers) in &groups {
+                if next == *end || handlers.iter().any(|e| e.handler_end == next) {
+                    next = handlers.last()?.handler_end;
+                    break;
+                }
+            }
+            // Only a forward lexical continuation; backward branches stay explicit.
+            cfg.blocks
+                .iter()
+                .find(|n| n.start == next && n.start > b.offset)
+                .map(|n| n.id)
+        })
+        .collect();
+    let mut labels = HashSet::new();
+    for (i, block) in ir.blocks.iter().enumerate() {
+        match &block.terminator {
+            Terminator::Jump(edge) if Some(edge.target) != fallthroughs[i] => {
+                labels.insert(edge.target);
+            }
+            Terminator::Condition { yes, no, .. } => {
+                labels.extend([yes.target, no.target]);
+            }
+            Terminator::Switch { arms, default, .. } => {
+                labels.extend(arms.iter().map(|e| e.target));
+                labels.insert(default.target);
+            }
+            _ => {}
+        }
+    }
+    for (i, b) in ir.blocks.iter().enumerate() {
         let mut indent = 1;
         for ((start, end), handlers) in &groups {
             if b.offset == *start {
@@ -478,7 +544,14 @@ fn exception_body(
                 line(out, 1, "}");
             }
         }
-        nodes(a, token, &flat_block(b, cfg), out, indent, cfg)?;
+        nodes(
+            a,
+            token,
+            &flat_block(b, cfg, fallthroughs[i], &labels),
+            out,
+            indent,
+            cfg,
+        )?;
     }
     if groups
         .values()
@@ -488,7 +561,103 @@ fn exception_body(
     }
     Ok(())
 }
-pub fn csharp(
+pub struct MethodSource {
+    pub declaration: String,
+    pub body: String,
+}
+pub fn method_source(
+    a: &Assembly,
+    token: u32,
+    body: &MethodBody,
+    ir: &TypedIr,
+    cfg: &ControlFlowGraph,
+    ast: &[Ast],
+) -> Result<MethodSource> {
+    let method = a.method_ref(token)?;
+    let mut declaration = a.declaration(token)?;
+    let mut nodes = ast;
+    if method.name == ".ctor" {
+        // Constructor initialization must precede the body in C#. Hoist only
+        // a first, direct this/base call with parameters or constant expressions.
+        let Some(Ast::Statement(Statement::Evaluate(Expr {
+            kind:
+                ExprKind::Call {
+                    owner,
+                    name,
+                    instance: Some(instance),
+                    args,
+                    ..
+                },
+            ..
+        }))) = ast.first()
+        else {
+            return Err(Error::limitation(
+                "Constructor initialization cannot be safely separated from this body",
+            ));
+        };
+        let base = crate::assembly::coded(
+            a.metadata().type_defs[(method.owner & 0xffffff) as usize - 1].extends,
+        );
+        if name != ".ctor"
+            || !matches!(&instance.kind, ExprKind::Variable(n) if n == "this")
+            || (*owner != method.owner && *owner != base)
+            || !body.exceptions.is_empty()
+        {
+            return Err(Error::limitation(
+                "Constructor chaining has an unsupported target or control flow",
+            ));
+        }
+        let parameters = a.parameter_names(token, &method.signature);
+        fn permitted(expr: &Expr, parameters: &[String], depth: usize) -> bool {
+            if depth > 48 {
+                return false;
+            }
+            match &expr.kind {
+                ExprKind::Variable(n) => parameters.contains(n),
+                ExprKind::Constant(_) | ExprKind::String(_) | ExprKind::Null => true,
+                ExprKind::Unary { value, .. } | ExprKind::Cast { value, .. } => {
+                    permitted(value, parameters, depth + 1)
+                }
+                ExprKind::Binary { left, right, .. } => {
+                    permitted(left, parameters, depth + 1)
+                        && permitted(right, parameters, depth + 1)
+                }
+                _ => false,
+            }
+        }
+        if args.iter().any(|arg| !permitted(arg, &parameters, 0)) {
+            return Err(Error::limitation(
+                "Constructor initializer uses temporary values or side effects that cannot be hoisted",
+            ));
+        }
+        let args = args
+            .iter()
+            .map(|arg| expression(a, token, arg))
+            .collect::<Result<Vec<_>>>()?
+            .join(", ");
+        declaration.push_str(&format!(
+            " : {}({args})",
+            if *owner == method.owner {
+                "this"
+            } else {
+                "base"
+            }
+        ));
+        nodes = &ast[1..];
+    } else if method.name == ".cctor" {
+        declaration = declaration
+            .strip_prefix("private ")
+            .unwrap_or(&declaration)
+            .to_owned();
+    }
+    Ok(MethodSource {
+        declaration,
+        body: csharp_body(a, token, body, ir, cfg, nodes)?,
+    })
+}
+/// Render an already structured method body for a compilation unit or accessor.
+/// Export never reparses a displayed C# string to recover its body.
+pub fn csharp_body(
     a: &Assembly,
     token: u32,
     body: &MethodBody,
@@ -496,10 +665,7 @@ pub fn csharp(
     cfg: &ControlFlowGraph,
     ast: &[Ast],
 ) -> Result<String> {
-    let mut out = String::from(
-        "// Reconstructed from CIL and metadata; local names are synthetic.\n// Integer arithmetic follows unchecked CIL unless checked is explicit.\n",
-    );
-    line(&mut out, 0, &a.declaration(token)?);
+    let mut out = String::new();
     line(&mut out, 0, "{");
     for (i, t) in ir.locals.iter().enumerate() {
         line(

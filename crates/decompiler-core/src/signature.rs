@@ -9,11 +9,13 @@ use serde::Serialize;
 pub enum Type {
     Primitive(String),
     Named(u32),
+    ValueType(u32),
     Generic {
         method: bool,
         index: u32,
     },
     Array(Box<Type>, u32),
+    MultiArray(Box<Type>, u32),
     Pointer(Box<Type>),
     ByRef(Box<Type>),
     GenericInstance {
@@ -42,8 +44,9 @@ impl Type {
     pub fn is_reference(&self) -> bool {
         matches!(
             self,
-            Self::Named(_) | Self::Array(_, _) | Self::GenericInstance { .. }
-        ) || *self == Self::primitive("string")
+            Self::Named(_) | Self::Array(_, _) | Self::MultiArray(_, _)
+        ) || matches!(self, Self::GenericInstance { base, .. } if base.is_reference())
+            || *self == Self::primitive("string")
             || *self == Self::primitive("object")
     }
 }
@@ -110,7 +113,8 @@ fn ty(r: &mut Reader<'_>, depth: usize) -> Result<Type> {
     Ok(match code {
         0x0f => Type::Pointer(Box::new(ty(r, depth + 1)?)),
         0x10 => Type::ByRef(Box::new(ty(r, depth + 1)?)),
-        0x11 | 0x12 => Type::Named(token(r)?),
+        0x11 => Type::ValueType(token(r)?),
+        0x12 => Type::Named(token(r)?),
         0x13 | 0x1e => Type::Generic {
             method: code == 0x1e,
             index: count(r)?,
@@ -136,14 +140,19 @@ fn ty(r: &mut Reader<'_>, depth: usize) -> Result<Type> {
             for _ in 0..bounds {
                 r.compressed_signed()?;
             }
-            Type::Array(Box::new(element), rank)
+            Type::MultiArray(Box::new(element), rank)
         }
         0x15 => {
             let kind = r.u8()?;
             if kind != 0x11 && kind != 0x12 {
                 return Err(Error::metadata("Invalid generic instance"));
             }
-            let base = Box::new(Type::Named(token(r)?));
+            let t = token(r)?;
+            let base = Box::new(if kind == 0x11 {
+                Type::ValueType(t)
+            } else {
+                Type::Named(t)
+            });
             let n = count(r)?;
             let mut args = Vec::new();
             for _ in 0..n {

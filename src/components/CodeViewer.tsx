@@ -73,5 +73,5 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
       EditorView.contentAttributes.of({'aria-label': label ?? `${language} code viewer`, tabindex: '0'}),
     ])})
   }, [options, language, theme, settings, label])
-  return <div ref={host} className="code-host" data-editor-theme={settings.theme} data-highlighting={settings.highlighting} />
+  return <div ref={host} className="code-host h-full overflow-hidden" data-editor-theme={settings.theme} data-highlighting={settings.highlighting} />
 }

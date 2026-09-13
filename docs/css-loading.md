@@ -1,21 +1,24 @@
-# CSS loading diagnosis and regression coverage
+# Tailwind and Rari stylesheet integration
 
-The unstyled appearance was reproduced with Chromium: existing `.application`, `.workspace`, `.toolbar` and pane classes were present, but the application computed to the browser's Times font, transparent background and block layout.
+The interface uses Tailwind CSS **4.3.3**, compiled by the matching `@tailwindcss/vite` plugin. Layout, spacing, typography, controls, states and responsive rules are utility classes in the React components. `src/lib/ui.ts` shares Tailwind recipes for repeated buttons and dialogs; `cn` uses `tailwind-merge` to resolve variants. Semantic DOM names such as `workspace` remain as navigation/test hooks, not CSS layout definitions.
 
-The original `index.html` imported global CSS through an inline module script, following the generated Rari template. Vite's port 5173 transformed that import and injected CSS, but Rari's root layout had no stylesheet dependency. The Rari route stylesheet manifest was empty. Its internal development backend on port 3000 therefore rendered server HTML without effective styles. The presence of rendered React content was not evidence of a successful UI build.
+`src/app/globals.css` contains the Tailwind import, explicit component/recipe scanning, semantic theme tokens, document defaults, dark/light palettes and the warning animation. The previous 1,351-line `globals.module.css` has been removed. CodeMirror's supported theme API still handles code highlighting and its independent editor palettes. Production ships compiled CSS; no Tailwind CDN or browser compiler is used. No PostCSS plugin or Tailwind v3 `content` configuration is needed with this Vite integration.
 
-A direct plain `.css` import in the root layout exposed an additional build problem: Rari 0.15.17's server component bundler passed it to Rolldown, which rejects direct CSS bundling. Rari does explicitly support CSS Modules through Lightning CSS, collecting extracted CSS into the route manifest.
+## Entry points
 
-The fix uses that supported path:
+1. `index.html` links `/src/app/globals.css`. Vite serves its compiled CSS before development hydration.
+2. Vite's production build emits the stylesheet with a content hash under `/assets`.
+3. `build/rari-styles.ts` attaches the emitted asset to the root layout in both Rari's route and component manifests. Rari then includes the link in server-rendered HTML and route navigation.
+4. The build fails if CSS was not emitted or the expected root manifests are missing. There is no manual CSS copying step.
 
-1. `src/app/layout.tsx` imports `./globals.module.css`.
-2. Global selectors are marked `:global(...)`, preserving every existing DOM class and the existing design.
-3. Rari emits `/assets/server/<hash>.css` and lists it in `dist/server/routes.json` for the root layout.
-4. `index.html` links the same stylesheet for Vite's development entry. Vite transforms it into a real CSS response and rewrites the link for production.
-5. No inline-style replacement, Tailwind installation, or redesign was introduced. CodeMirror's existing theme extension remains responsible for its editor-specific styles. The default Neutral editor theme uses neutral syntax tones, contrast and weight. Settings optionally select a separate code palette without changing the workspace CSS.
+This adapter is needed for the pinned Rari **0.15.17**: its independent server-component bundler rejects direct plain-CSS imports and its CSS Module extractor bypasses Vite's Tailwind transformation. Importing `globals.css` into a client component also fails that component's independent SSR build. Keeping the CSS entry in Vite and explicitly registering its output avoids these paths. Check the adapter and browser tests when upgrading Rari.
 
-Use **localhost:5173** for `npm run dev`. Port 3000 is an internal backend during development, not the Vite application URL. After `npm run build`, `npm start` serves the complete production application on **localhost:3000**.
+## Regression coverage
 
-`tests/e2e/styles.spec.ts` verifies successful CSS responses with `text/css`, no browser runtime errors, sans-serif typography, flex toolbar/application, a three-pane grid with measured pane positions, styled buttons, a real WASM-decompiled method, editor gutters/monospace font, and both theme backgrounds. It captures start, dark-method and light-method screenshots. The same test runs against development and production; `playwright.production.config.ts` starts the real production server. Production browser testing additionally caught and fixed the missing `wasm-unsafe-eval` CSP permission.
+`tests/e2e/styles.spec.ts` inspects the delivered HTML for stylesheet links and fetches them with the browser's `Accept: text/css` header. That header matters in Vite development, where CSS module requests with a generic Accept header can return a JavaScript wrapper. Actual browser CSS responses must succeed with a CSS content type.
 
-Run `npm run test:e2e` and, after building, `npm run test:production`. Screenshots are written under `test-results/` by Playwright. A successful HTML response alone is intentionally insufficient.
+The tests also verify computed typography, Tailwind classes, pane geometry, the single top menu, code highlighting and dark/light appearance. IL editing is available only in the IL view. Project export tests check centered dialogs and reachable footer actions on shorter viewports. Both development and production configurations capture the real rendered interface and exercise the real WASM parser.
+
+Use **localhost:5173** for `npm run dev`; port 3000 is its internal Rari backend. After building, `npm start` serves production on **localhost:3000**. The production CSP permits WASM compilation. Run `npm run test:e2e` and `npm run test:production`; HTML rendering alone is not sufficient validation.
+
+References: [Tailwind with Vite](https://tailwindcss.com/docs/installation/using-vite), [Tailwind source detection](https://tailwindcss.com/docs/detecting-classes-in-source-files), [Rari project conventions](https://rari.build/docs/getting-started).

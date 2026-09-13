@@ -11,6 +11,7 @@ pub const MAX_FILE: usize = 64 * 1024 * 1024;
 pub struct Image {
     pub machine: u16,
     pub pe64: bool,
+    pub subsystem: u16,
     pub cli_flags: u32,
     pub entry_point: u32,
     pub metadata: Range<usize>,
@@ -75,6 +76,7 @@ impl Image {
         let mut image = Self {
             machine: h.coff_header.machine,
             pe64: o.standard_fields.magic == 0x20b,
+            subsystem: o.windows_fields.subsystem,
             cli_flags: 0,
             entry_point: 0,
             metadata: 0..0,

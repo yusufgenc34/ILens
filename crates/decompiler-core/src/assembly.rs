@@ -465,7 +465,7 @@ impl Assembly {
         let rendered = match ty {
             Type::Primitive(n) => n.clone(),
             Type::Unknown => "dynamic /* unknown stack type */".to_owned(),
-            Type::Named(t) => self.type_name_depth(*t, depth + 1)?,
+            Type::Named(t) | Type::ValueType(t) => self.type_name_depth(*t, depth + 1)?,
             Type::Generic { method, index } => {
                 let owner = if *method {
                     context
@@ -478,7 +478,8 @@ impl Assembly {
                     .map(|n| identifier(n))
                     .unwrap_or_else(|| format!("{}{}", if *method { "M" } else { "T" }, index))
             }
-            Type::Array(t, rank) => format!(
+            Type::MultiArray(t, 1) => format!("{}[*]", inner(t)?),
+            Type::Array(t, rank) | Type::MultiArray(t, rank) => format!(
                 "{}[{}]",
                 inner(t)?,
                 ",".repeat(rank.saturating_sub(1) as usize)
@@ -1150,6 +1151,7 @@ fn substitute(t: &Type, types: &[Type], methods: &[Type]) -> Type {
             .cloned()
             .unwrap_or_else(|| t.clone()),
         Type::Array(t, n) => Type::Array(Box::new(substitute(t, types, methods)), *n),
+        Type::MultiArray(t, n) => Type::MultiArray(Box::new(substitute(t, types, methods)), *n),
         Type::ByRef(t) => Type::ByRef(Box::new(substitute(t, types, methods))),
         Type::GenericInstance { base, args } => Type::GenericInstance {
             base: base.clone(),

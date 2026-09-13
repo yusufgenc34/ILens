@@ -4,7 +4,7 @@
 
 `.nvmrc` pins Node.js 22.23.1. `rust-toolchain.toml` pins Rust 1.92.0, rustfmt, Clippy, and `wasm32-unknown-unknown`. Cargo and npm lockfiles are committed. On a native machine, install rustup and normal compiler/linker tools for your OS before running `npm ci` and `npm run dev`.
 
-`.npmrc` preserves the tested peer-resolution behavior for the pinned Rari dependency graph. Use `npm ci` for a clean installation. The .NET 10 SDK is optional and only needed for fixture regeneration.
+`.npmrc` preserves the tested peer-resolution behavior for the pinned Rari dependency graph. Use `npm ci` for a clean installation. The .NET 10 SDK is needed for fixture regeneration and browser export verification. Python 3 is used by ZIP conformance tests. Run `dotnet tool restore` to install the pinned test-only ILVerify tool before browser tests. Running the application itself does not require .NET.
 
 Only two helper scripts are required:
 
@@ -19,9 +19,9 @@ One-time generators and the redundant Rari launcher were removed. npm invokes Ra
 
 `npm run dev` serves Vite on port 5173, with Rari's internal backend on 3000. Open 5173 during development. `npm start` serves the production application on 3000. Do not run development and production servers together on these default ports.
 
-Restart `npm run dev` after changing Rust or worker code. The build step regenerates bindings before Rari starts. Worker source is excluded from Rari component HMR to prevent it being registered as a server component.
+Restart `npm run dev` after changing Rust or worker code. The build step regenerates bindings before Rari starts. Worker source is excluded from Rari component HMR. The worker's export-job helpers explicitly use `use client` and expose lowercase factories, so development mode does not replace it with a server-component stub. Do not mark the worker entry as a client component: Rari would attempt to build it for SSR, where its WASM asset URL is not supported. Shared protocol types stay in an acyclic module graph because Rari 0.15.17's component importer analysis does not handle cycles safely.
 
-Global styling is imported as a CSS module by the root layout, using global selectors. The Vite development HTML also links that stylesheet. See [CSS integration](css-loading.md) before changing either entry point. CodeMirror themes use its supported theme API. The production CSP permits browser WASM compilation.
+Tailwind CSS 4.3.3 compiles through `@tailwindcss/vite`. `index.html` links the global entry in development; `build/rari-styles.ts` attaches the hashed output to Rari’s root manifests for production. Component utility classes and shared recipes in `src/lib/ui.ts` provide layout/control styles. The old CSS Module has been removed. See [CSS integration](css-loading.md) before changing either entry point. CodeMirror themes use its supported theme API. The production CSP permits browser WASM compilation.
 
 ## Codespaces and Dev Containers
 
@@ -29,7 +29,7 @@ Global styling is imported as a CSS module by the root layout, using global sele
 
 The development server binds all interfaces inside the container through `ILENS_DEV_HOST`. In Codespaces, Vite allows the exact hostname derived from `CODESPACE_NAME` and `GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN`. Local development keeps a loopback binding. RSC and asset requests use the same browser origin; there is no need to expose the internal Rari port separately.
 
-Keep forwarded ports private while reviewing the application. The .NET SDK and Chromium are not included in container setup; install them only if you need to regenerate fixtures or run browser tests. Chromium can be installed with `npx playwright install --with-deps chromium`.
+Keep forwarded ports private while reviewing the application. The .NET SDK and Chromium are not included in container setup; install .NET 10 for fixture/export verification, run `dotnet tool restore`, and install Chromium for browser tests. Chromium can be installed with `npx playwright install --with-deps chromium`.
 
 References: [GitHub's Node.js container setup](https://docs.github.com/en/codespaces/setting-up-your-project-for-codespaces/adding-a-dev-container-configuration/setting-up-your-nodejs-project-for-codespaces), [Codespaces environment variables](https://docs.github.com/en/codespaces/developing-in-a-codespace/default-environment-variables-for-your-codespace), [port forwarding](https://docs.github.com/en/codespaces/developing-in-a-codespace/forwarding-ports-in-your-codespace).
 

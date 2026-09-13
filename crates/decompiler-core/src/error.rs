@@ -14,6 +14,9 @@ pub enum ErrorCode {
     DecompilerLimitation,
     SizeLimit,
     Cancelled,
+    InvalidEdit,
+    UnsupportedEdit,
+    ExportError,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Error {
@@ -34,6 +37,9 @@ impl Error {
             ErrorCode::DecompilerLimitation => "This method requires a decompilation feature that is not implemented yet. The IL view is available.",
             ErrorCode::SizeLimit => "This input exceeds the browser analysis limits.",
             ErrorCode::Cancelled => "The operation was cancelled.",
+            ErrorCode::InvalidEdit => "The edited IL did not pass validation.",
+            ErrorCode::UnsupportedEdit => "This method or assembly is outside the supported editing scope.",
+            ErrorCode::ExportError => "The export could not be completed.",
         }.to_owned();
         Self {
             code,

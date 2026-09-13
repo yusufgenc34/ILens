@@ -12,7 +12,7 @@ Rust Session → Assembly → validated PE/CLI metadata
                           ↓
 CIL → basic blocks/CFG → evaluation stack analysis → typed IR
                           ↓
-                 AST → simplification → C# emitter
+                 IR simplification → AST → C# emitter
                           └────────────→ independent CIL emitter
 ```
 
@@ -39,3 +39,23 @@ close(id)                        dispose()
 Initialization happens once per worker. Initial load indexes metadata, without decoding/decompiling every method. A method token requests only its body. A 32-entry/32-MiB-accounted LRU retains recent method analyses. Dependency definitions resolve against the session's loaded assembly identities. Large integer CIL operands serialize as decimal strings to avoid JavaScript number precision loss.
 
 Cancellation removes queued requests and discards stale responses. A synchronous WASM operation cannot process a cancellation message midway through its execution. **Stop analysis** or the 30-second watchdog terminates the worker, clears the workspace, and releases all its memory. Closing the workspace does the same; `close(id)` and `dispose()` are also available to API clients. Rust deallocation makes memory reusable, but WASM linear memory does not shrink until the worker terminates.
+
+### Export and edit operations
+
+Source export adds a Rust declaration/member model and AST-derived method bodies, with a worker-side compilation-unit/archive emitter. It does not read the truncated inspection preview. Jobs process one unit at a time against a workspace revision. The Rust encoder, strict write verifier and PE writer are separate from inspection analysis. Method edits live in immutable-base overlays, and all workspace mutations invalidate cached analysis conservatively.
+
+The typed RPC contract also exposes `beginProjectExport`, `beginExport`, `stepExport`, `finishExport`, `cancelExport`, `openMethodEdit`, `applyMethodEdit`, `discardMethodEdit`, `getEdits`, `getOpcodes` and `exportModifiedAssembly`. The client queues requests before submission; each submitted operation receives its own execution deadline. See [source export and editing](export-edit.md) for ownership, validation, compatibility and output limits.
+
+Project export coordinates per-assembly jobs, generates namespace/type files and a solution, and resolves selected dependencies to project references. Reports and unsupported IL are isolated under `_ilens`. Source saving and binary saving remain distinct operations. The UI uses Tailwind utilities; the [Rari style adapter](css-loading.md) registers Vite’s compiled CSS with the root route.
+
+### Source readability and evaluation order
+
+Stack lifting deliberately creates a temporary for every pushed value. `transform` removes single-use constant/copy temporaries inside a block after checking local writes and address escapes. An effectful expression moves only into the immediately following use, and only when that use precedes other calls, heap reads and potentially throwing expressions. Conditional edge values do not make an eagerly evaluated call conditional. Duplicated effectful values retain a shared temporary.
+
+The typed IR includes an array-initializer expression. Up to 128 consecutive stores can be folded when they fill a fresh vector in ascending index order and the array has exactly one following use in the same block. No alias, address escape, other write or catch-handler read may observe the partly initialized array. Allocation and element evaluation retain their order, following [C# array-creation semantics](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/language-specification/expressions#128175-array-creation-expressions). Unknown array receivers retain effectful RHS temporaries unless a fresh allocation and an in-range constant index are proven. Arrays that fail these checks remain explicit assignments.
+
+Simple exception regions omit unreferenced labels and jumps that match C# lexical fallthrough, including continuation after sibling handlers. Branch targets needed by other exits remain visible. Local declarations, shared stack slots and nontrivial control flow can still require synthetic names or gotos.
+
+Property syntax currently requires `MethodSemantics` in the analyzed assembly. External accessor references can remain `get_Text()`/`set_Text(...)`; loading a dependency enables navigation but does not yet supply its accessor semantics to the C# emitter. A method merely named `get_...` is never assumed to be a property. PDB names, VB-specific idioms, closure/state-machine reconstruction and broader local lifetime analysis remain separate work.
+
+`samples/Readability` covers repeated property reads, a twelve-element message array, accessor-looking ordinary methods and an array observed by a catch handler. Rust regressions also cover mutation, address escapes, call ordering, allocation ordering and conditional edges. Browser tests inspect actual worker/WASM output and compile a saved, repository-owned reconstructed method for an independent C# syntax check; no analyzed assembly is executed.

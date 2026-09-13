@@ -5,9 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#0a0a0a" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <!-- Vite's development entry needs the stylesheet before RSC hydration.
-       RootLayout also imports it for Rari's server-rendered routes. -->
-  <link rel="stylesheet" href="/src/app/globals.module.css" />
+  <!-- Tailwind's global entry; rariStyles also links its compiled asset to SSR. -->
+  <link rel="stylesheet" href="/src/app/globals.css" />
 </head>
 <body><div id="root"></div></body>
 </html>

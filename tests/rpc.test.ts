@@ -48,3 +48,16 @@ describe('Worker RPC lifecycle', () => {
     const good = client.call('getTree', {assembly: 2}); worker.respond({id: 2, kind: 'success', result: []}); expect(await good).toEqual([]); client.terminate()
   })
 })
+it('queued calls get their own execution deadline', async () => {
+  vi.useFakeTimers(); const worker = new FakeWorker(); const client = new DecompilerClient(worker)
+  const first = client.call('getTree', {assembly: 1}); const second = client.call('getTree', {assembly: 2})
+  expect(worker.sent).toHaveLength(1)
+  await vi.advanceTimersByTimeAsync(25_000); worker.respond({id: 1, kind: 'success', result: []}); await first
+  expect(worker.sent).toHaveLength(2); await vi.advanceTimersByTimeAsync(25_000); expect(worker.terminated).toBe(false)
+  worker.respond({id: 2, kind: 'success', result: []}); await second; client.terminate()
+})
+it('cancelling an active call cannot disable the hard watchdog', async () => {
+  vi.useFakeTimers(); const worker = new FakeWorker(); const client = new DecompilerClient(worker); const controller = new AbortController()
+  const pending = client.call('getTree', {assembly: 1}, {signal: controller.signal}); const rejected = expect(pending).rejects.toMatchObject({code: 'cancelled'})
+  controller.abort(); await rejected; await vi.advanceTimersByTimeAsync(30_001); expect(worker.terminated).toBe(true)
+})

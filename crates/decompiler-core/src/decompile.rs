@@ -19,6 +19,8 @@ pub struct MethodAnalysis {
     pub body: Option<MethodBody>,
     pub cfg: Option<ControlFlowGraph>,
     pub stack: Option<analysis::StackAnalysis>,
+    pub source_body: Option<String>,
+    pub source_declaration: Option<String>,
 }
 pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
     let body = a.body(token)?;
@@ -31,6 +33,8 @@ pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
         body: body.clone(),
         cfg: None,
         stack: None,
+        source_body: None,
+        source_declaration: None,
     };
     let Some(body) = body else {
         result.csharp = format!(
@@ -66,7 +70,14 @@ pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
         let mut ir = ir::lift(a, token, &body, &cfg, stack)?;
         transform::simplify(&mut ir);
         let ast = ast::structure(&ir, &cfg);
-        emit::csharp(a, token, &body, &ir, &cfg, &ast)
+        let source = emit::method_source(a, token, &body, &ir, &cfg, &ast)?;
+        let code = format!(
+            "// Reconstructed from CIL and metadata; local names are synthetic.\n// Integer arithmetic follows unchecked CIL unless checked is explicit.\n{}\n{}",
+            source.declaration, source.body
+        );
+        result.source_body = Some(source.body);
+        result.source_declaration = Some(source.declaration);
+        Ok(code)
     })();
     match reconstructed {
         Ok(code) => {
