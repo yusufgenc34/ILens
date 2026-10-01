@@ -93,3 +93,77 @@ fn tree_labels_disambiguate_overloads_and_preserve_accessor_ownership() {
         method.display_name
     );
 }
+
+#[test]
+fn understated_directory_count_recovers_only_the_bounded_cli_slot_read_only() {
+    let original = Assembly::load(EXE.to_vec()).unwrap();
+    let pe = u32_at(EXE, 60);
+    for count in [0u32, 11, 14] {
+        let mut bytes = EXE.to_vec();
+        bytes[pe + 24 + 92..pe + 24 + 96].copy_from_slice(&count.to_le_bytes());
+        let a = Assembly::load(bytes).unwrap();
+        assert!(a.image.recovered_cli_directory);
+        assert_eq!(a.info.identity, original.info.identity);
+        let token = a.image.entry_point;
+        assert_eq!(
+            decompile::decompile(&a, token).unwrap().il,
+            decompile::decompile(&original, token).unwrap().il
+        );
+        assert!(
+            a.info
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("directory count omits"))
+        );
+        assert_eq!(
+            edit::supported_body(&a, token).unwrap_err().code,
+            ErrorCode::UnsupportedEdit
+        );
+        assert_eq!(
+            pe_write::capability(&a).unwrap_err().code,
+            ErrorCode::UnsupportedEdit
+        );
+    }
+    assert!(!original.image.recovered_cli_directory);
+}
+#[test]
+fn undeclared_cli_recovery_rejects_truncated_slots_invalid_ranges_and_metadata() {
+    let pe = u32_at(EXE, 60);
+    let mut base = EXE.to_vec();
+    base[pe + 24 + 92..pe + 24 + 96].copy_from_slice(&11u32.to_le_bytes());
+    let slot = pe + 24 + 96 + 14 * 8;
+    for (offset, value) in [(slot, u32::MAX), (slot + 4, u32::MAX), (slot + 4, 1)] {
+        let mut bytes = base.clone();
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        assert!(Assembly::load(bytes).is_err());
+    }
+    let mut bytes = base.clone();
+    bytes[pe + 20..pe + 22].copy_from_slice(&200u16.to_le_bytes());
+    assert!(Assembly::load(bytes).is_err());
+    let original = Assembly::load(EXE.to_vec()).unwrap();
+    let mut bytes = base;
+    bytes[original.image.metadata.start] = 0;
+    assert_eq!(
+        Assembly::load(bytes).err().unwrap().code,
+        ErrorCode::InvalidClr
+    );
+}
+#[test]
+fn native_markers_are_passive_diagnostics_and_do_not_override_valid_managed_input() {
+    let mut bytes = EXE.to_vec();
+    let pe = u32_at(&bytes, 60);
+    let slot = pe + 24 + 96 + 14 * 8;
+    let markers = b"System.SysUtils\0Vcl.Forms\0TForm\0";
+    bytes[0x40..0x40 + markers.len()].copy_from_slice(markers);
+    assert!(Assembly::load(bytes.clone()).is_ok());
+    bytes[slot..slot + 8].fill(0);
+    let error = Assembly::load(bytes.clone()).err().unwrap();
+    assert_eq!(error.code, ErrorCode::UnsupportedNative);
+    assert!(error.message.contains("VCL markers"));
+    assert!(error.detail.contains("heuristic"));
+    bytes[0x40] = 0; // A single generic class name is not compiler attribution.
+    assert_eq!(
+        Assembly::load(bytes).err().unwrap().code,
+        ErrorCode::NotManaged
+    );
+}

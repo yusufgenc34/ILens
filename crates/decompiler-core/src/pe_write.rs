@@ -45,6 +45,11 @@ fn put16(bytes: &mut [u8], p: usize, value: u16) -> Result<()> {
     Ok(())
 }
 fn preflight(a: &Assembly) -> Result<Layout> {
+    if a.image.recovered_cli_directory {
+        return Err(unsupported(
+            "Assemblies with a recovered CLR directory are read-only; their nonstandard PE layout is not supported by the writer.",
+        ));
+    }
     if a.image.ready_to_run {
         return Err(unsupported(
             "ReadyToRun images are read-only. Rewriting their CIL would invalidate precompiled native code.",

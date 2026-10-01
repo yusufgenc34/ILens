@@ -130,7 +130,8 @@ export default function DecompilerApp() {
     let firstId: number | null = null
     let initialSelectionPublished = false
     const loaded: WorkspaceAssembly[] = []
-    let companions = 0
+    let companions = 0, rejectedInputs = 0
+    const rejectInput = (error:unknown) => {rejectedInputs++; report(error)}
     const processed = new Set<File>()
     const controller = new AbortController(); dependencyRequest.current = controller
     const core = getClient()
@@ -162,8 +163,8 @@ export default function DecompilerApp() {
       for (const file of files) {
         if (processed.has(file)) continue
         if (version !== generation.current) return
-        if (!/\.(dll|exe)$/i.test(file.name)) {report({code: 'invalid_pe', message: `${file.name} is not a DLL or EXE.`, detail: 'Choose a managed PE assembly.'}); continue}
-        if (file.size > 64 * 1024 * 1024) {report({code: 'size_limit', message: `${file.name} exceeds 64 MiB.`, detail: 'The file was rejected before reading it into memory.'}); continue}
+        if (!/\.(dll|exe)$/i.test(file.name)) {rejectInput({code: 'invalid_pe', message: `${file.name} is not a DLL or EXE.`, detail: 'Choose a managed PE assembly.'}); continue}
+        if (file.size > 64 * 1024 * 1024) {rejectInput({code: 'size_limit', message: `${file.name} exceeds 64 MiB.`, detail: 'The file was rejected before reading it into memory.'}); continue}
         const started = performance.now()
         setStatus(`Reading ${file.name}…`)
         try {
@@ -181,7 +182,7 @@ export default function DecompilerApp() {
               const companion = companionAssembly(file,files,dependencyFolder.current)
               if (!companion) {
                 pendingExecutables.current = [...pendingExecutables.current.filter(f=>f.name!==file.name),file].slice(-64)
-                report({...failure,message:`${file.name} has no CLR metadata. Open ${file.name.replace(/\.exe$/i,'.dll')} or select its application folder.`,detail:`${failure.detail} Native/NativeAOT executables cannot be decompiled to CIL; single-file bundles need their original managed DLLs.`})
+                rejectInput({...failure,message:`${file.name} has no CLR header for .NET decompilation. If it is a .NET launcher, open its managed DLL or select its application folder.`,detail:`${failure.detail} Native/NativeAOT executables cannot be decompiled to CIL; single-file bundles need their original managed DLLs.`})
                 continue
               }
               if(companion.size > 64 * 1024 * 1024) throw {code:'size_limit',message:`${companion.name} exceeds 64 MiB.`,detail:'Companion DLL rejected before reading it.'}
@@ -191,8 +192,8 @@ export default function DecompilerApp() {
               await retain(result,companion.name,started)
               processed.add(companion); companions++
               pendingExecutables.current = pendingExecutables.current.filter(f=>f.name!==file.name)
-            } catch (companionError) {report(companionError)}
-          } else report({...failure,message:`${file.name}: ${failure.message}`})
+            } catch (companionError) {rejectInput(companionError)}
+          } else rejectInput({...failure,message:`${file.name}: ${failure.message}`})
         }
       }
       if (version !== generation.current) return
@@ -207,6 +208,7 @@ export default function DecompilerApp() {
       if (version !== generation.current) return
       if (resolution.failures.length) report({code:'dependency_download',message:'Some .NET dependencies could not be resolved. Your assembly is still available.',detail:resolution.failures.map(e=>e.message).join('\n')})
       if (resolution.limited) report({code:'size_limit',message:'Automatic dependency resolution reached its limit. Loaded assemblies are still available.',detail:'At most 64 framework resolutions are attempted per load. Add remaining dependencies locally.'})
+      if (files.length && firstId === null && rejectedInputs) {setStatus(`No assembly was opened · ${rejectedInputs} rejected ${rejectedInputs === 1 ? 'file' : 'files'}. See diagnostics.`); return}
       setStatus(`${loaded.length} assemblies added${companions ? ` · ${companions} companion DLLs opened` : ''} · ${resolution.downloaded} downloaded · ${unavailable ?? 0} unresolved references${resolution.rejected ? ` · ${resolution.rejected} invalid files skipped` : ''}`)
     } catch (error) {
       if (version === generation.current) {

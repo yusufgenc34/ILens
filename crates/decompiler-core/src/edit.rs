@@ -81,6 +81,11 @@ fn access(owner: u32, caller: u32, flags: u16) -> Result<()> {
     Ok(())
 }
 pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
+    if a.image.recovered_cli_directory {
+        return Err(unsupported(
+            "Assemblies with a recovered CLR directory are read-only; their nonstandard PE layout is not supported by the writer.",
+        ));
+    }
     if a.image.ready_to_run {
         return Err(unsupported(
             "ReadyToRun images are read-only; their precompiled native code cannot be updated by the IL writer.",

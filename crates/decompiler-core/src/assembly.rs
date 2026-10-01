@@ -194,6 +194,9 @@ impl Assembly {
         if a.image.ready_to_run {
             a.info.diagnostics.push("ReadyToRun image: inspecting preserved metadata and CIL only. Native machine code is not decompiled, and IL editing/binary rewriting is disabled.".to_owned());
         }
+        if a.image.recovered_cli_directory {
+            a.info.diagnostics.push("The PE directory count omits the CLR entry. Its physical header slot and metadata were validated for read-only inspection; the original file is unchanged. IL editing and binary rewriting are disabled for this nonstandard layout.".to_owned());
+        }
         Ok(a)
     }
     pub fn metadata(&self) -> &clrmeta::Metadata {

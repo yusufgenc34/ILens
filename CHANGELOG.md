@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed managed EXEs being rejected when their PE directory count omits a physically present CLR entry. Validated recovery supports read-only metadata and IL inspection.
+- Improved native EXE diagnostics, including passive Delphi/C++Builder VCL markers, without assuming every native executable has a companion DLL.
 - Reworked Explorer around assembly/module/namespace/type/member nodes, with direct member signatures, nested property/event accessors, and keyboard navigation.
 - Added read-only inspection of preserved CIL in ReadyToRun images and automatic local companion-DLL opening for EXEs without CLR metadata. Unsupported native formats now explain the next step.
 - Added automatic dependency resolution from a user-selected folder.

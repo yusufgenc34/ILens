@@ -28,7 +28,7 @@ impl Error {
     pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
         let message = match code {
             ErrorCode::InvalidPe => "This file is not a valid Windows PE assembly.",
-            ErrorCode::NotManaged => "This EXE has no CLR metadata. For a .NET launcher, open its companion DLL or select the application folder. NativeAOT and native executables have no CIL to decompile.",
+            ErrorCode::NotManaged => "This PE file has no CLR header for .NET decompilation. It may be native code, a launcher, or a packed application. Only a .NET launcher may have a companion managed DLL.",
             ErrorCode::InvalidClr => "The CLR header is damaged or incomplete.",
             ErrorCode::CorruptMetadata => "The assembly metadata is damaged or contains invalid references.",
             ErrorCode::UnsupportedMetadata => "This metadata format is not supported yet.",

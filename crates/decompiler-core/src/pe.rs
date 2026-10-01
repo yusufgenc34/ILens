@@ -3,10 +3,28 @@ use crate::{
     error::{Error, ErrorCode, Result},
     reader::*,
 };
-use goblin::pe::{header::Header, section_table::SectionTable};
+use goblin::pe::{data_directories::DataDirectory, header::Header, section_table::SectionTable};
 use serde::Serialize;
 use std::ops::Range;
 pub const MAX_FILE: usize = 64 * 1024 * 1024;
+fn no_cli_error(bytes: &[u8], detail: &str) -> Error {
+    // Passive hints only, bounded independently of the input limit. These
+    // strings are not proof of compiler provenance. Never infer a missing DLL
+    // from a native executable's filename or execute a stub to unpack it.
+    let prefix = &bytes[..bytes.len().min(4 * 1024 * 1024)];
+    let markers: [&[u8]; 3] = [b"System.SysUtils", b"Vcl.Forms", b"TForm"];
+    if markers
+        .iter()
+        .all(|marker| prefix.windows(marker.len()).any(|window| window == *marker))
+    {
+        return Error {
+            code: ErrorCode::UnsupportedNative,
+            message: "Native Windows executable with Delphi/C++Builder VCL markers. It has no CLR metadata for .NET decompilation.".to_owned(),
+            detail: format!("{detail}. Found System.SysUtils, Vcl.Forms and TForm runtime markers. Compiler attribution is heuristic. ILens reads managed metadata and CIL, not native machine code; adding .NET dependencies will not make this executable decompilable. No code was executed."),
+        };
+    }
+    Error::new(ErrorCode::NotManaged, detail)
+}
 #[derive(Debug, Serialize)]
 pub struct Image {
     pub machine: u16,
@@ -15,6 +33,7 @@ pub struct Image {
     pub cli_flags: u32,
     pub entry_point: u32,
     pub ready_to_run: bool,
+    pub recovered_cli_directory: bool,
     pub metadata: Range<usize>,
     pub resources_rva: u32,
     pub resources_size: u32,
@@ -54,10 +73,7 @@ impl Image {
         let o = h
             .optional_header
             .ok_or_else(|| Error::new(ErrorCode::InvalidPe, "Missing optional header"))?;
-        let clr = o
-            .data_directories
-            .get_clr_runtime_header()
-            .ok_or_else(|| Error::new(ErrorCode::NotManaged, "No CLI directory"))?;
+        let clr = o.data_directories.get_clr_runtime_header();
         let mut p = offset + 24 + optional_size;
         slice(bytes, p, h.coff_header.number_of_sections as usize * 40)?;
         let mut sections = Vec::new();
@@ -81,14 +97,47 @@ impl Image {
             cli_flags: 0,
             entry_point: 0,
             ready_to_run: false,
+            recovered_cli_directory: false,
             metadata: 0..0,
             resources_rva: 0,
             resources_size: 0,
             sections,
             size_of_headers: o.windows_fields.size_of_headers,
         };
+        let clr = if let Some(clr) = clr {
+            *clr
+        } else {
+            // Some protected managed images understate NumberOfRvaAndSizes.
+            // Read only the standard CLI slot, and only if SizeOfOptionalHeader
+            // physically includes it. Do not scan for or invent metadata RVAs.
+            let directories = match o.standard_fields.magic {
+                0x10b => 96,
+                0x20b => 112,
+                _ => {
+                    return Err(Error::new(
+                        ErrorCode::InvalidPe,
+                        "Unknown optional header magic",
+                    ));
+                }
+            };
+            if o.windows_fields.number_of_rva_and_sizes >= 15
+                || optional_size < directories + 15 * 8
+            {
+                return Err(no_cli_error(bytes, "PE header has no CLI directory"));
+            }
+            let slot = offset + 24 + directories + 14 * 8;
+            let candidate = DataDirectory {
+                virtual_address: u32_at(bytes, slot)?,
+                size: u32_at(bytes, slot + 4)?,
+            };
+            if candidate.virtual_address == 0 || candidate.size == 0 {
+                return Err(no_cli_error(bytes, "PE header has no CLI directory"));
+            }
+            image.recovered_cli_directory = true;
+            candidate
+        };
         if clr.virtual_address == 0 {
-            return Err(Error::new(ErrorCode::NotManaged, "Zero CLI RVA"));
+            return Err(no_cli_error(bytes, "PE CLI directory RVA is zero"));
         }
         if clr.size < 72 {
             return Err(Error::new(
@@ -96,11 +145,16 @@ impl Image {
                 "CLI directory smaller than 72 bytes",
             ));
         }
+        if image.recovered_cli_directory {
+            image
+                .range(bytes, clr.virtual_address, clr.size as usize)
+                .map_err(|e| Error::new(ErrorCode::InvalidClr, e.detail))?;
+        }
         let cp = image
             .range(bytes, clr.virtual_address, 72)
             .map_err(|e| Error::new(ErrorCode::InvalidClr, e.detail))?;
         let c = &bytes[cp];
-        if u32_at(c, 0)? < 72 {
+        if u32_at(c, 0)? < 72 || (image.recovered_cli_directory && u32_at(c, 0)? > clr.size) {
             return Err(Error::new(ErrorCode::InvalidClr, "Invalid CLI header size"));
         }
         image.cli_flags = u32_at(c, 16)?;
@@ -158,6 +212,16 @@ impl Image {
             return Err(Error::limit("Metadata exceeds 32 MiB"));
         }
         image.metadata = image.range(bytes, u32_at(c, 8)?, md_size)?;
+        if image.recovered_cli_directory
+            && (md_size < 4
+                || bytes.get(image.metadata.start..image.metadata.start.saturating_add(4))
+                    != Some(b"BSJB"))
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidClr,
+                "Undeclared CLI directory does not point to a CLR metadata root",
+            ));
+        }
         image.resources_rva = u32_at(c, 24)?;
         image.resources_size = u32_at(c, 28)?;
         if image.resources_size > 0 {
