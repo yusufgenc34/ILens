@@ -39,6 +39,7 @@ pub enum ExprKind {
         args: Vec<Expr>,
         generic_args: Vec<Type>,
         virtual_call: bool,
+        accessor: Option<crate::resolution::Accessor>,
     },
     New {
         owner: u32,
@@ -385,6 +386,7 @@ pub fn lift(
                                 args: values,
                                 generic_args: called.generic_args,
                                 virtual_call: op == 0x6f,
+                                accessor: None,
                             },
                         };
                         if value.ty.is_void() {

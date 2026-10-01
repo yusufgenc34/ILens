@@ -4,6 +4,8 @@ import {createProjectExportJob} from './project-export-job'
 import init, { Decompiler } from '../wasm/decompiler'
 import wasmUrl from '../wasm/decompiler_bg.wasm?url'
 import { diagnostic, type Request, type Response, type WorkerMessage } from '../lib/types'
+import type {AssemblyInfo, Overview, Reference, Loaded} from '../lib/types'
+import {createFrameworkResolver} from './framework-resolver'
 const scope = self as unknown as DedicatedWorkerGlobalScope
 let engine: Decompiler | undefined
 let initialization: Promise<void> | undefined
@@ -12,6 +14,9 @@ let processing = false
 let exportJob: ReturnType<typeof createExportJob> | ReturnType<typeof createProjectExportJob> | undefined
 let nextJob = 0
 let exportRequest = 0
+const resolveFramework = createFrameworkResolver()
+const frameworkContexts = new Map<number,AssemblyInfo>()
+const downloads = new Map<number,AbortController>()
 function cancelExport() {exportJob?.cancel(); exportJob = undefined}
 const cancelled = new Set<number>()
 const send = (message: Response, transfer: Transferable[] = []) => scope.postMessage(message, transfer)
@@ -21,9 +26,23 @@ async function initialize() {
   if (!engine) throw new Error('WASM initialization did not produce an engine.')
   return engine
 }
-function dispatch(core: Decompiler, request: Request): unknown {
-  if (['load', 'close', 'dispose', 'applyMethodEdit', 'discardMethodEdit'].includes(request.op)) cancelExport()
+async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
+  if (['load', 'loadDependency', 'close', 'dispose', 'applyMethodEdit', 'discardMethodEdit'].includes(request.op)) cancelExport()
   switch (request.op) {
+    case 'resolveFrameworkReference': {
+      const info=core.get_assembly_info(request.assembly) as Overview
+      const reference=(core.get_references(request.assembly) as Reference[]).find(r=>r.token===request.token)
+      if (!reference) throw new Error('Choose an assembly reference to resolve.')
+      const controller=new AbortController(); downloads.set(request.id,controller)
+      const framework=frameworkContexts.get(request.assembly) ?? info.info
+      try {return await resolveFramework(framework,reference.identity,controller.signal,(bytes,identity)=>{
+        cancelExport()
+        const loaded=core.load_reference_dependency(bytes,JSON.stringify(identity)) as Loaded | null
+        if (loaded && !frameworkContexts.has(loaded.id)) frameworkContexts.set(loaded.id,framework)
+        return loaded
+      },message=>send({id:request.id,kind:'progress',message}))}
+      finally {downloads.delete(request.id)}
+    }
     case 'beginProjectExport': exportRequest = request.id; cancelExport(); exportJob = createProjectExportJob(core, ++nextJob, request.options); return exportJob.progress()
     case 'getEdits': return core.get_edits(request.assembly)
     case 'getOpcodes': return core.get_opcodes()
@@ -39,6 +58,10 @@ function dispatch(core: Decompiler, request: Request): unknown {
     }
     case 'cancelExport': if (exportJob?.id === request.job) cancelExport(); return null
     case 'load': if (request.buffer.byteLength > 64 * 1024 * 1024) throw {code: 'size_limit', message: 'Assemblies must be 64 MiB or smaller.', detail: 'Input size checked before copying into WASM.'}; return core.load_assembly(new Uint8Array(request.buffer))
+    case 'loadDependency': if (request.buffer.byteLength > 64 * 1024 * 1024) throw {code: 'size_limit', message: 'Dependency exceeds 64 MiB.', detail: 'Rejected before copying into WASM.'}; return core.load_dependency(new Uint8Array(request.buffer), JSON.stringify(request.identity))
+    case 'analyzeReferences': return core.analyze_references(request.assembly, request.token, request.source, request.cursor, request.outgoing)
+    case 'getResourcePreview': return core.resource_preview(request.assembly, request.token, request.entry)
+    case 'getResourceBytes': return {buffer:core.resource_bytes(request.assembly, request.token, request.entry).buffer}
     case 'getTree': return core.get_tree(request.assembly)
     case 'getInfo': return core.get_assembly_info(request.assembly)
     case 'getType': return core.get_type(request.assembly, request.token)
@@ -49,8 +72,8 @@ function dispatch(core: Decompiler, request: Request): unknown {
     case 'getStrings': return core.get_strings(request.assembly, request.query)
     case 'getReferences': return core.get_references(request.assembly)
     case 'getXrefs': return core.get_xrefs(request.assembly, request.token, request.cursor)
-    case 'close': core.close(request.assembly); return null
-    case 'dispose': core.dispose(); return null
+    case 'close': core.close(request.assembly); frameworkContexts.delete(request.assembly); return null
+    case 'dispose': core.dispose(); frameworkContexts.clear(); resolveFramework.clear(); return null
   }
 }
 async function drain() {
@@ -67,7 +90,7 @@ async function drain() {
         send({id: request.id, kind: 'progress', message: request.op === 'load' ? 'Validating PE headers and CLR metadata…' : request.op === 'decompileMethod' ? 'Analyzing control flow and reconstructing C#…' : 'Reading local assembly data…'})
         const core = await initialize()
         if (cancelled.delete(request.id)) continue
-        const result = dispatch(core, request)
+        const result = await dispatch(core, request)
         send({id: request.id, kind: 'success', result}, result && typeof result === 'object' && 'buffer' in result && result.buffer instanceof ArrayBuffer ? [result.buffer] : [])
       } catch (error) {
         if (error instanceof WebAssembly.RuntimeError) {
@@ -81,7 +104,7 @@ async function drain() {
   } finally { processing = false; cancelled.clear() }
 }
 scope.onmessage = ({data}: MessageEvent<WorkerMessage>) => {
-  if (data.op === 'cancel') { if (exportRequest === data.target) cancelExport(); queue = queue.filter(r => r.id !== data.target); cancelled.add(data.target); send({id: data.target, kind: 'error', error: {code: 'cancelled', message: 'Operation cancelled.', detail: 'Worker acknowledged cancellation.'}}); return }
+  if (data.op === 'cancel') { downloads.get(data.target)?.abort(); if (exportRequest === data.target) cancelExport(); queue = queue.filter(r => r.id !== data.target); cancelled.add(data.target); send({id: data.target, kind: 'error', error: {code: 'cancelled', message: 'Operation cancelled.', detail: 'Worker acknowledged cancellation.'}}); return }
   if (queue.length >= 128) { send({id: data.id, kind: 'error', error: {code: 'size_limit', message: 'Too many pending operations.', detail: 'Worker queue is limited to 128 requests.'}}); return }
   queue.push(data); void drain()
 }

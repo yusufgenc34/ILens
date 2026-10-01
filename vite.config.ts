@@ -10,7 +10,7 @@ const codespaceHost = process.env.CODESPACE_NAME && process.env.GITHUB_CODESPACE
 
 export default defineConfig({
   plugins: [tailwindcss(), rari({
-    csp: {scriptSrc: ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"], workerSrc: ["'self'"]},
+    csp: {scriptSrc: ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"], workerSrc: ["'self'"], connectSrc: ["'self'", "https://api.nuget.org"]},
     cacheControl: {routes: {'/': 'no-cache'}},
   }), rariStyles()],
   // Rari discovers client components dynamically; prebundle their dependencies
@@ -18,5 +18,5 @@ export default defineConfig({
   optimizeDeps: {include: ['react', 'react-dom', 'react-dom/client', 'lucide-react', '@codemirror/commands', '@codemirror/language', '@codemirror/legacy-modes/mode/clike', '@codemirror/search', '@codemirror/state', '@codemirror/view', '@lezer/highlight']},
   resolve: { alias: { '@': path.resolve(import.meta.dirname, 'src') } },
   worker: { format: 'es' },
-  server: { host: process.env.ILENS_DEV_HOST ?? '127.0.0.1', port: 5173, strictPort: true, allowedHosts: codespaceHost ? [codespaceHost] : undefined, watch: { ignored: ['**/tests/**', '**/*config.ts', '**/target/**', '**/crates/**', '**/samples/**', '**/*.d.ts', '**/src/workers/**'] } },
+  server: { host: process.env.ILENS_DEV_HOST ?? '127.0.0.1', port: 5173, strictPort: true, allowedHosts: codespaceHost ? [codespaceHost] : undefined, watch: { ignored: ['**/tests/**', '**/test-results/**', '**/playwright-report/**', '**/dist/**', '**/dist-pages/**', '**/tmp/**', '**/temp/**', '**/*config.ts', '**/target/**', '**/crates/**', '**/samples/**', '**/*.d.ts', '**/src/workers/**'] } },
 })

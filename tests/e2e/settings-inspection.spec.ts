@@ -1,4 +1,4 @@
-import {test, expect} from '@playwright/test'
+import {test, expect} from './test'
 import path from 'node:path'
 
 const fixture = (name: string) => path.resolve(`samples/fixtures/ILens.${name}.dll`)
@@ -80,8 +80,8 @@ test('framework versions and obfuscation warnings come from the selected assembl
   await expect(page.getByTestId('obfuscation-status')).toHaveText('No markers found')
   await expect(page.getByRole('region', {name: 'Assembly warnings'})).toHaveCount(0)
   await page.getByLabel('Add dependency files').setInputFiles([fixture('InspectionMarkers'), fixture('NoTarget')])
-  await expect(page.getByLabel('Primary assembly').locator('option')).toHaveCount(3)
-  await page.getByLabel('Primary assembly').selectOption({label: 'ILens.InspectionMarkers.dll'})
+  await expect(page.getByLabel('Loaded assemblies')).toHaveText('3')
+  await page.getByRole('treeitem',{name:'ILens.InspectionMarkers',exact:true}).click()
   const warnings = page.getByRole('region', {name: 'Assembly warnings'})
   await expect(warnings).toContainText('Obfuscation markers detected')
   await warnings.locator('summary').click()
@@ -103,7 +103,7 @@ test('framework versions and obfuscation warnings come from the selected assembl
   await page.screenshot({path: testInfo.outputPath('obfuscation-warnings-light.png'), fullPage: true})
   await warnings.getByRole('button', {name: /Inspect 0x/}).first().click()
   await expect(page.getByLabel('Metadata code viewer')).toContainText('ConfusedByAttribute')
-  await page.getByLabel('Primary assembly').selectOption({label: 'ILens.NoTarget.dll'})
+  await page.getByRole('treeitem',{name:'ILens.NoTarget',exact:true}).click()
   await expect(page.getByTestId('target-framework')).toHaveText('Not declared')
   await expect(page.getByTestId('obfuscation-status')).toHaveText('No markers found')
   await expect(warnings).toHaveCount(0)

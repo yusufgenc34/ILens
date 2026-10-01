@@ -196,6 +196,13 @@ fn constant(a: &Assembly, token: u32) -> Result<Option<String>> {
     Ok(Some(value))
 }
 pub fn member(a: &Assembly, token: u32) -> Result<MemberSource> {
+    member_with(a, token, &|t| crate::resolution::local_accessor(a, t))
+}
+pub fn member_with(
+    a: &Assembly,
+    token: u32,
+    accessor: &dyn Fn(u32) -> Option<crate::resolution::Accessor>,
+) -> Result<MemberSource> {
     a.validate_token(token)?;
     let node = a
         .nodes
@@ -225,7 +232,7 @@ pub fn member(a: &Assembly, token: u32) -> Result<MemberSource> {
     }
     match token >> 24 {
         6 => {
-            let result = decompile::decompile(a, token)?;
+            let result = decompile::decompile_with(a, token, accessor)?;
             if let Some(declaration) = result.source_declaration {
                 output.declaration = declaration;
             }

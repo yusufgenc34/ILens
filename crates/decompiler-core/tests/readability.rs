@@ -111,6 +111,7 @@ fn call(name: &str, args: Vec<Expr>) -> Expr {
             args,
             generic_args: vec![],
             virtual_call: false,
+            accessor: None,
         },
     }
 }

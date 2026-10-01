@@ -1,4 +1,4 @@
-import {expect, test, type Page} from '@playwright/test'
+import {expect, test, type Page} from './test'
 import path from 'node:path'
 import {execFileSync} from 'node:child_process'
 
@@ -6,7 +6,7 @@ async function open(page: Page, fixture: string) {
   await page.goto('./')
   await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(path.resolve(`samples/fixtures/ILens.${fixture}.dll`))
-  await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
 }
 async function editMethod(page: Page, name: string) {
   await page.keyboard.press('ControlOrMeta+k')
@@ -48,7 +48,7 @@ test('MakeArray edits reject a wrong element opcode and produce a verified DLL w
   await page.getByRole('button', {name: 'Close export'}).click()
   await page.getByRole('button', {name: 'Close workspace', exact: true}).click()
   await page.getByLabel('Open assembly files').setInputFiles(file)
-  await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   await page.keyboard.press('ControlOrMeta+k'); await page.getByLabel('Search members and strings').fill('MakeArray')
   await page.getByRole('button', {name: /MakeArray.*Calculator.MakeArray/}).click()
   await expect(page.getByLabel('C# code viewer')).toContainText('43')
@@ -77,7 +77,7 @@ test('array, object, constructor-call and instance edits pass independent whole-
   await page.getByRole('button', {name: 'Close export'}).click()
   await page.getByRole('button', {name: 'Close workspace', exact: true}).click()
   await page.getByLabel('Open assembly files').setInputFiles(file)
-  await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   const dialog = await editMethod(page, 'Increase')
   await expect(dialog.locator('input[aria-label^="Opcode"][value="sub"]')).toHaveCount(1)
   await expect(dialog.getByLabel('Opcode IL_0000', {exact: true})).toHaveValue('nop')

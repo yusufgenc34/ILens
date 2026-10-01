@@ -2,6 +2,14 @@ use goblin::pe::{PE, debug::IMAGE_DEBUG_TYPE_REPRO};
 
 const FIXTURES: &[(&str, &[u8])] = &[
     (
+        "Automatic EXE",
+        include_bytes!("../../../samples/fixtures/ILens.AutomaticDependencies.exe"),
+    ),
+    (
+        "Workspace reference",
+        include_bytes!("../../../samples/fixtures/ILens.WorkspaceDependency.ref.dll"),
+    ),
+    (
         "Patterns",
         include_bytes!("../../../samples/fixtures/ILens.Patterns.dll"),
     ),
@@ -28,6 +36,14 @@ const FIXTURES: &[(&str, &[u8])] = &[
     (
         "Readability",
         include_bytes!("../../../samples/fixtures/ILens.Readability.dll"),
+    ),
+    (
+        "Workspace",
+        include_bytes!("../../../samples/fixtures/ILens.Workspace.dll"),
+    ),
+    (
+        "WorkspaceDependency",
+        include_bytes!("../../../samples/fixtures/ILens.WorkspaceDependency.dll"),
     ),
 ];
 
@@ -73,5 +89,16 @@ fn distributed_fixtures_do_not_contain_debug_symbols_or_host_paths() {
 
 #[test]
 fn public_sample_matches_the_checked_fixture() {
-    assert_eq!(FIXTURES[0].1, FIXTURES[4].1);
+    assert_eq!(
+        FIXTURES
+            .iter()
+            .find(|(name, _)| *name == "Patterns")
+            .unwrap()
+            .1,
+        FIXTURES
+            .iter()
+            .find(|(name, _)| *name == "public sample")
+            .unwrap()
+            .1
+    );
 }

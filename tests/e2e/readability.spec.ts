@@ -1,4 +1,4 @@
-import {test, expect} from '@playwright/test'
+import {test, expect} from './test'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import {execFileSync} from 'node:child_process'
@@ -10,7 +10,7 @@ test('worker output simplifies a message array and saves C# that compiles', asyn
   await page.goto('./')
   await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(path.resolve('samples/fixtures/ILens.Readability.dll'))
-  await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   await page.keyboard.press('ControlOrMeta+k')
   await page.getByLabel('Search members and strings').fill('BuildMessage')
   await page.getByRole('button', {name: /BuildMessage.*FormValues.BuildMessage/}).click()

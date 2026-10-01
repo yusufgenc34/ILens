@@ -79,6 +79,7 @@ pub fn expression(a: &Assembly, context: u32, e: &Expr) -> Result<String> {
             instance,
             args,
             generic_args,
+            accessor,
             ..
         } => {
             let receiver = if let Some(i) = instance {
@@ -97,21 +98,14 @@ pub fn expression(a: &Assembly, context: u32, e: &Expr) -> Result<String> {
                     "Constructor chaining or in-place value construction remains explicit in IL",
                 ));
             }
-            // Only MethodSemantics confirms a property; a get_/set_ name alone is not sufficient.
-            let property = a.semantics.iter().find_map(|(p, ss)| {
-                if *p >> 24 == 23 {
-                    ss.iter().find(|(_, m)| m == token).map(|(f, _)| (*p, *f))
+            if let Some(property) = accessor {
+                let property_name = source_reference(*token, &identifier(&property.name));
+                if property.getter && args.is_empty() {
+                    format!("{receiver}.{property_name}")
+                } else if !property.getter {
+                    format!("{receiver}.{property_name} = {args}")
                 } else {
-                    None
-                }
-            });
-            if let Some((p, f)) = property {
-                if f & 2 != 0 && args.is_empty() {
-                    format!("{receiver}.{}", identifier(&a.resolve(p)))
-                } else if f & 1 != 0 {
-                    format!("{receiver}.{} = {args}", identifier(&a.resolve(p)))
-                } else {
-                    format!("{receiver}.{}({args})", identifier(name))
+                    return Err(Error::limitation("Unsupported property signature"));
                 }
             } else {
                 let generic = if generic_args.is_empty() {
@@ -126,7 +120,10 @@ pub fn expression(a: &Assembly, context: u32, e: &Expr) -> Result<String> {
                             .join(", ")
                     )
                 };
-                format!("{receiver}.{}{generic}({args})", identifier(name))
+                format!(
+                    "{receiver}.{}{generic}({args})",
+                    source_reference(*token, &identifier(name))
+                )
             }
         }
         New { owner, args } => {
@@ -140,7 +137,7 @@ pub fn expression(a: &Assembly, context: u32, e: &Expr) -> Result<String> {
             }
             format!(
                 "new {}({})",
-                strip_arity(&a.resolve(*owner)),
+                source_reference(*owner, &strip_arity(&a.resolve(*owner))),
                 args.iter()
                     .map(expr)
                     .collect::<Result<Vec<_>>>()?
@@ -148,6 +145,7 @@ pub fn expression(a: &Assembly, context: u32, e: &Expr) -> Result<String> {
             )
         }
         Field {
+            token: field_token,
             owner,
             name,
             instance,
@@ -160,7 +158,7 @@ pub fn expression(a: &Assembly, context: u32, e: &Expr) -> Result<String> {
             } else {
                 strip_arity(&a.resolve(*owner))
             },
-            identifier(name)
+            source_reference(*field_token, &identifier(name))
         ),
         Index { array, index } => format!("{}[{}]", expr(array)?, expr(index)?),
         NewArray { element, length } => {
@@ -561,7 +559,53 @@ fn exception_body(
     }
     Ok(())
 }
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SourceReference {
+    pub start: usize,
+    pub end: usize,
+    pub token: u32,
+}
+// Internal markers wrap only compiler-emitted identifiers, never user text.
+// String literals escape control characters and identifiers sanitize them.
+fn source_reference(token: u32, name: &str) -> String {
+    format!("\0{token:08X}\u{1}{name}\u{2}")
+}
+fn extract_references(input: &str) -> Result<(String, Vec<SourceReference>)> {
+    let mut output = String::new();
+    let mut refs = Vec::new();
+    let mut rest = input;
+    let mut position = 0;
+    while let Some(start) = rest.find('\0') {
+        let prefix = &rest[..start];
+        output.push_str(prefix);
+        position += prefix.encode_utf16().count();
+        rest = &rest[start + 1..];
+        let (header, tail) = rest
+            .split_once('\u{1}')
+            .ok_or_else(|| Error::limitation("Invalid source reference marker"))?;
+        if header.len() != 8 {
+            return Err(Error::limitation("Invalid source reference token"));
+        }
+        let token = u32::from_str_radix(header, 16)
+            .map_err(|_| Error::limitation("Invalid source reference token"))?;
+        let (name, tail) = tail
+            .split_once('\u{2}')
+            .ok_or_else(|| Error::limitation("Unterminated source reference"))?;
+        output.push_str(name);
+        let end = position + name.encode_utf16().count();
+        refs.push(SourceReference {
+            start: position,
+            end,
+            token,
+        });
+        position = end;
+        rest = tail;
+    }
+    output.push_str(rest);
+    Ok((output, refs))
+}
 pub struct MethodSource {
+    pub references: Vec<SourceReference>,
     pub declaration: String,
     pub body: String,
 }
@@ -650,9 +694,19 @@ pub fn method_source(
             .unwrap_or(&declaration)
             .to_owned();
     }
+    let raw_body = csharp_body(a, token, body, ir, cfg, nodes)?;
+    let (declaration, mut references) = extract_references(&declaration)?;
+    let (body, body_references) = extract_references(&raw_body)?;
+    let shift = declaration.encode_utf16().count() + 1;
+    references.extend(body_references.into_iter().map(|mut r| {
+        r.start += shift;
+        r.end += shift;
+        r
+    }));
     Ok(MethodSource {
         declaration,
-        body: csharp_body(a, token, body, ir, cfg, nodes)?,
+        body,
+        references,
     })
 }
 /// Render an already structured method body for a compilation unit or accessor.

@@ -1,4 +1,4 @@
-import {test, expect} from '@playwright/test'
+import {test, expect} from './test'
 import path from 'node:path'
 const fixture = path.resolve('samples/fixtures/ILens.Patterns.dll')
 test('real browser WASM: open, navigate, reconstruct, search, dependencies, privacy, close', async ({page}) => {
@@ -8,7 +8,7 @@ test('real browser WASM: open, navigate, reconstruct, search, dependencies, priv
  await expect(page.getByRole('heading', {name: /Look inside/})).toBeVisible()
  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
  await page.getByLabel('Open assembly files').setInputFiles(fixture)
- await expect(page.getByLabel('Primary assembly')).toHaveValue('1', {timeout: 20_000})
+ await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1', {timeout: 20_000})
  await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Search Assembly…', exact: true}).click()
  await page.getByLabel('Search members and strings').fill('Calculator.Sum')
  await page.getByRole('button', {name: /Sum.*Calculator.Sum/}).click()
@@ -20,7 +20,7 @@ test('real browser WASM: open, navigate, reconstruct, search, dependencies, priv
  await expect(page.getByLabel('Metadata code viewer')).toContainText('signature_blob')
  await page.getByRole('tab', {name: 'C#', exact: true}).click()
  await page.getByLabel('Add dependency files').setInputFiles(path.resolve('samples/fixtures/ILens.Dependency.dll'))
- await expect(page.getByLabel('Primary assembly').locator('option')).toHaveCount(2)
+ await expect(page.getByLabel('Loaded assemblies')).toHaveText('2')
  await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Search Assembly…', exact: true}).click()
  await page.getByLabel('Search members and strings').fill('Calculator.DependencyCall')
  await page.getByRole('button', {name: /DependencyCall.*Calculator.DependencyCall/}).click()
@@ -30,9 +30,11 @@ test('real browser WASM: open, navigate, reconstruct, search, dependencies, priv
  const token = (await il.textContent())!.match(/0x0A[0-9A-F]{6}/i)![0]
  await il.getByText(token, {exact: true}).click({modifiers: ['ControlOrMeta']})
  await page.getByRole('button', {name: 'Go to definition'}).click()
- await expect(page.getByLabel('Primary assembly')).toHaveValue('2')
+ await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','2')
  await expect(page.getByLabel('C# code viewer')).toContainText('return (value * 2)')
- await page.getByLabel('Primary assembly').selectOption('1')
+ await page.getByRole('tree',{name:'Assembly declarations'}).focus()
+ await page.keyboard.press('Home')
+ await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
  await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Search Assembly…', exact: true}).click()
  await page.getByLabel('Search members and strings').fill('Hello from local')
  await expect(page.getByRole('button', {name: /Hello from local WebAssembly/})).toBeVisible()
@@ -48,5 +50,5 @@ test('a malformed DLL produces a diagnostic and a subsequent valid file still op
  await expect(page.getByRole('alert')).toContainText('not a valid Windows PE')
  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
  await page.getByLabel('Open assembly files').setInputFiles(fixture)
- await expect(page.getByLabel('Primary assembly')).toHaveValue('1', {timeout: 20_000})
+ await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1', {timeout: 20_000})
 })

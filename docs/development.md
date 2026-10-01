@@ -76,3 +76,5 @@ npx playwright test --config playwright.production.config.ts tests/e2e/styles.sp
 ```
 
 Copy the selected images from `test-results/production` into `docs/screenshots`, using the names linked in the README. Keep only the final captures in documentation. Temporary traces, failure captures, and HTML reports remain ignored and can be deleted after review.
+
+Generated browser reports, test outputs, build directories and scratch directories are excluded from the development watcher. Rari's hot-update scanner must not register a Playwright trace viewer as an application module. Stop the development server before making a production build in the same checkout: both Rari processes use `dist/server`.

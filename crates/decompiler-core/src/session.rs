@@ -1,6 +1,6 @@
 //! An in-memory resolver; assembly identity is exact and no network resolution occurs.
 use crate::{
-    assembly::{Assembly, AssemblyInfo},
+    assembly::{Assembly, AssemblyInfo, coded},
     decompile::{self, MethodAnalysis},
     error::{Error, Result},
 };
@@ -33,19 +33,80 @@ impl Default for Session {
     }
 }
 impl Session {
+    fn check_input_budget(&self, bytes: &[u8]) -> Result<()> {
+        // Check retained input before allocating another set of parsed metadata.
+        // Reopening identical bytes is still permitted when the workspace is full.
+        if self.assemblies.values().any(|a| a.bytes == bytes) {
+            return Ok(());
+        }
+        if self.assemblies.len() >= 64 {
+            return Err(Error::limit("A workspace supports at most 64 assemblies"));
+        }
+        let total: usize = self.assemblies.values().map(|a| a.bytes.len()).sum();
+        if bytes.len() > (128 * 1024 * 1024usize).saturating_sub(total) {
+            return Err(Error::limit("Workspace assembly buffers exceed 128 MiB"));
+        }
+        Ok(())
+    }
     pub fn load(&mut self, bytes: Vec<u8>) -> Result<Loaded> {
-        if self.assemblies.len() >= 16 {
-            return Err(Error::limit("A workspace supports at most 16 assemblies"));
+        self.check_input_budget(&bytes)?;
+        self.insert_assembly(Assembly::load(bytes)?)
+    }
+    pub fn load_dependency(
+        &mut self,
+        bytes: Vec<u8>,
+        expected: &crate::assembly::Identity,
+    ) -> Result<Option<Loaded>> {
+        self.load_dependency_kind(bytes, expected, false)
+    }
+    /// For bytes taken from a known reference-pack directory. Older framework
+    /// packs may omit ReferenceAssemblyAttribute but still contain only stubs.
+    pub fn load_reference_dependency(
+        &mut self,
+        bytes: Vec<u8>,
+        expected: &crate::assembly::Identity,
+    ) -> Result<Option<Loaded>> {
+        self.load_dependency_kind(bytes, expected, true)
+    }
+    fn load_dependency_kind(
+        &mut self,
+        bytes: Vec<u8>,
+        expected: &crate::assembly::Identity,
+        reference_only: bool,
+    ) -> Result<Option<Loaded>> {
+        self.check_input_budget(&bytes)?;
+        let mut assembly = Assembly::load(bytes)?;
+        assembly.info.reference_assembly |= reference_only;
+        if !expected.matches(&assembly.info.identity) {
+            return Ok(None);
+        }
+        self.insert_assembly(assembly).map(Some)
+    }
+    fn insert_assembly(&mut self, a: Assembly) -> Result<Loaded> {
+        for (id, existing) in &self.assemblies {
+            if existing.info.identity.matches(&a.info.identity) {
+                if existing.bytes == a.bytes {
+                    return Ok(Loaded {
+                        id: *id,
+                        info: existing.info.clone(),
+                    });
+                }
+                return Err(Error::metadata(
+                    "A different assembly with this exact identity is already loaded. Close the workspace before replacing it.",
+                ));
+            }
+        }
+        if self.assemblies.len() >= 64 {
+            return Err(Error::limit("A workspace supports at most 64 assemblies"));
         }
         let total = self
             .assemblies
             .values()
             .map(|a| a.bytes.len())
             .sum::<usize>();
-        if total + bytes.len() > 128 * 1024 * 1024 {
+        if total + a.bytes.len() > 128 * 1024 * 1024 {
             return Err(Error::limit("Workspace assembly buffers exceed 128 MiB"));
         }
-        let a = Assembly::load(bytes)?;
         let id = self.next_id;
         self.next_id = self
             .next_id
@@ -75,7 +136,8 @@ impl Session {
             self.cache.push_back(entry);
             return Ok(result);
         }
-        let result = decompile::decompile(self.assembly(id)?, token)?;
+        let result =
+            decompile::decompile_with(self.assembly(id)?, token, &|t| self.accessor(id, t))?;
         // Serialized size is a conservative accounting base with 4x structural overhead allowance.
         let size = serde_json::to_vec(&result)
             .map_err(|e| Error::metadata(e.to_string()))?
@@ -258,31 +320,9 @@ impl Session {
                             && n.token >> 24 == if field { 4 } else { 6 }
                     })
                     .collect();
-                let fingerprint = |a: &Assembly, t: u32| -> Option<String> {
-                    if field {
-                        let (_, _, ty) = a.field_ref(t).ok()?;
-                        Some(a.format_type(&ty, 0))
-                    } else {
-                        let m = a.method_ref(t).ok()?;
-                        Some(format!(
-                            "{}:{}:{}:{}({})",
-                            m.signature.has_this,
-                            m.signature.convention,
-                            m.signature.generic_count,
-                            a.format_type(&m.signature.return_type, 0),
-                            m.signature
-                                .parameters
-                                .iter()
-                                .map(|t| a.format_type(t, 0))
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        ))
-                    }
-                };
-                let expected = fingerprint(source, token)?;
-                let mut found = candidates
-                    .into_iter()
-                    .filter(|n| fingerprint(target, n.token).as_deref() == Some(&expected));
+                let mut found = candidates.into_iter().filter(|n| {
+                    crate::resolution::same_member(source, token, target, n.token, field)
+                });
                 let token = found.next()?.token;
                 if found.next().is_some() {
                     None
@@ -299,7 +339,40 @@ impl Session {
             self.resolve_definition(id, token)
                 .map(|(assembly, token)| json!({"assembly": assembly, "token": token}))
         );
+        metadata["required_reference"] = json!(self.required_reference(id, token));
         Ok(metadata)
+    }
+    /// Follow only explicit metadata scopes; never infer a package or filename from a type name.
+    pub fn required_reference(
+        &self,
+        id: u32,
+        mut token: u32,
+    ) -> Option<&crate::assembly::Reference> {
+        let a = self.assembly(id).ok()?;
+        for _ in 0..49 {
+            let rid = (token & 0xffffff).checked_sub(1)? as usize;
+            token = match token >> 24 {
+                35 => return a.references.iter().find(|r| r.token == token),
+                1 => coded(a.metadata().type_refs.get(rid)?.resolution_scope),
+                10 => coded(a.metadata().member_refs.get(rid)?.class),
+                43 => coded(a.metadata().method_specs.get(rid)?.method),
+                27 => {
+                    let row = a.metadata().type_specs.get(rid)?;
+                    let mut ty = crate::signature::type_spec(a.blob(row.signature).ok()?).ok()?;
+                    if let crate::signature::Type::GenericInstance { base, .. } = ty {
+                        ty = *base;
+                    }
+                    match ty {
+                        crate::signature::Type::Named(t) | crate::signature::Type::ValueType(t) => {
+                            t
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+        }
+        None
     }
     pub fn close(&mut self, id: u32) {
         self.assemblies.remove(&id);

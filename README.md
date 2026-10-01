@@ -10,9 +10,14 @@ This is an early decompiler release. Reconstructed code is not the original sour
 
 ## Features
 
-- Assembly, namespace, type, and member explorer with virtualized rows and resizable panes.
+- Assembly → module → namespace → type → member explorer with direct member lists, signature labels, property/event accessors, virtualized rows, and keyboard navigation.
 - Independent C#, IL, metadata, and raw-byte views with resolved metadata tokens.
-- Local search across declarations and strings, dependency loading, and reference navigation.
+- Local search across declarations, resource names and strings.
+- All loaded assemblies in one Explorer, with reference navigation and exact assembly identity matching.
+- Automatic dependency resolution when opening EXE/DLL files, using a selected folder and supported Microsoft .NET reference packs from NuGet.
+- C# go-to-definition, document tabs, back/forward history and workspace bookmarks.
+- Static Analyze results across loaded assemblies: callers, field reads/writes, derived types and interface implementations.
+- Embedded resource inspection with text, hex, PNG previews and `.resources` v2 entry downloads.
 - Declared .NET target and CLR metadata versions displayed separately.
 - Obfuscator marker inspection with evidence and clearly labeled naming heuristics.
 - Tailwind-based dark and light appearance, six code themes, syntax highlighting controls, and saved editor preferences.
@@ -39,12 +44,12 @@ The first build installs the matching `wasm-bindgen-cli` and compiles the WASM c
 1. Choose File > Open Assembly or drag managed assemblies onto the application.
 2. Select a type or method in the Assembly Explorer.
 3. Switch between C#, IL, Metadata, and Hex.
-4. Choose File > Add Dependencies when you want to resolve external definitions.
+4. Choose File > Set Dependency Folder to automatically resolve references from DLLs/EXEs in that folder and its subfolders. File > Add Dependencies still opens individual dependencies. Missing supported .NET references download automatically as soon as an EXE/DLL opens, and appear alongside it in Explorer. No reference click is required. Disable this in Edit > Settings when working offline.
 5. Choose Edit > Settings to customize the code viewer.
 6. Choose File > Export to Project to download a solution with one project per selected assembly. Use File > Save Code for individual source downloads.
 7. Open the IL tab on a supported method and choose Edit IL, validate/apply changes, then File > Save Module to download the modified assembly.
 
-Use `Ctrl/Cmd K` for metadata search, `Ctrl/Cmd F` inside the editor, and `Ctrl/Cmd`-click a metadata token to navigate. Refreshing clears the loaded assemblies; editor preferences are retained.
+Use `Ctrl/Cmd K` for metadata search, `Ctrl/Cmd F` inside the editor, and `Ctrl/Cmd`-click an underlined C# member or an IL metadata token to navigate. F12 follows a C# reference at the cursor; `Alt+Left` / `Alt+Right` walk navigation history. The bookmark button and View > Bookmarks keep useful declarations within the current workspace. Refreshing clears assemblies, folder access, tabs and bookmarks; editor preferences are retained.
 
 ## Docker Compose
 
@@ -98,6 +103,10 @@ Open forwarded port **5173**. During development, port 3000 is Rari's internal b
 ## Screenshots
 
 These images show the running application analyzing the compiled C# fixture included in this repository.
+
+### Assembly hierarchy
+
+![Assembly, module, namespace and direct member hierarchy](docs/screenshots/explorer.png)
 
 ### Assembly explorer and reconstructed C#
 
@@ -205,15 +214,15 @@ React interface
 
 IL-only managed PE DLLs and EXEs are supported, including compatible .NET Framework and modern .NET assemblies. Metadata support covers generics, nested types, fields, methods, constructors, properties, events, attributes, P/Invoke declarations, references, resources, and exception regions.
 
-Common arithmetic, calls, fields, arrays, conditionals, loops, switches, and conservative try/catch/finally patterns can produce C#-like output. Complex async/iterator state machines, closure synthesis, nested exception patterns, and other unsupported constructs remain annotated IL. Some methods retain labels, gotos, or synthetic stack/local variables; output is intended for inspection and is not always standalone compilable source. Single-use copies and safe complete array initializers are simplified while preserving evaluation order. External property accessors may still appear as `get_Text()` calls; their names alone do not establish property semantics. See [source-readability rules](docs/architecture.md#source-readability-and-evaluation-order).
+Common arithmetic, calls, fields, arrays, conditionals, loops, switches, and conservative try/catch/finally patterns can produce C#-like output. Complex async/iterator state machines, closure synthesis, nested exception patterns, and other unsupported constructs remain annotated IL. Some methods retain labels, gotos, or synthetic stack/local variables; output is intended for inspection and is not always standalone compilable source. Single-use copies and safe complete array initializers are simplified while preserving evaluation order. Loaded dependencies provide verified property semantics, so supported external accessors can appear as `.Text` or `.Text = value`. Missing definitions, indexers and unsupported signatures keep their original calls; names alone do not establish property semantics. See [source-readability rules](docs/architecture.md#source-readability-and-evaluation-order).
 
-ReadyToRun and mixed-mode inputs receive unsupported-native diagnostics. NativeAOT normally lacks the CLI metadata this parser needs. WebCIL, PDB loading, type forwarding, and multi-module resolution are not implemented. Missing dependencies do not prevent inspection, and dependencies are never downloaded automatically.
+Ordinary ReadyToRun images can be inspected through their preserved metadata and CIL; native machine code is not decompiled and editing/rewriting is disabled. Composite ReadyToRun, NGen and mixed-mode inputs receive specific unsupported-format diagnostics. NativeAOT and native executables lack the CIL this decompiler needs. For EXEs without CLR metadata, ILens tries a same-named DLL from the selected files or dependency folder, refusing ambiguous matches. If the folder is selected after an EXE failed, that EXE is retried automatically. Single-file bundle extraction and renamed/custom apphost bindings are not supported; open their original managed DLLs. No local file is discovered outside files/folders you explicitly select. WebCIL, PDB loading, type forwarding, and multi-module resolution are not implemented. Missing dependencies do not prevent inspection. Resolution checks loaded assemblies and the explicitly selected dependency folder first. Opening an assembly automatically downloads supported missing .NET references from fixed Microsoft NuGet reference packs when enabled; other packages are not guessed or fetched. Reference packs provide API metadata rather than method implementations. ILens does not scan system directories. See [workspace inspection](docs/workspace-inspection.md) for matching rules and limits.
 
 Obfuscation detection recognizes selected metadata markers and naming heuristics. It is not a universal detector or deobfuscator; missing markers do not prove a file is unobfuscated. See [inspection rules](docs/assembly-inspection.md).
 
-Source exports can be partial; generated solutions and projects are not guaranteed to compile. IL editing supports nongeneric static/instance reference-class methods, vectors and jagged arrays, primitive boxing/casts, local fields and supported calls. Generics, constructor bodies, custom value types and exception handlers remain read-only. Binary output is restricted to supported unsigned x86/x64 managed PE layouts. See [export and editing support](docs/export-edit.md) for exact limits.
+Source exports can be partial; generated solutions and projects are not guaranteed to compile. IL editing supports nongeneric static/instance reference-class methods, vectors and jagged arrays, primitive and verified local enum boxing/casts, local fields and supported calls. Generics, constructor bodies, other custom value types, external enums and exception handlers remain read-only. Binary output is restricted to supported unsigned x86/x64 managed PE layouts. See [export and editing support](docs/export-edit.md) for exact limits.
 
-A current desktop Chromium browser is tested. Current Firefox and Safari provide the required WebAssembly/module-worker APIs but have not been validated in this release. Use localhost HTTP or HTTPS; opening files through `file://` is unsupported. No browser extension, managed runtime, or shared-memory configuration is required.
+A current desktop Chromium browser is tested. Current Firefox and Safari provide the required WebAssembly/module-worker APIs but have not been validated in this release. Optional NuGet extraction also requires `DecompressionStream('deflate-raw')`; if unavailable, add dependencies locally. Use localhost HTTP or HTTPS; opening files through `file://` is unsupported. No browser extension, managed runtime, or shared-memory configuration is required.
 
 ## Documentation
 
@@ -221,6 +230,7 @@ A current desktop Chromium browser is tested. Current Firefox and Safari provide
 - [Source export and IL editing](docs/export-edit.md)
 - [Source export and assembly editing roadmap](docs/roadmap.md)
 - [Architecture and worker API](docs/architecture.md)
+- [Dependency folders, navigation, Analyze and resources](docs/workspace-inspection.md)
 - [Development and container setup](docs/development.md)
 - [GitHub Pages deployment](docs/github-pages.md)
 - [Security model and resource limits](docs/security.md)
@@ -249,6 +259,12 @@ A current desktop Chromium browser is tested. Current Firefox and Safari provide
 | [ILVerify](https://github.com/dotnet/runtime/tree/main/src/coreclr/tools/ILVerify) | Independent static verification of test fixture outputs; a test-only tool |
 | [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT) | ZIP32 archive format reference |
 | [ILSpy](https://github.com/icsharpcode/ILSpy) | Reference for decompiler navigation and inspection workflows; ILens does not embed its decompiler |
+
+## Legal use and disclaimer
+
+ILens is intended for lawful software inspection, debugging, interoperability, and security research. You are responsible for ensuring that you have the legal right to inspect, decompile, modify, or redistribute the software you analyze, and for complying with applicable laws, licenses, and third-party rights. The project does not endorse unlawful use.
+
+ILens is provided "as is", without warranties, under the [MIT License](LICENSE). To the extent permitted by applicable law, its authors and contributors disclaim liability for damages arising from use or misuse. This notice does not modify the MIT License or exclude liability that cannot legally be excluded.
 
 ## License
 

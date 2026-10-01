@@ -377,6 +377,8 @@ mod tests {
         );
         let node = |name: &str| Node {
             name: name.into(),
+            display_name: name.into(),
+            accessor_of: None,
             token: 0x06000001,
             parent: 0,
             kind: "method".into(),

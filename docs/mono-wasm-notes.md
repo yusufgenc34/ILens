@@ -14,7 +14,7 @@ The [README](https://github.com/migueldeicaza/mono-wasm/blob/c46c1e0185d1cabd4a1
 
 The file/syscall shims make those cached buffers available to Mono using a filesystem-shaped interface. Those are browser memory buffers, not a normal operating-system filesystem. Other imported functions provide console I/O, allocation support, and assorted libc/Mono compatibility shims. Numerous functions are missing or stubbed, including thread operations; that is unsuitable as a foundation for a hostile-input analysis service.
 
-ILens borrows the **explicit initialization barrier** and **in-memory assembly inventory** concepts. It initializes its parser module once per worker, then accepts user-selected transferable buffers. The bundled sample is fetched only after an explicit sample button click. User files and dependencies are never fetched from a remote resolver.
+ILens borrows the **explicit initialization barrier** and **in-memory assembly inventory** concepts. It initializes its parser module once per worker, then accepts user-selected transferable buffers. The bundled sample is fetched only after an explicit sample button click. User files are never uploaded. Automatic dependency resolution on file open first uses the loaded inventory and selected folder; an optional worker resolver can fetch fixed Microsoft framework reference packs from NuGet. It does not install a Mono runtime, execute dependencies, or guess arbitrary package identities. See [reference navigation](workspace-inspection.md#reference-navigation-and-framework-packs).
 
 ## JavaScript ↔ WASM interface and memory
 

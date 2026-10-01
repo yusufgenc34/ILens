@@ -7,7 +7,7 @@ import CodeViewer from './CodeViewer'
 
 const preview = `// Syntax preview\npublic static string Describe(int count)\n{\n    if (count > 0)\n        return "Ready to explore";\n    return string.Empty;\n}`
 
-export default function SettingsDialog({settings, onChange, appearance, onAppearance, onClose}: {settings: EditorSettings; onChange: (settings: EditorSettings) => void; appearance: string; onAppearance: (theme: string) => void; onClose: () => void}) {
+export default function SettingsDialog({settings, onChange, appearance, onAppearance, onClose, onlineReferences, onOnlineReferences}: {onlineReferences:boolean; onOnlineReferences:(enabled:boolean)=>void; settings: EditorSettings; onChange: (settings: EditorSettings) => void; appearance: string; onAppearance: (theme: string) => void; onClose: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null)
   useEffect(() => {
     const element = dialog.current
@@ -34,6 +34,7 @@ export default function SettingsDialog({settings, onChange, appearance, onAppear
         <label><input type="checkbox" checked={settings.lineNumbers} onChange={e => update({lineNumbers: e.target.checked})} />Line numbers</label>
         <label><input type="checkbox" checked={settings.wrap} onChange={e => update({wrap: e.target.checked})} />Word wrap</label>
       </div>
+      <div className="mb-5 border-t border-border pt-4"><label className="flex items-center gap-2 text-xs font-medium"><input type="checkbox" checked={onlineReferences} onChange={event=>onOnlineReferences(event.target.checked)} className="accent-primary"/>Download .NET references automatically</label><p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">When opening an EXE or DLL, automatically find and download missing Microsoft .NET reference metadata from nuget.org. Assembly contents are never sent. Other dependencies use your selected files or folder.</p></div>
       <div className="settings-preview-label flex justify-between text-muted-foreground text-[11px] mb-2">Preview<span>C#</span></div>
       <div className="settings-preview h-60 overflow-hidden border border-solid border-border rounded-[6px]"><CodeViewer text={preview} language="C#" label="Syntax theme preview" theme={appearance} settings={settings} /></div>
     </div>

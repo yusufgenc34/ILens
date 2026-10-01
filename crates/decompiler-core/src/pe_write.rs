@@ -45,6 +45,11 @@ fn put16(bytes: &mut [u8], p: usize, value: u16) -> Result<()> {
     Ok(())
 }
 fn preflight(a: &Assembly) -> Result<Layout> {
+    if a.image.ready_to_run {
+        return Err(unsupported(
+            "ReadyToRun images are read-only. Rewriting their CIL would invalidate precompiled native code.",
+        ));
+    }
     if !a.metadata().field_rvas.is_empty() {
         return Err(unsupported(
             "Field-RVA storage needs size/alias analysis before this assembly can be rewritten",

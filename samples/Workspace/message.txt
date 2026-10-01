@@ -1,0 +1,1 @@
+Embedded text resource. No application code is executed.

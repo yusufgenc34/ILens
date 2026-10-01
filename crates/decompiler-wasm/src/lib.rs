@@ -30,6 +30,32 @@ impl Decompiler {
     pub fn load_assembly(&mut self, bytes: Vec<u8>) -> Result<JsValue, JsValue> {
         js(&self.session.load(bytes).map_err(error)?)
     }
+    pub fn load_dependency(&mut self, bytes: Vec<u8>, identity: &str) -> Result<JsValue, JsValue> {
+        if identity.len() > 4096 {
+            return Err(error(Error::limit("Dependency identity is too large")));
+        }
+        let expected =
+            serde_json::from_str(identity).map_err(|e| error(Error::metadata(e.to_string())))?;
+        js(&self
+            .session
+            .load_dependency(bytes, &expected)
+            .map_err(error)?)
+    }
+    pub fn load_reference_dependency(
+        &mut self,
+        bytes: Vec<u8>,
+        identity: &str,
+    ) -> Result<JsValue, JsValue> {
+        if identity.len() > 4096 {
+            return Err(error(Error::limit("Dependency identity is too large")));
+        }
+        let expected =
+            serde_json::from_str(identity).map_err(|e| error(Error::metadata(e.to_string())))?;
+        js(&self
+            .session
+            .load_reference_dependency(bytes, &expected)
+            .map_err(error)?)
+    }
     pub fn get_assembly_info(&self, id: u32) -> Result<JsValue, JsValue> {
         js(&self.session.overview(id).map_err(error)?)
     }
@@ -66,6 +92,19 @@ impl Decompiler {
     pub fn get_references(&self, id: u32) -> Result<JsValue, JsValue> {
         js(&self.session.references(id).map_err(error)?)
     }
+    pub fn analyze_references(
+        &self,
+        id: u32,
+        token: u32,
+        source: u32,
+        start: u32,
+        outgoing: bool,
+    ) -> Result<JsValue, JsValue> {
+        js(&self
+            .session
+            .analyze_page(id, token, source, start as usize, outgoing)
+            .map_err(error)?)
+    }
     pub fn get_xrefs(&self, id: u32, token: u32, start: u32) -> Result<JsValue, JsValue> {
         js(&self
             .session
@@ -99,15 +138,31 @@ impl Decompiler {
     }
     pub fn export_member(&self, id: u32, token: u32, revision: u32) -> Result<JsValue, JsValue> {
         self.session.check_revision(revision).map_err(error)?;
-        js(
-            &decompiler_core::export::member(self.session.assembly(id).map_err(error)?, token)
-                .map_err(error)?,
+        js(&decompiler_core::export::member_with(
+            self.session.assembly(id).map_err(error)?,
+            token,
+            &|t| self.session.accessor(id, t),
         )
+        .map_err(error)?)
     }
     pub fn export_resource(&self, id: u32, token: u32, revision: u32) -> Result<Vec<u8>, JsValue> {
         self.session.check_revision(revision).map_err(error)?;
         decompiler_core::export::resource(self.session.assembly(id).map_err(error)?, token)
             .map_err(error)
+    }
+    pub fn resource_preview(&self, id: u32, token: u32, entry: i32) -> Result<JsValue, JsValue> {
+        let bytes = self.resource_bytes(id, token, entry)?;
+        js(&decompiler_core::resources::preview(&bytes).map_err(error)?)
+    }
+    pub fn resource_bytes(&self, id: u32, token: u32, entry: i32) -> Result<Vec<u8>, JsValue> {
+        let bytes =
+            decompiler_core::export::resource(self.session.assembly(id).map_err(error)?, token)
+                .map_err(error)?;
+        if entry < 0 {
+            Ok(bytes)
+        } else {
+            decompiler_core::resources::entry_bytes(&bytes, entry as usize).map_err(error)
+        }
     }
     pub fn export_dependency(&self, id: u32, revision: u32) -> Result<Vec<u8>, JsValue> {
         self.session.check_revision(revision).map_err(error)?;

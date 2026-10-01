@@ -1,0 +1,65 @@
+# Workspace inspection
+
+## Dependency folders
+
+Choose **File > Set Dependency Folder** and select a folder containing dependency DLLs/EXEs. Its subfolders are included. ILens indexes filenames without parsing every file, then looks for unresolved references by assembly name. Each candidate is read into the worker and checked against the full name, version, culture and public key token. Successfully loaded dependencies are scanned for their own references. The primary assembly remains selected.
+
+For example, if Main.dll references Library version 1.0.0.0, a file named Library.dll with version 2.0.0.0 does not satisfy that reference. Multiple version directories can coexist under the selected folder. Unrelated DLLs are not parsed. A dependency whose filename differs from its assembly name can still be opened through **File > Add Dependencies**.
+
+The selected folder is reused when more assemblies are opened in this workspace. **Clear Dependency Folder** releases its file handles while keeping already loaded assemblies. Closing the workspace or refreshing clears all loaded data. Re-select the folder to discover filesystem changes; ILens does not watch the disk. Browsers cannot scan arbitrary adjacent folders or the system GAC without user selection.
+
+The folder resolver never guesses NuGet packages, executes dependencies or sends their contents to the server. A separate, optional framework download fallback is described below. Unavailable references retain their metadata and remain inspectable. Framework reference assemblies may be supplied in the selected folder when their identities match. Type forwarding, runtime roll-forward, multi-module binding and GAC probing are not implemented.
+
+Limits: 4,096 selected files, 32 candidate filenames per assembly name, 128 candidate inspections per pass, 64 loaded assemblies and 128 MiB of aggregate assembly input. Each individual assembly is limited to 64 MiB. Excesses produce diagnostics and preserve successfully loaded files where possible.
+
+## Reference navigation and framework packs
+
+Opening an EXE or DLL immediately shows the input assembly and starts automatic dependency resolution. Each dependency appears as a new Explorer root as it is found; background resolution keeps the current assembly, method and view selected. Expand its **References** group and double-click a reference, press Enter, or select **Open referenced assembly** in the Inspector. The resolver opens an already loaded matching assembly, searches the selected folder, then tries the supported framework catalog if enabled. Successful resolution adds a new root, marks the reference resolved and navigates to the loaded assembly. Reopening the same reference reuses the root. C# Ctrl/Cmd-click and F12 can use the same resolver for missing external definitions. Navigation changed during a download is not replaced by a stale result.
+
+**Edit > Settings > Download .NET references automatically** controls the online fallback. It is enabled by default and runs on file open, dependency additions and folder selection. Turning it on for an existing workspace also starts resolution. Turning it off prevents further downloads in the pass; an already active request may finish. Requests run in the worker and can be stopped by closing the workspace. Status messages show the package being downloaded. Errors keep successfully loaded assemblies available. File > Retry Missing Dependencies retries a failed pass without reopening the EXE.
+
+The fixed catalog covers `.NETCoreApp` 3.0/3.1 and 5.0–10.0 through `Microsoft.NETCore.App.Ref`, `.NETStandard` 2.0/2.1 through the standard reference packages, and .NET Framework 2.0/3.5/4.0–4.8.1 through `Microsoft.NETFramework.ReferenceAssemblies.net*`. A supported declared target and a recognized framework name/public key token are required. The .NET Core package version is the baseline `X.Y.0`; Framework reference packages use 1.0.3. The DLL's full identity must match exactly. Missing packages, unsupported profiles, private implementation assemblies, service-version mismatches and Windows Desktop/ASP.NET-specific packs require a locally supplied dependency. The automatic pass follows supported transitive references, deduplicates identities, shares a 128-file local inspection budget and permits at most 64 framework resolution attempts. A failed package download is not repeated for every reference in that pass. There is no assembly-name-to-arbitrary-NuGet-package search, runtime roll-forward or GAC scan; unknown/private dependencies stay unresolved.
+
+Reference packs contain **API declarations only**, with absent or placeholder method bodies. ILens labels these assemblies, keeps their actual IL inspectable, suppresses C# reconstruction of placeholder bodies and disallows IL edits. To inspect the real implementation, supply its DLL locally. Different files with the same identity cannot coexist: close the workspace and load the implementation before following references if replacing a downloaded reference assembly. Type forwarding and multi-module resolution remain unsupported; a resolved assembly does not guarantee every member definition can be followed.
+
+Only DLLs needed by encountered references are extracted; the compressed package is kept temporarily to service later references. For limits, network visibility and cache lifetime, see [security](security.md#framework-reference-downloads). The browser never executes downloaded assemblies.
+
+## Reconstruction and navigation
+
+Loaded dependency definitions improve both navigation and C# reconstruction. Simple properties require a real MethodSemantics association, the same declaring type, a compatible signature and supported dispatch. Ordinary methods named `get_...` remain calls. Unsupported indexed/generic accessor cases also remain calls rather than guessed C#.
+
+Underlined method/property/field identifiers and object-creation type names carry source ranges emitted by the Rust compiler pipeline. **Ctrl/Cmd-click** or **F12** follows the metadata reference; an unresolved external scope is offered to the resolver, and if no definition is available, its reference metadata opens instead. Range offsets use UTF-16 to match the browser editor, including text following non-BMP characters. Not every type annotation or local variable is a navigable declaration yet.
+
+Document tabs preserve per-declaration views. **Alt+Left/Right** and the arrow buttons walk history. The bookmark icon stores a declaration in **View > Bookmarks** for the current workspace. The limits are 32 tabs, 128 history locations and 64 bookmarks. These lists are not written to browser storage.
+
+## Analyze
+
+The Inspector's **Find references** scans loaded assemblies for static CIL references to the selected declaration. Property/event targets include their accessor methods. Results distinguish calls, object creation, field reads/writes/addresses, method groups, base types and directly declared interfaces. **Calls & uses** shows a selected method's outgoing token references. Results navigate to the referenced declaration or caller method; displayed IL offsets identify the instruction, but automatic selection of that instruction is not implemented yet.
+
+Analysis is paged through the worker and can be cancelled between pages. Invalid bodies are counted as skipped; capped results are labeled truncated. Runtime dispatch, reflection, dynamic loading, inherited interface expansion, references solely in signatures/attributes and references from assemblies not loaded in the workspace are not inferred. Results describe original input bodies; reopen a modified download to analyze edited code.
+
+## Resources
+
+Select a manifest resource in the explorer or search by its name. The resource view supports UTF-8 text, raw hex, bounded PNG previews and `.resources` format v2 entry tables. Entries can be filtered by name, inspected and downloaded. String entries download as UTF-8 text; byte arrays and streams download their payload; other records download their encoded record data. **Save resource** preserves the complete original embedded payload within the resource size limit.
+
+Primitive values are read directly from bytes. Serialized user types are labeled without loading their assemblies or instantiating objects. Older `.resources` versions, BAML-to-XAML conversion, WinForms designer reconstruction, linked external resources and other image formats are outside this version. Raw downloads remain available for unsupported content within the size limit. Markup is rendered as text.
+
+## Verification and references
+
+`samples/Workspace` and `samples/WorkspaceDependency` are repository-owned fixtures for external properties, cross-assembly relationships, resource entries and enum IL edits. Rust tests cover identity rejection, cache invalidation, source ranges, truncated resources and storage-width checks. Browser tests exercise the real worker, folder picker, navigation, resource downloads and independent ILVerify checks without executing fixture assemblies.
+
+The local-resolution model was compared with [dnlib's AssemblyResolver](https://github.com/0xd4d/dnlib/blob/master/src/DotNet/AssemblyResolver.cs) and [dnSpy's features](https://github.com/dnSpyEx/dnSpy#readme). The `.resources` format was studied through [System.Resources.ResourceReader](https://github.com/dotnet/runtime/blob/main/src/libraries/System.Private.CoreLib/src/System/Resources/ResourceReader.cs). These are architectural/format references; no implementation code was copied from them.
+
+The online resolver follows the official [NuGet package-content API](https://learn.microsoft.com/en-us/nuget/api/package-base-address-resource). Reference-pack behavior and limitations follow [.NET reference assembly documentation](https://learn.microsoft.com/en-us/dotnet/standard/assembly/reference-assemblies). Explorer reference navigation was compared with [dnSpy's AssemblyReferenceNodeImpl](https://github.com/dnSpyEx/dnSpy/blob/master/dnSpy/dnSpy/Documents/TreeView/AssemblyReferenceNodeImpl.cs); no dnSpy code is included.
+
+`tests/e2e/references.spec.ts` exercises the actual worker and Rust parser using DLLs from the installed .NET 10 SDK packaged into a controlled test response; those third-party DLLs are not committed. `ILENS_LIVE_NUGET=1 npm run test:pages -- references.spec.ts -g 'framework references download'` checks the real NuGet download, CORS and decompression path. The normal suite also covers automatic opening of a real managed EXE, offline settings, private references, retry and cancellation. Other browser suites explicitly disable framework downloads to keep local-analysis assertions deterministic; the reference suite exercises the enabled-by-default behavior. The repository-owned `ILens.WorkspaceDependency.ref.dll` fixture tests reference-only rendering and is built from the same source as its implementation fixture, with debug symbols disabled.
+
+`samples/AutomaticDependencies` compiles an executable referencing System.Runtime, System.Collections and System.Console. Its distributed `.exe` has a managed entry point and is inspected only, never executed. Debug symbols and host paths are disabled by the shared fixture build settings.
+
+## Explorer and executable containers
+
+The tree uses assembly roots containing the actual metadata module name, then References, Resources and namespaces. Types list methods, constructors, properties, events, fields and nested types directly. Property/event accessors are nested using MethodSemantics, while declaring-type ownership remains unchanged for analysis and exports. Method parameter and return types distinguish overloads. Arrow keys, Home, End and Enter work across virtualized rows; assembly switching uses the tree instead of a separate selector.
+
+Ordinary ReadyToRun images are read-only inputs: the parser validates their header and directory bounds, then reads only the original ECMA metadata and CIL. NGen, composite R2R and mixed-mode images remain unsupported. A native EXE with no CLR directory may be a .NET launcher. ILens can open an unambiguous same-named DLL from files or a folder already selected by the user; a missing companion produces an actionable message. It cannot inspect arbitrary directories, infer renamed apphost bindings, recover NativeAOT CIL or extract single-file bundles.
+
+The hierarchy was compared against [dnSpy type nodes](https://github.com/dnSpyEx/dnSpy/blob/master/dnSpy/dnSpy/Documents/TreeView/TypeNodeImpl.cs) and [property nodes](https://github.com/dnSpyEx/dnSpy/blob/master/dnSpy/dnSpy/Documents/TreeView/PropertyNodeImpl.cs); no dnSpy implementation was copied. ReadyToRun inspection follows Microsoft's [format description](https://github.com/dotnet/runtime/blob/main/docs/design/coreclr/botr/readytorun-format.md) and [released .NET 10 header definitions](https://github.com/dotnet/runtime/blob/v10.0.0/src/coreclr/inc/readytorun.h). In particular, older flag 0x2 means SkipTypeValidation, so composite detection uses the component directory instead.

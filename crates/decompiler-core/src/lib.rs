@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 pub mod analysis;
+pub mod analyzer;
 pub mod assembly;
 pub mod ast;
 pub mod cfg;
@@ -17,6 +18,8 @@ mod opcodes;
 pub mod pe;
 pub mod pe_write;
 pub mod reader;
+pub mod resolution;
+pub mod resources;
 pub mod session;
 pub mod signature;
 pub mod transform;

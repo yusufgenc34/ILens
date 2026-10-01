@@ -3,7 +3,7 @@ import {execFileSync} from 'node:child_process'
 import {compilationUnit, inferFramework, methodDownload, renderType, safeName, xml, type ExportMember, type ExportType} from '../src/lib/export'
 import {crc32, createZipArchive} from '../src/lib/zip'
 import type {Declaration, MethodAnalysis} from '../src/lib/types'
-const method: MethodAnalysis = {token: 0x06000001, csharp: 'public long Limit() { return 9223372036854775807L; }', il: 'IL_0000: ldc.i8 9223372036854775807\nIL_0009: ret', quality: 'csharp_like', diagnostics: [], body: null, cfg: null, stack: null}
+const method: MethodAnalysis = {references:[],token: 0x06000001, csharp: 'public long Limit() { return 9223372036854775807L; }', il: 'IL_0000: ldc.i8 9223372036854775807\nIL_0009: ret', quality: 'csharp_like', diagnostics: [], body: null, cfg: null, stack: null}
 const member = {token: method.token, name: '../CON'} as Declaration
 
 describe('source downloads', () => {

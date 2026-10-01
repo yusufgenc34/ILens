@@ -1,4 +1,4 @@
-import {test, expect} from '@playwright/test'
+import {test, expect} from './test'
 import path from 'node:path'
 
 test('stylesheet applies the IDE layout, controls, editor and both themes', async ({page}, testInfo) => {
@@ -36,7 +36,7 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
 
   await expect(page.getByLabel('Open assembly files')).toBeEnabled()
  await page.getByLabel('Open assembly files').setInputFiles(path.resolve('samples/fixtures/ILens.Patterns.dll'))
-  await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Search Assembly…', exact: true}).click()
   await page.getByLabel('Search members and strings').fill('Calculator.Sum')
   await page.getByRole('button', {name: /Sum.*Calculator.Sum/}).click()

@@ -32,6 +32,7 @@ pub enum Value {
     Class(u32),
     Array(TypeId),
     Boxed(TypeId),
+    Enum(u32, TypeId),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stack {
@@ -100,6 +101,7 @@ impl<'a> Types<'a> {
     }
     pub fn stack(&self, id: TypeId) -> Stack {
         match self.value(id) {
+            Value::Enum(_, underlying) => self.stack(underlying),
             Value::Bool
             | Value::Char
             | Value::I1
@@ -266,13 +268,50 @@ impl<'a> Types<'a> {
                         "Methods on generic declaring types are not editable yet",
                     ));
                 }
-                if matches!(
-                    self.core_name(coded(row.extends))?.as_deref(),
-                    Some("ValueType" | "Enum")
-                ) {
-                    return Err(unsupported(
-                        "Custom structs and enums require value-type IL validation",
-                    ));
+                match self.core_name(coded(row.extends))?.as_deref() {
+                    Some("Enum") => {
+                        if row.flags & 0x100 == 0 || row.flags & 0x20 != 0 {
+                            return Err(invalid("An enum must be a sealed value type"));
+                        }
+                        let mut fields = self.a.nodes.iter().filter(|n| {
+                            n.parent == token && n.token >> 24 == 4 && n.flags & 0x10 == 0
+                        });
+                        let field = fields
+                            .next()
+                            .ok_or_else(|| invalid("Enum storage field is missing"))?;
+                        if fields.next().is_some()
+                            || field.name != "value__"
+                            || field.flags & 0x600 != 0x600
+                        {
+                            return Err(invalid("Invalid enum storage field"));
+                        }
+                        let (_, _, ty) = self.a.field_ref(field.token)?;
+                        let Type::Primitive(name) = &ty else {
+                            return Err(invalid("Enum storage must be an integral primitive"));
+                        };
+                        let underlying = match Self::primitive(name) {
+                            Some(
+                                v @ (Value::I1
+                                | Value::U1
+                                | Value::I2
+                                | Value::U2
+                                | Value::I4
+                                | Value::U4
+                                | Value::I8
+                                | Value::U8),
+                            ) => self.intern(v)?,
+                            _ => return Err(invalid("Unsupported enum storage type")),
+                        };
+                        let id = self.intern(Value::Enum(token, underlying))?;
+                        self.tokens.insert(token, id);
+                        return Ok(id);
+                    }
+                    Some("ValueType") => {
+                        return Err(unsupported(
+                            "Custom structs require value-type IL validation",
+                        ));
+                    }
+                    _ => {}
                 }
                 Value::Class(token)
             }
@@ -292,6 +331,12 @@ impl<'a> Types<'a> {
         let id = self.intern(value)?;
         self.tokens.insert(token, id);
         Ok(id)
+    }
+    pub fn storage(&self, id: TypeId) -> Value {
+        match self.value(id) {
+            Value::Enum(_, underlying) => self.value(underlying),
+            value => value,
+        }
     }
     pub fn compatible(&self, actual: Stack, expected: Stack) -> Result<bool> {
         self.spend()?;
@@ -381,7 +426,7 @@ impl<'a> Types<'a> {
     }
     fn describe_value(&self, id: TypeId) -> String {
         match self.value(id) {
-            Value::Class(t) => self.a.resolve(t),
+            Value::Class(t) | Value::Enum(t, _) => self.a.resolve(t),
             Value::Array(e) => format!("{}[]", self.describe_value(e)),
             Value::Boxed(e) => format!("boxed {}", self.describe_value(e)),
             v => format!("{v:?}"),

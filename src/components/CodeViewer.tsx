@@ -1,34 +1,43 @@
 'use client'
 import {useEffect, useMemo, useRef} from 'react'
 import {Compartment, EditorState} from '@codemirror/state'
-import {EditorView, lineNumbers, highlightActiveLineGutter, keymap, drawSelection, highlightActiveLine} from '@codemirror/view'
+import {EditorView, lineNumbers, highlightActiveLineGutter, keymap, drawSelection, highlightActiveLine, Decoration, hoverTooltip} from '@codemirror/view'
 import {StreamLanguage, syntaxHighlighting, HighlightStyle, bracketMatching} from '@codemirror/language'
 import {csharp} from '@codemirror/legacy-modes/mode/clike'
 import {search, searchKeymap, highlightSelectionMatches} from '@codemirror/search'
 import {defaultKeymap} from '@codemirror/commands'
 import {tags} from '@lezer/highlight'
+import type {SourceReference} from '../lib/types'
 import {editorPalette, type EditorSettings} from '../lib/editor-settings'
 
 const csharpLanguage = StreamLanguage.define(csharp)
 const il = StreamLanguage.define({token(stream) {if (stream.match('//')) {stream.skipToEnd(); return 'comment'} if (stream.match(/IL_[0-9a-fA-F]+/)) return 'labelName'; if (stream.match(/0x[0-9a-fA-F]+/)) return 'number'; if (stream.match(/"(?:[^"\\]|\\.)*"/)) return 'string'; if (stream.match(/[a-z][a-z0-9_.]+/)) return 'keyword'; stream.next(); return null}})
 
-export default function CodeViewer({text, language, theme, settings, onNavigate, label}: {text: string; language: string; theme: string; settings: EditorSettings; onNavigate?: (token: number) => void; label?: string}) {
+export default function CodeViewer({text, language, theme, settings, onNavigate, onReferenceNavigate, references, documentKey, label}: {references?: SourceReference[]; documentKey?: string; onReferenceNavigate?: (token: number) => void; text: string; language: string; theme: string; settings: EditorSettings; onNavigate?: (token: number) => void; label?: string}) {
   const host = useRef<HTMLDivElement>(null)
   const editor = useRef<EditorView | null>(null)
   const options = useMemo(() => new Compartment(), [])
   const navigate = useRef(onNavigate)
   navigate.current = onNavigate
+  const referenceNavigate = useRef(onReferenceNavigate); referenceNavigate.current = onReferenceNavigate
+  const sourceReferences = useRef(references); sourceReferences.current = references
+  const activeDocument = useRef<string | undefined>(undefined)
+  const savedPositions = useRef(new Map<string, {anchor:number; head:number; top:number; left:number}>())
+  const referenceAt = (position: number) => sourceReferences.current?.find(r => position >= r.start && position < r.end)
   // Reconfigure the live editor to preserve selection and scroll on theme changes.
   useEffect(() => {
     if (!host.current) return
     const view = new EditorView({parent: host.current, state: EditorState.create({extensions: [
       EditorState.readOnly.of(true), EditorView.editable.of(false), drawSelection(), bracketMatching(),
-      keymap.of([...searchKeymap, ...defaultKeymap]), search({top: true}), highlightSelectionMatches(),
+      keymap.of([{key:'F12', run:view => {const reference = referenceAt(view.state.selection.main.head); if (!reference || !referenceNavigate.current) return false; referenceNavigate.current(reference.token); return true}}, ...searchKeymap, ...defaultKeymap]),
+      hoverTooltip((_view, position) => {const reference = referenceAt(position); if (!reference) return null; return {pos:reference.start, end:reference.end, create:() => {const dom = document.createElement('div'); dom.className = 'px-2 py-1 text-xs'; dom.textContent = `Go to definition · 0x${reference.token.toString(16).toUpperCase().padStart(8,'0')} · Ctrl/⌘-click or F12`; return {dom}}}}), search({top: true}), highlightSelectionMatches(),
       options.of([]),
       EditorView.domEventHandlers({click(event, view) {
         if (!navigate.current || (!event.ctrlKey && !event.metaKey)) return false
         const position = view.posAtCoords({x: event.clientX, y: event.clientY})
         if (position === null) return false
+        const reference = referenceAt(position)
+        if (reference && referenceNavigate.current) {referenceNavigate.current(reference.token); return true}
         const line = view.state.doc.lineAt(position)
         const match = [...line.text.matchAll(/0x[0-9a-fA-F]{8}/g)].find(m => position - line.from >= m.index! && position - line.from <= m.index! + m[0].length)
         if (!match) return false
@@ -40,8 +49,19 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
   }, [options])
   useEffect(() => {
     const view = editor.current
-    if (view && view.state.doc.toString() !== text) view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: text}, selection: {anchor: 0}, effects: EditorView.scrollIntoView(0)})
-  }, [text])
+    if (!view || (activeDocument.current && !documentKey)) return
+    if (view.state.doc.toString() === text && activeDocument.current === documentKey) return
+    if (activeDocument.current) {
+      const selection = view.state.selection.main
+      savedPositions.current.set(activeDocument.current, {anchor:selection.anchor, head:selection.head, top:view.scrollDOM.scrollTop, left:view.scrollDOM.scrollLeft})
+      if (savedPositions.current.size > 128) savedPositions.current.delete(savedPositions.current.keys().next().value!)
+    }
+    const saved = documentKey && savedPositions.current.get(documentKey)
+    activeDocument.current = documentKey
+    view.dispatch({changes:{from:0, to:view.state.doc.length, insert:text}, selection:{anchor:Math.min(saved ? saved.anchor : 0, text.length), head:Math.min(saved ? saved.head : 0, text.length)}})
+    const frame = requestAnimationFrame(() => {view.scrollDOM.scrollTop = saved ? saved.top : 0; view.scrollDOM.scrollLeft = saved ? saved.left : 0})
+    return () => cancelAnimationFrame(frame)
+  }, [text, documentKey])
   useEffect(() => {
     const p = editorPalette(settings.theme, theme)
     const highlighting = HighlightStyle.define([
@@ -57,6 +77,7 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
       language === 'C#' ? csharpLanguage : il,
       ...(settings.highlighting ? [syntaxHighlighting(highlighting)] : []),
       ...(settings.lineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : []),
+      EditorView.decorations.of(Decoration.set((references ?? []).filter(r => r.start >= 0 && r.end > r.start && r.end <= (editor.current?.state.doc.length ?? 0)).map(r => Decoration.mark({class:'cursor-pointer underline decoration-dotted decoration-muted-foreground/40 underline-offset-2'}).range(r.start,r.end)), true)),
       highlightActiveLine(), ...(settings.wrap ? [EditorView.lineWrapping] : []),
       EditorView.theme({
         '&': {height: '100%', fontSize: `${settings.fontSize}px`, color: p.foreground, backgroundColor: p.background, colorScheme: p.dark ? 'dark' : 'light'},
@@ -72,6 +93,6 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
       }, {dark: p.dark}),
       EditorView.contentAttributes.of({'aria-label': label ?? `${language} code viewer`, tabindex: '0'}),
     ])})
-  }, [options, language, theme, settings, label])
+  }, [options, language, theme, settings, label, references, text, documentKey])
   return <div ref={host} className="code-host h-full overflow-hidden" data-editor-theme={settings.theme} data-highlighting={settings.highlighting} />
 }

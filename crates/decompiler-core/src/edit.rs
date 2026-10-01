@@ -81,6 +81,11 @@ fn access(owner: u32, caller: u32, flags: u16) -> Result<()> {
     Ok(())
 }
 pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
+    if a.image.ready_to_run {
+        return Err(unsupported(
+            "ReadyToRun images are read-only; their precompiled native code cannot be updated by the IL writer.",
+        ));
+    }
     let row = a.method_row(token)?;
     let method = a.method_ref(token)?;
     if method.signature.generic_count != 0 || a.generics.contains_key(&method.owner) {
@@ -141,6 +146,16 @@ pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
     Ok(body)
 }
 pub fn validate(a: &Assembly, token: u32, rows: &[EditableInstruction]) -> Result<ValidatedEdit> {
+    if a.image.ready_to_run {
+        return Err(unsupported(
+            "ReadyToRun images are read-only; their precompiled native code cannot be updated by the IL writer.",
+        ));
+    }
+    if a.info.reference_assembly {
+        return Err(unsupported(
+            "Reference assemblies contain API declarations, not editable implementations.",
+        ));
+    }
     let mut body = supported_body(a, token)?;
     let code = cil_encode::encode(rows)?;
     body.instructions = cil::decode(&code)?;
@@ -651,7 +666,7 @@ fn array(types: &mut Types<'_>, stack: &mut Vec<Stack>, i: &cil::Instruction) ->
     let stored = if store { Some(pop(stack)?) } else { None };
     index(stack)?;
     let element = array_element(types, stack)?;
-    let value = types.value(element);
+    let value = types.storage(element);
     let valid = match i.opcode {
         0x90 | 0x91 | 0x9c => matches!(value, Value::Bool | Value::I1 | Value::U1),
         0x92 | 0x93 | 0x9d => matches!(value, Value::Char | Value::I2 | Value::U2),

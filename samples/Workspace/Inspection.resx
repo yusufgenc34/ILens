@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms</value></resheader>
+  <data name="Greeting" xml:space="preserve"><value>Resource inspection fixture</value></data>
+  <data name="LiteralMarkup" xml:space="preserve"><value>&lt;script&gt;never executed&lt;/script&gt;</value></data>
+  <data name="Answer"><value>42</value></data>
+</root>

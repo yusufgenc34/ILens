@@ -1,4 +1,4 @@
-import {test, expect} from '@playwright/test'
+import {test, expect} from './test'
 import {readFileSync} from 'node:fs'
 test('WASM parser survives truncations, produces real CFGs, and explicitly releases memory', async ({page}) => {
  await page.goto('/')

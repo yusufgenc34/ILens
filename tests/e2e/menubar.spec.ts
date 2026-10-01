@@ -1,4 +1,4 @@
-import {expect, test} from '@playwright/test'
+import {expect, test} from './test'
 import path from 'node:path'
 test('top menus support keyboard navigation, disabled actions and view settings', async ({page}, testInfo) => {
   await page.goto('./'); await expect(page.getByLabel('Open assembly files')).toBeEnabled()
@@ -27,7 +27,7 @@ test('top menus support keyboard navigation, disabled actions and view settings'
   const picker = page.waitForEvent('filechooser')
   await page.getByRole('menuitem', {name: 'Open Assembly…', exact: true}).click()
   await (await picker).setFiles(path.resolve('samples/fixtures/ILens.Dependency.dll'))
-  await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   await expect(page.locator('.menu-context')).toHaveText('ILens.Dependency.dll')
   await page.getByRole('menuitem', {name: 'Help', exact: true}).click()
   await page.getByRole('menuitem', {name: 'About ILens', exact: true}).click()

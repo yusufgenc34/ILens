@@ -1,4 +1,4 @@
-import {test, expect} from '@playwright/test'
+import {test, expect} from '../e2e/test'
 
 test('static host serves worker, WASM, styles and sample under the site base without server endpoints', async ({page, context, baseURL}, testInfo) => {
   const origin = new URL(baseURL!).origin
@@ -16,7 +16,7 @@ test('static host serves worker, WASM, styles and sample under the site base wit
   await expect(page).toHaveTitle('ILens — .NET decompiler')
   await expect(page.getByRole('button', {name: 'Explore a compiled sample'})).toBeEnabled()
   await page.getByRole('button', {name: 'Explore a compiled sample'}).click()
-  await expect(page.getByLabel('Primary assembly')).toHaveValue('1')
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   await page.keyboard.press('ControlOrMeta+k')
   await page.getByLabel('Search members and strings').fill('Calculator.Sum')
   await page.getByRole('button', {name: /Sum.*Calculator.Sum/}).click()

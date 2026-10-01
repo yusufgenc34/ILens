@@ -28,11 +28,11 @@ impl Error {
     pub fn new(code: ErrorCode, detail: impl Into<String>) -> Self {
         let message = match code {
             ErrorCode::InvalidPe => "This file is not a valid Windows PE assembly.",
-            ErrorCode::NotManaged => "This file contains no CLR metadata. NativeAOT and native executables are not supported.",
+            ErrorCode::NotManaged => "This EXE has no CLR metadata. For a .NET launcher, open its companion DLL or select the application folder. NativeAOT and native executables have no CIL to decompile.",
             ErrorCode::InvalidClr => "The CLR header is damaged or incomplete.",
             ErrorCode::CorruptMetadata => "The assembly metadata is damaged or contains invalid references.",
             ErrorCode::UnsupportedMetadata => "This metadata format is not supported yet.",
-            ErrorCode::UnsupportedNative => "This assembly contains native code. Only IL-only assemblies are supported.",
+            ErrorCode::UnsupportedNative => "This native or mixed-mode format is not supported. Open the original managed DLL/EXE instead. See technical details for the detected format.",
             ErrorCode::InvalidMethodBody => "This method has invalid or truncated CIL.",
             ErrorCode::DecompilerLimitation => "This method requires a decompilation feature that is not implemented yet. The IL view is available.",
             ErrorCode::SizeLimit => "This input exceeds the browser analysis limits.",

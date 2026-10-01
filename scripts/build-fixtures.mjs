@@ -26,3 +26,17 @@ for (const [name, properties] of [
   if (build.status !== 0) process.exit(build.status ?? 1)
   copyFileSync(`samples/bin/${name}.dll`, `samples/fixtures/${name}.dll`)
 }
+
+// Cross-assembly inspection and .resources fixtures; compile only.
+const workspace = spawnSync('dotnet', ['build', 'samples/Workspace', '-c', 'Release', '-o', 'samples/bin'], {stdio:'inherit'})
+if (workspace.status !== 0) process.exit(workspace.status ?? 1)
+for (const name of ['ILens.Workspace.dll', 'ILens.WorkspaceDependency.dll']) copyFileSync(`samples/bin/${name}`, `samples/fixtures/${name}`)
+
+// Reference-only API fixture from the same owned source, with debug paths disabled.
+copyFileSync('samples/WorkspaceDependency/obj/Release/net10.0/ref/ILens.WorkspaceDependency.dll', 'samples/fixtures/ILens.WorkspaceDependency.ref.dll')
+
+const automatic = spawnSync('dotnet', ['build', 'samples/AutomaticDependencies', '-c', 'Release', '-o', 'samples/bin'], {stdio:'inherit'})
+if (automatic.status !== 0) process.exit(automatic.status ?? 1)
+// OutputType=Exe supplies a real managed entry point. The SDK uses .dll for the
+// filename by default; distribute this fixture as .exe to cover the EXE picker.
+copyFileSync('samples/bin/ILens.AutomaticDependencies.dll', 'samples/fixtures/ILens.AutomaticDependencies.exe')

@@ -14,6 +14,7 @@ pub struct Image {
     pub subsystem: u16,
     pub cli_flags: u32,
     pub entry_point: u32,
+    pub ready_to_run: bool,
     pub metadata: Range<usize>,
     pub resources_rva: u32,
     pub resources_size: u32,
@@ -79,6 +80,7 @@ impl Image {
             subsystem: o.windows_fields.subsystem,
             cli_flags: 0,
             entry_point: 0,
+            ready_to_run: false,
             metadata: 0..0,
             resources_rva: 0,
             resources_size: 0,
@@ -103,13 +105,49 @@ impl Image {
         }
         image.cli_flags = u32_at(c, 16)?;
         image.entry_point = u32_at(c, 20)?;
-        if u32_at(c, 64)? != 0 || u32_at(c, 68)? != 0 {
-            return Err(Error::new(
-                ErrorCode::UnsupportedNative,
-                "ReadyToRun/native managed header detected",
-            ));
+        let native_rva = u32_at(c, 64)?;
+        let native_size = u32_at(c, 68)? as usize;
+        if native_rva != 0 || native_size != 0 {
+            // ReadyToRun preserves ECMA metadata and CIL in ordinary component
+            // images. Inspect only that CIL; never decode/execute native code.
+            if native_rva == 0 || native_size < 16 {
+                return Err(Error::new(
+                    ErrorCode::InvalidClr,
+                    "Truncated managed native header",
+                ));
+            }
+            let range = image.range(bytes, native_rva, native_size)?;
+            let native = &bytes[range];
+            if u32_at(native, 0)? != 0x00525452 {
+                return Err(Error::new(
+                    ErrorCode::UnsupportedNative,
+                    "NGen or unknown managed native format; open the original IL assembly.",
+                ));
+            }
+            let count = u32_at(native, 12)? as usize;
+            if count > 4096 {
+                return Err(Error::limit("Too many ReadyToRun sections"));
+            }
+            slice(native, 16, count * 12)?;
+            for index in 0..count {
+                let at = 16 + index * 12;
+                // Flag 0x2 changed meaning across R2R versions. Use the
+                // component directory to recognize composite images instead.
+                if u32_at(native, at)? == 115 {
+                    return Err(Error::new(
+                        ErrorCode::UnsupportedNative,
+                        "Composite ReadyToRun images are not supported; open the component IL assemblies.",
+                    ));
+                }
+                image.range(
+                    bytes,
+                    u32_at(native, at + 4)?,
+                    u32_at(native, at + 8)? as usize,
+                )?;
+            }
+            image.ready_to_run = true;
         }
-        if image.cli_flags & 1 == 0 || image.cli_flags & 0x10 != 0 {
+        if (image.cli_flags & 1 == 0 && !image.ready_to_run) || image.cli_flags & 0x10 != 0 {
             return Err(Error::new(
                 ErrorCode::UnsupportedNative,
                 "Mixed-mode/native entry point detected",

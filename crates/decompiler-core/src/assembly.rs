@@ -17,7 +17,7 @@ fn row<T>(rows: &[T], token: u32) -> Result<&T> {
     rows.get((token & 0xffffff).wrapping_sub(1) as usize)
         .ok_or_else(|| Error::metadata(format!("Invalid token {token:#010x}")))
 }
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Identity {
     pub name: String,
     pub version: String,
@@ -37,6 +37,9 @@ impl Identity {
 #[derive(Debug, Clone, Serialize)]
 pub struct AssemblyInfo {
     pub identity: Identity,
+    pub module_name: String,
+    pub ready_to_run: bool,
+    pub reference_assembly: bool,
     pub runtime: String,
     pub target_framework: crate::inspection::FrameworkInfo,
     pub obfuscation: crate::inspection::ObfuscationInfo,
@@ -52,6 +55,8 @@ pub struct Node {
     pub parent: u32,
     pub kind: String,
     pub name: String,
+    pub display_name: String,
+    pub accessor_of: Option<u32>,
     pub namespace: String,
     pub full_name: String,
     pub flags: u32,
@@ -101,7 +106,10 @@ fn charge_names(total: &mut usize, bytes: usize) -> Result<()> {
     Ok(())
 }
 fn charge_node(total: &mut usize, n: &Node) -> Result<()> {
-    charge_names(total, n.name.len() + n.full_name.len() + n.namespace.len())
+    charge_names(
+        total,
+        n.name.len() + n.full_name.len() + n.namespace.len() + n.display_name.len(),
+    )
 }
 impl Assembly {
     pub fn load(bytes: Vec<u8>) -> Result<Self> {
@@ -131,6 +139,9 @@ impl Assembly {
         };
         let info = AssemblyInfo {
             identity,
+            module_name: m.strings.get(m.modules[0].name)?.to_owned(),
+            ready_to_run: image.ready_to_run,
+            reference_assembly: false,
             runtime: m.version().to_owned(),
             target_framework: Default::default(),
             obfuscation: Default::default(),
@@ -161,11 +172,28 @@ impl Assembly {
             semantics: HashMap::new(),
         };
         a.index()?;
-        (
-            a.info.target_framework,
-            a.info.obfuscation,
-            a.info.diagnostics,
-        ) = crate::inspection::inspect(&a);
+        a.info.reference_assembly = a
+            .attributes
+            .get(&0x20000001)
+            .into_iter()
+            .flatten()
+            .take(4096)
+            .any(|i| {
+                a.method_ref(coded(a.metadata().custom_attributes[*i].attr_type))
+                    .ok()
+                    .is_some_and(|m| {
+                        m.name == ".ctor"
+                            && a.resolve(m.owner)
+                                == "System.Runtime.CompilerServices.ReferenceAssemblyAttribute"
+                    })
+            });
+        let (framework, obfuscation, diagnostics) = crate::inspection::inspect(&a);
+        a.info.target_framework = framework;
+        a.info.obfuscation = obfuscation;
+        a.info.diagnostics.extend(diagnostics);
+        if a.image.ready_to_run {
+            a.info.diagnostics.push("ReadyToRun image: inspecting preserved metadata and CIL only. Native machine code is not decompiled, and IL editing/binary rewriting is disabled.".to_owned());
+        }
         Ok(a)
     }
     pub fn metadata(&self) -> &clrmeta::Metadata {
@@ -288,6 +316,10 @@ impl Assembly {
                 parent: self.nested.get(&token).copied().unwrap_or(0),
                 kind: kind.to_owned(),
                 name: self.string(t.type_name)?.to_owned(),
+                display_name: self
+                    .tree_label(token)
+                    .unwrap_or_else(|_| self.resolve(token)),
+                accessor_of: None,
                 namespace: self.string(t.type_namespace)?.to_owned(),
                 full_name: self.resolve(token),
                 flags: t.flags,
@@ -330,6 +362,30 @@ impl Assembly {
                 e.event_flags as u32,
             )?);
             charge_node(&mut name_bytes, self.nodes.last().expect("just inserted"))?;
+        }
+        // Preserve declaring-type ownership for analysis/export. The presentation
+        // tree nests only unambiguous same-type MethodSemantics accessors.
+        let mut accessor_owners: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (association, methods) in &self.semantics {
+            for (_, method) in methods {
+                if self.owners.contains_key(association)
+                    && self.owners.get(association) == self.owners.get(method)
+                {
+                    accessor_owners
+                        .entry(*method)
+                        .or_default()
+                        .push(*association);
+                }
+            }
+        }
+        for node in &mut self.nodes {
+            if let Some(owners) = accessor_owners.get_mut(&node.token) {
+                owners.sort_unstable();
+                owners.dedup();
+                if owners.len() == 1 {
+                    node.accessor_of = Some(owners[0]);
+                }
+            }
         }
         for (i, r) in m.assembly_refs.iter().enumerate() {
             let key = self.blob(r.public_key_or_token)?;
@@ -380,6 +436,7 @@ impl Assembly {
     fn node(&self, token: u32, kind: &str, name: u32, flags: u32) -> Result<Node> {
         let parent = self.owners.get(&token).copied().unwrap_or(0);
         let name = self.string(name)?.to_owned();
+        let display_name = self.tree_label(token).unwrap_or_else(|_| name.clone());
         Ok(Node {
             token,
             parent,
@@ -387,7 +444,81 @@ impl Assembly {
             full_name: format!("{}.{}", self.resolve(parent), name),
             namespace: String::new(),
             name,
+            display_name,
+            accessor_of: None,
             flags,
+        })
+    }
+    fn tree_label(&self, token: u32) -> Result<String> {
+        let generic_names = || {
+            self.generics
+                .get(&token)
+                .map(|items| {
+                    format!(
+                        "<{}>",
+                        items.values().cloned().collect::<Vec<_>>().join(", ")
+                    )
+                })
+                .unwrap_or_default()
+        };
+        let parameters = |types: &[Type]| -> Result<String> {
+            let mut text = String::new();
+            for t in types {
+                if !text.is_empty() {
+                    text.push_str(", ");
+                }
+                text.push_str(&self.format_type(t, token));
+                if text.len() > 16384 {
+                    return Err(Error::limit("Explorer signature exceeds 16 KiB"));
+                }
+            }
+            Ok(text)
+        };
+        let m = self.metadata();
+        Ok(match token >> 24 {
+            2 => format!(
+                "{}{}",
+                strip_arity(self.string(row(&m.type_defs, token)?.type_name)?),
+                generic_names()
+            ),
+            6 => {
+                let method = self.method_ref(token)?;
+                let args = parameters(&method.signature.parameters)?;
+                format!(
+                    "{}{}({}) : {}",
+                    method.name,
+                    generic_names(),
+                    args,
+                    self.format_type(&method.signature.return_type, token)
+                )
+            }
+            4 => {
+                let (_, name, t) = self.field_ref(token)?;
+                format!("{name} : {}", self.format_type(&t, token))
+            }
+            23 => {
+                let property = row(&m.properties, token)?;
+                let sig = signature::method(self.blob(property.property_type)?)?;
+                let args = if sig.parameters.is_empty() {
+                    String::new()
+                } else {
+                    format!("[{}]", parameters(&sig.parameters)?)
+                };
+                format!(
+                    "{}{args} : {}",
+                    self.string(property.name)?,
+                    self.format_type(&sig.return_type, token)
+                )
+            }
+            20 => {
+                let event = row(&m.events, token)?;
+                format!(
+                    "{} : {}",
+                    self.string(event.name)?,
+                    self.resolve(coded(event.event_type))
+                )
+            }
+            _ => self.resolve(token),
         })
     }
     pub fn validate_token(&self, token: u32) -> Result<()> {
@@ -1005,6 +1136,20 @@ impl Assembly {
                 context: n.full_name.clone(),
             })
             .collect();
+        for (index, row) in self.metadata().manifest_resources.iter().enumerate() {
+            if result.len() >= 250 {
+                break;
+            }
+            let name = self.string(row.name)?;
+            if name.to_lowercase().contains(&query) {
+                result.push(SearchHit {
+                    token: 0x28000001 + index as u32,
+                    kind: "resource".to_owned(),
+                    name: name.to_owned(),
+                    context: "Manifest resource".to_owned(),
+                });
+            }
+        }
         result.extend(self.strings(&query, 250 - result.len())?);
         Ok(result)
     }

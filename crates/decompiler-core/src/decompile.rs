@@ -19,10 +19,18 @@ pub struct MethodAnalysis {
     pub body: Option<MethodBody>,
     pub cfg: Option<ControlFlowGraph>,
     pub stack: Option<analysis::StackAnalysis>,
+    pub references: Vec<crate::emit::SourceReference>,
     pub source_body: Option<String>,
     pub source_declaration: Option<String>,
 }
 pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
+    decompile_with(a, token, &|t| crate::resolution::local_accessor(a, t))
+}
+pub fn decompile_with(
+    a: &Assembly,
+    token: u32,
+    accessor: &dyn Fn(u32) -> Option<crate::resolution::Accessor>,
+) -> Result<MethodAnalysis> {
     let body = a.body(token)?;
     let mut result = MethodAnalysis {
         token,
@@ -33,9 +41,24 @@ pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
         body: body.clone(),
         cfg: None,
         stack: None,
+        references: vec![],
         source_body: None,
         source_declaration: None,
     };
+    if a.info.reference_assembly {
+        result.csharp = format!(
+            "// Reference assembly: API declaration only; the implementation is not included.\n{};",
+            a.declaration(token)?
+        );
+        result.il = format!(
+            "// Reference assembly: these are placeholder instructions, not the implementation.\n{}",
+            body.as_ref()
+                .map(|body| emit::il(a, token, body))
+                .unwrap_or_else(|| "// No CIL body.".into())
+        );
+        result.diagnostics.push(Error::limitation("Reference assemblies provide API metadata, not method implementations. Load an implementation assembly to inspect its code."));
+        return Ok(result);
+    }
     let Some(body) = body else {
         result.csharp = format!(
             "// No CIL body: abstract, interface, P/Invoke, or runtime-provided member.\n{};",
@@ -68,6 +91,29 @@ pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
             ));
         }
         let mut ir = ir::lift(a, token, &body, &cfg, stack)?;
+        // Repeated calls in a method should bind a metadata token only once.
+        let mut accessors = std::collections::HashMap::new();
+        for block in &mut ir.blocks {
+            let mut resolve = |expr: &mut ir::Expr| {
+                if let ir::ExprKind::Call {
+                    token,
+                    accessor: value,
+                    virtual_call,
+                    ..
+                } = &mut expr.kind
+                {
+                    *value = accessors
+                        .entry(*token)
+                        .or_insert_with(|| accessor(*token))
+                        .clone()
+                        .filter(|p| *virtual_call || !p.is_virtual);
+                }
+            };
+            for statement in &mut block.statements {
+                transform::statement_exprs(statement, &mut resolve);
+            }
+            transform::terminator_exprs(&mut block.terminator, &mut resolve);
+        }
         transform::simplify(&mut ir);
         let ast = ast::structure(&ir, &cfg);
         let source = emit::method_source(a, token, &body, &ir, &cfg, &ast)?;
@@ -75,6 +121,19 @@ pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
             "// Reconstructed from CIL and metadata; local names are synthetic.\n// Integer arithmetic follows unchecked CIL unless checked is explicit.\n{}\n{}",
             source.declaration, source.body
         );
+        let prefix_len = code.encode_utf16().count()
+            - source.declaration.encode_utf16().count()
+            - 1
+            - source.body.encode_utf16().count();
+        result.references = source
+            .references
+            .into_iter()
+            .map(|mut r| {
+                r.start += prefix_len;
+                r.end += prefix_len;
+                r
+            })
+            .collect();
         result.source_body = Some(source.body);
         result.source_declaration = Some(source.declaration);
         Ok(code)
