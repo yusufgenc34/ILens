@@ -17,6 +17,7 @@
     "test:e2e": "playwright test",
     "test:production": "playwright test --config playwright.production.config.ts",
     "fixtures": "node scripts/build-fixtures.mjs",
+    "bcl": "node scripts/build-bcl-summary.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "vp lint src pages tests build vite.config.ts vite.pages.config.ts playwright.pages.config.ts && cargo clippy --workspace --all-targets -- -D warnings",
     "build:app": "node node_modules/rari/dist/cli.mjs build",

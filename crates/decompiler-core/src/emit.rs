@@ -774,32 +774,10 @@ fn enum_constant(a: &Assembly, value: &Expr, target: &Type) -> Option<std::strin
     let Type::ValueType(enum_token) = target else {
         return None;
     };
+    // Local enums and framework enums known from the built-in summary.
+    let members = crate::bcl::members_of(a, *enum_token)?;
     let enum_name = strip_arity(&a.resolve(*enum_token));
-    let local_enum = *enum_token >> 24 == 2
-        && a.nodes
-            .iter()
-            .any(|n| n.token == *enum_token && n.kind == "enum");
-    if local_enum {
-        for field in a
-            .nodes
-            .iter()
-            .filter(|n| n.parent == *enum_token && n.token >> 24 == 4)
-        {
-            if let Ok(Some(constant)) = crate::export::constant(a, field.token)
-                && constant
-                    .trim_end_matches(['L', 'U', 'u', 'l'])
-                    .parse::<i128>()
-                    .ok()
-                    == Some(number)
-            {
-                return Some(format!("{enum_name}.{}", identifier(&field.name)));
-            }
-        }
-    } else if a.resolve_full(*enum_token).starts_with("System.") || number == 0 {
-        // External or unknown types: only a known enum could take a cast.
-        return None;
-    }
-    local_enum.then(|| format!("({enum_name})({number})"))
+    Some(crate::bcl::enum_text(&enum_name, &members, number))
 }
 /// The value of an integer constant after the conversions applied to it, when every
 /// step is a plain integer conversion that the C# compiler would evaluate itself.

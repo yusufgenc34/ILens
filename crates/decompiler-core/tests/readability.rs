@@ -98,7 +98,9 @@ fn property_syntax_requires_metadata_semantics() {
     assert!(source(&a, "PropertyRead").contains("this.Text"));
     assert!(!source(&a, "PropertyRead").contains("get_Text"));
     assert!(source(&a, "OrdinaryMethod").contains("this.get_NotAProperty()"));
-    assert!(source(&a, "ExceptionMessage").contains("error.get_Message()"));
+    // Framework accessors bind through the built-in reference summary, which requires a
+    // Microsoft-signed scope and an exact signature match.
+    assert!(source(&a, "ExceptionMessage").contains("return error.Message;"));
 }
 fn var(name: &str) -> Expr {
     Expr::var(name, Type::primitive("int"))

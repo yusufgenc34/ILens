@@ -4,6 +4,7 @@ pub mod analyzer;
 pub mod assembly;
 pub mod ast;
 pub mod attributes;
+pub mod bcl;
 pub mod cfg;
 pub mod cil;
 pub mod cil_encode;

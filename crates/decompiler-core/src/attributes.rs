@@ -58,7 +58,8 @@ enum Element {
     Primitive(u8),
     Type,
     Boxed,
-    Enum(String, u8),
+    /// Name, storage width and members (when known).
+    Enum(String, u8, Option<Vec<(String, i128)>>),
     Array(Box<Element>),
 }
 // Enum storage width: local enums are read from value__, other enums default to int32.
@@ -103,7 +104,11 @@ fn from_type(a: &Assembly, ty: &Type) -> Result<Element> {
             _ => return Err(Error::limitation("Unsupported attribute parameter type")),
         }),
         Type::Named(t) if matches!(a.resolve(*t).as_str(), "System.Type" | "Type") => Element::Type,
-        Type::ValueType(t) => Element::Enum(strip_arity(&a.resolve(*t)), enum_size(a, *t)),
+        Type::ValueType(t) => Element::Enum(
+            strip_arity(&a.resolve(*t)),
+            enum_size(a, *t),
+            crate::bcl::members_of(a, *t),
+        ),
         Type::Array(inner, 1) => Element::Array(Box::new(from_type(a, inner)?)),
         _ => return Err(Error::limitation("Unsupported attribute parameter type")),
     })
@@ -116,7 +121,14 @@ fn from_tag(r: &mut Reader<'_>, depth: usize) -> Result<Element> {
         tag @ 0x02..=0x0e => Element::Primitive(tag),
         0x50 => Element::Type,
         0x51 => Element::Boxed,
-        0x55 => Element::Enum(type_name(&ser_string(r)?.unwrap_or_default()), 0x08),
+        0x55 => {
+            let serialized = ser_string(r)?.unwrap_or_default();
+            Element::Enum(
+                type_name(&serialized),
+                0x08,
+                crate::bcl::members_by_name(&serialized).map(<[_]>::to_vec),
+            )
+        }
         0x1d => Element::Array(Box::new(from_tag(r, depth + 1)?)),
         _ => return Err(Error::metadata("Unknown attribute element type")),
     })
@@ -152,16 +164,13 @@ fn value(r: &mut Reader<'_>, element: &Element, depth: usize) -> Result<String> 
             let inner = from_tag(r, depth + 1)?;
             value(r, &inner, depth + 1)?
         }
-        Element::Enum(name, size) => {
+        Element::Enum(name, size, members) => {
             let raw = value(r, &Element::Primitive(*size), depth + 1)?;
             let raw = raw.trim_end_matches(['U', 'L']);
-            if short(name) == "AttributeTargets"
-                && let Ok(bits) = raw.parse::<u32>()
-                && let Some(names) = attribute_targets(bits)
-            {
-                return Ok(names);
+            match (members, raw.parse::<i128>()) {
+                (Some(members), Ok(number)) => crate::bcl::enum_text(short(name), members, number),
+                _ => format!("({}){raw}", short(name)),
             }
-            format!("({}){raw}", short(name))
         }
         Element::Array(inner) => {
             let count = r.u32()?;
@@ -177,39 +186,6 @@ fn value(r: &mut Reader<'_>, element: &Element, depth: usize) -> Result<String> 
             format!("new {}[] {{ {} }}", element_name(inner), items.join(", "))
         }
     })
-}
-// System.AttributeTargets is fixed by the runtime, so its names need no loaded definition.
-fn attribute_targets(bits: u32) -> Option<String> {
-    const NAMES: [&str; 15] = [
-        "Assembly",
-        "Module",
-        "Class",
-        "Struct",
-        "Enum",
-        "Constructor",
-        "Method",
-        "Property",
-        "Field",
-        "Event",
-        "Interface",
-        "Parameter",
-        "Delegate",
-        "ReturnValue",
-        "GenericParameter",
-    ];
-    if bits == 0x7fff {
-        return Some("AttributeTargets.All".to_owned());
-    }
-    if bits == 0 || bits > 0x7fff {
-        return None;
-    }
-    Some(
-        (0..15)
-            .filter(|i| bits & (1 << i) != 0)
-            .map(|i| format!("AttributeTargets.{}", NAMES[i]))
-            .collect::<Vec<_>>()
-            .join(" | "),
-    )
 }
 fn element_name(element: &Element) -> String {
     match element {
@@ -231,7 +207,7 @@ fn element_name(element: &Element) -> String {
         .to_owned(),
         Element::Type => "Type".to_owned(),
         Element::Boxed => "object".to_owned(),
-        Element::Enum(name, _) => short(name).to_owned(),
+        Element::Enum(name, ..) => short(name).to_owned(),
         Element::Array(inner) => format!("{}[]", element_name(inner)),
     }
 }

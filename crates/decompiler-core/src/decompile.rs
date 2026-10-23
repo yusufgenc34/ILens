@@ -167,9 +167,10 @@ pub fn lift_with(
                 ..
             } = &mut expr.kind
             {
+                // Loaded definitions first, then the built-in framework summary.
                 *value = accessors
                     .entry(*token)
-                    .or_insert_with(|| accessor(*token))
+                    .or_insert_with(|| accessor(*token).or_else(|| crate::bcl::accessor(a, *token)))
                     .clone()
                     .filter(|p| *virtual_call || !p.is_virtual);
             }

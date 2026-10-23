@@ -146,7 +146,7 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
         Ok(TypeDeclaration {token:n.token, parent:if Some(n.token)==root {0}else{n.parent}, name:n.name.clone(), namespace:n.namespace.clone(), kind:if n.name == "<Module>" {"module".to_owned()} else {n.kind.clone()}, declaration, members, diagnostics})
     }).collect()
 }
-pub(crate) fn constant(a: &Assembly, token: u32) -> Result<Option<String>> {
+pub fn constant(a: &Assembly, token: u32) -> Result<Option<String>> {
     let Some(c) = a
         .metadata()
         .constants
