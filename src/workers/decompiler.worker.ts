@@ -64,6 +64,9 @@ async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
     case 'getResourceBytes': return {buffer:core.resource_bytes(request.assembly, request.token, request.entry).buffer}
     case 'getTree': return core.get_tree(request.assembly)
     case 'getInfo': return core.get_assembly_info(request.assembly)
+    case 'getPeHeaders': return core.get_pe_headers(request.assembly)
+    case 'detectProtection': return core.detect_protection(request.assembly)
+    case 'detectFile': if (request.buffer.byteLength > 64 * 1024 * 1024) throw {code: 'size_limit', message: 'Files must be 64 MiB or smaller.', detail: 'Input size checked before copying into WASM.'}; return core.detect_file(new Uint8Array(request.buffer))
     case 'getType': return core.get_type(request.assembly, request.token)
     case 'getMetadata': return core.get_metadata(request.assembly, request.token)
     case 'decompileMethod': return core.decompile_method(request.assembly, request.token)
@@ -87,7 +90,8 @@ async function drain() {
       if (!request) continue
       if (cancelled.delete(request.id)) continue
       try {
-        send({id: request.id, kind: 'progress', message: request.op === 'load' ? 'Validating PE headers and CLR metadata…' : request.op === 'decompileMethod' ? 'Analyzing control flow and reconstructing C#…' : 'Reading local assembly data…'})
+        // Background scans must not replace the status of the operation the user started.
+        if (request.op !== 'detectProtection') send({id: request.id, kind: 'progress', message: request.op === 'load' ? 'Validating PE headers and CLR metadata…' : request.op === 'decompileMethod' ? 'Analyzing control flow and reconstructing C#…' : 'Reading local assembly data…'})
         const core = await initialize()
         if (cancelled.delete(request.id)) continue
         const result = await dispatch(core, request)

@@ -31,6 +31,9 @@ pub struct MemberSource {
     pub diagnostics: Vec<String>,
     pub accessors: Vec<(String, u32)>,
     pub metadata: serde_json::Value,
+    /// Navigation ranges in UTF-16 units relative to `body`.
+    #[serde(skip)]
+    pub references: Vec<crate::emit::SourceReference>,
 }
 
 fn constraints(a: &Assembly, token: u32) -> Result<String> {
@@ -51,7 +54,7 @@ fn constraints(a: &Assembly, token: u32) -> Result<String> {
         for constraint in &a.metadata().generic_param_constraints {
             if constraint.owner == index as u32 + 1 {
                 let name = a.resolve(coded(constraint.constraint));
-                if name != "System.ValueType" {
+                if a.resolve_full(coded(constraint.constraint)) != "System.ValueType" {
                     terms.push(name);
                 }
             }
@@ -100,7 +103,14 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
     for node in &a.nodes {
         children.entry(node.parent).or_default().push(node);
     }
-    a.nodes.iter().filter(|n| n.token >> 24 == 2 && within(n.token)).map(|n| {
+    // Closure classes and async/iterator state machines are expressed by the rebuilt
+    // lambdas and methods, so they are not written as types (as ILSpy/dnSpy hide them).
+    let generated = |n: &&crate::assembly::Node| {
+        n.parent >> 24 == 2
+            && n.name.starts_with('<')
+            && crate::attributes::compiler_generated(a, n.token)
+    };
+    a.nodes.iter().filter(|n| n.token >> 24 == 2 && within(n.token) && (Some(n.token) == root || !generated(n))).map(|n| {
         let row = &a.metadata().type_defs[(n.token & 0xffffff) as usize - 1];
         let mut diagnostics = attribute_notes(a, n.token);
         if row.flags & 0x18 != 0 || row.flags & 0x2000 != 0 { diagnostics.push("Explicit/sequential layout or interop configuration requires manual reconstruction.".to_owned()); }
@@ -110,8 +120,8 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
         let modifier = if n.kind == "class" { match row.flags & 0x180 { 0x180 => " static", 0x80 => " abstract", 0x100 => " sealed", _ => "" } } else { "" };
         let mut bases = Vec::new();
         if row.extends.row != 0 {
-            let base = a.resolve(coded(row.extends));
-            if !matches!(base.as_str(), "System.Object"|"System.ValueType"|"System.Enum"|"System.MulticastDelegate") { bases.push(base); }
+            // Compare the qualified name; display names may be shortened.
+            if !matches!(a.resolve_full(coded(row.extends)).as_str(), "System.Object"|"System.ValueType"|"System.Enum"|"System.MulticastDelegate") { bases.push(a.resolve(coded(row.extends))); }
         }
         for i in &a.metadata().interface_impls { if i.class == n.token & 0xffffff { bases.push(a.resolve(coded(i.interface))); } }
         if n.kind == "enum" && let Some(field) = children.get(&n.token).into_iter().flatten().find(|f| f.name == "value__") { bases = vec![a.format_type(&a.field_ref(field.token)?.2, n.token)]; }
@@ -136,7 +146,7 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
         Ok(TypeDeclaration {token:n.token, parent:if Some(n.token)==root {0}else{n.parent}, name:n.name.clone(), namespace:n.namespace.clone(), kind:if n.name == "<Module>" {"module".to_owned()} else {n.kind.clone()}, declaration, members, diagnostics})
     }).collect()
 }
-fn constant(a: &Assembly, token: u32) -> Result<Option<String>> {
+pub(crate) fn constant(a: &Assembly, token: u32) -> Result<Option<String>> {
     let Some(c) = a
         .metadata()
         .constants
@@ -220,6 +230,7 @@ pub fn member_with(
         diagnostics: attribute_notes(a, token),
         accessors: vec![],
         metadata: a.inspect(token)?,
+        references: vec![],
     };
     if !matches!(node.name.as_str(), ".ctor" | ".cctor")
         && identifier(&node.name) != node.name
@@ -235,6 +246,20 @@ pub fn member_with(
             let result = decompile::decompile_with(a, token, accessor)?;
             if let Some(declaration) = result.source_declaration {
                 output.declaration = declaration;
+            }
+            if let Some(body) = &result.source_body {
+                // The body is the suffix of the method document the ranges refer to.
+                let start = result.csharp.encode_utf16().count() - body.encode_utf16().count();
+                output.references = result
+                    .references
+                    .iter()
+                    .filter(|r| r.start >= start)
+                    .map(|r| crate::emit::SourceReference {
+                        start: r.start - start,
+                        end: r.end - start,
+                        token: r.token,
+                    })
+                    .collect();
             }
             output.body = result.source_body;
             output.il = result.il;
@@ -305,18 +330,32 @@ pub fn member_with(
                 .first()
                 .ok_or_else(|| Error::metadata("Property/event has no accessor"))?;
             let flags = a.method_row(first.1)?.flags;
-            if flags & 0x440 != 0
+            // Accessors may differ in access only: `{ get; private set; }`.
+            let plain = crate::assembly::implicit_interface_member(flags);
+            if flags & 0x440 != 0 && !plain
                 || semantics.iter().any(|(_, t)| {
                     a.method_row(*t)
-                        .is_ok_and(|row| row.flags & 0x457 != flags & 0x457)
+                        .is_ok_and(|row| row.flags & 0x450 != flags & 0x450)
                         || a.owners.get(t) != a.owners.get(&token)
                 })
             {
                 output.diagnostics.push("Accessor visibility, virtual/abstract binding or ownership requires manual reconstruction.".to_owned());
             }
+            // The member takes its widest accessor's access; narrower accessors say theirs.
+            let rank = |access: u16| {
+                [1, 2, 3, 4, 5, 6]
+                    .iter()
+                    .position(|r| *r == access)
+                    .unwrap_or(0)
+            };
+            let widest = semantics
+                .iter()
+                .filter_map(|(_, t)| a.method_row(*t).ok().map(|row| row.flags & 7))
+                .max_by_key(|access| rank(*access))
+                .unwrap_or(flags & 7);
             let prefix = format!(
                 "{}{}",
-                visibility(flags as u32),
+                visibility(widest as u32),
                 if flags & 16 != 0 { " static" } else { "" }
             );
             if token >> 24 == 23 {
@@ -344,17 +383,20 @@ pub fn member_with(
             output.accessors = semantics
                 .into_iter()
                 .map(|(f, t)| {
-                    (
-                        (match f {
-                            1 => "set",
-                            2 => "get",
-                            8 => "add",
-                            16 => "remove",
-                            _ => "unsupported",
-                        })
-                        .to_owned(),
-                        t,
-                    )
+                    let kind = match f {
+                        1 => "set",
+                        2 => "get",
+                        8 => "add",
+                        16 => "remove",
+                        _ => "unsupported",
+                    };
+                    let access = a.method_row(t).map(|row| row.flags & 7).unwrap_or(widest);
+                    let kind = if access == widest || f > 2 {
+                        kind.to_owned()
+                    } else {
+                        format!("{} {kind}", visibility(access as u32))
+                    };
+                    (kind, t)
                 })
                 .collect();
             if output.accessors.iter().any(|(k, _)| k == "unsupported") {

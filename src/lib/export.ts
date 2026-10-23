@@ -13,7 +13,9 @@ export function methodDownload(method: MethodAnalysis, member: Declaration, lang
   if (language === 'C#' && method.quality === 'annotated_il') throw new Error('C# reconstruction is unavailable. Download the IL instead.')
   const extension = language === 'IL' ? 'il' : 'cs'
   const diagnostics = method.diagnostics.map(d => `// ${d.detail.replace(/[\r\n\u2028\u2029]/g, ' ')}`).join('\n')
-  const text = `${sourceNotice}// Method ${tokenHex(method.token)} · ${method.quality}\n${diagnostics ? `${diagnostics}\n` : ''}\n${language === 'IL' ? method.il : method.csharp}\n`
+  // The viewer shows dnSpy-style short names; saved source keeps qualified, compilable names.
+  const csharp = method.source_declaration && method.source_body ? `${method.source_declaration}\n${method.source_body}` : method.csharp
+  const text = `${sourceNotice}// Method ${tokenHex(method.token)} · ${method.quality}\n${diagnostics ? `${diagnostics}\n` : ''}\n${language === 'IL' ? method.il : csharp}\n`
   return {name: `${safeName(member.name, member.token)}.${extension}`, mime: 'text/plain;charset=utf-8', buffer: new TextEncoder().encode(text.replace(/\r\n?/g, '\n')).buffer}
 }
 export function downloadFile(file: DownloadFile) {

@@ -78,12 +78,23 @@ pub enum ExprKind {
     },
     TypeToken(u32),
     SizeOf(Type),
+    /// `await value`, recovered from an async state machine.
+    Await(Box<Expr>),
 }
 #[derive(Debug, Clone, Serialize)]
 pub enum Statement {
-    Let { name: String, ty: Type, value: Expr },
-    Assign { target: Expr, value: Expr },
+    Let {
+        name: String,
+        ty: Type,
+        value: Expr,
+    },
+    Assign {
+        target: Expr,
+        value: Expr,
+    },
     Evaluate(Expr),
+    /// `yield return value`, recovered from an iterator state machine.
+    Yield(Expr),
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Edge {
@@ -121,6 +132,9 @@ pub struct TypedIr {
     pub argument_names: Vec<String>,
     pub return_type: Type,
     pub stack: StackAnalysis,
+    /// Source names recovered for locals, such as hoisted state-machine variables.
+    #[serde(skip)]
+    pub local_names: std::collections::HashMap<usize, String>,
 }
 impl Expr {
     pub fn var(name: impl Into<String>, ty: Type) -> Self {
@@ -781,5 +795,6 @@ pub fn lift(
         argument_names,
         return_type: mr.signature.return_type,
         stack: stack_info,
+        local_names: Default::default(),
     })
 }

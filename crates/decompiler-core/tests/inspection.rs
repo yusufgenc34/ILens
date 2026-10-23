@@ -98,3 +98,32 @@ fn malformed_framework_attribute_does_not_prevent_analysis() {
     assert!(!a.info.diagnostics.is_empty());
     assert!(a.nodes.iter().any(|n| n.name == "Sum"));
 }
+#[test]
+fn protection_scan_reports_markers_without_flagging_clean_fixtures() {
+    use decompiler_core::detect::scan;
+    let check = |bytes: &[u8]| scan(bytes, Some(&Assembly::load(bytes.to_vec()).unwrap())).unwrap();
+    for bytes in [
+        &include_bytes!("../../../samples/fixtures/ILens.Patterns.dll")[..],
+        &include_bytes!("../../../samples/fixtures/ILens.Workspace.dll")[..],
+        &include_bytes!("../../../samples/fixtures/ILens.AutomaticDependencies.exe")[..],
+        // Declares protector-named types without applying their attributes.
+        &include_bytes!("../../../samples/fixtures/ILens.NoTarget.dll")[..],
+    ] {
+        let report = check(bytes);
+        assert_eq!(report.verdict, "no_findings", "{report:?}");
+    }
+    let report = check(include_bytes!(
+        "../../../samples/fixtures/ILens.InspectionMarkers.dll"
+    ));
+    assert_eq!(report.verdict, "protected");
+    let names: Vec<_> = report.detections.iter().map(|d| d.name).collect();
+    for tool in ["ConfuserEx", "Dotfuscator", "SmartAssembly"] {
+        assert!(names.contains(&tool), "{names:?}");
+    }
+    assert!(
+        report
+            .detections
+            .iter()
+            .all(|d| d.confidence == "signature")
+    );
+}

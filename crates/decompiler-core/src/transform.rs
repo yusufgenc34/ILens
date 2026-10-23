@@ -13,7 +13,8 @@ fn children(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
         | Cast { value, .. }
         | Length(value)
         | Address(value)
-        | Deref(value) => walk(value, f),
+        | Deref(value)
+        | Await(value) => walk(value, f),
         Call { instance, args, .. } => {
             if let Some(i) = instance {
                 walk(i, f);
@@ -47,7 +48,9 @@ fn walk(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
 }
 pub fn statement_exprs(s: &mut Statement, f: &mut impl FnMut(&mut Expr)) {
     match s {
-        Statement::Let { value, .. } | Statement::Evaluate(value) => walk(value, f),
+        Statement::Let { value, .. } | Statement::Evaluate(value) | Statement::Yield(value) => {
+            walk(value, f)
+        }
         Statement::Assign { target, value } => {
             walk(target, f);
             walk(value, f);
@@ -233,7 +236,9 @@ fn first_evaluation(
                 }
                 expressions.push(value);
             }
-            Statement::Let { value, .. } | Statement::Evaluate(value) => expressions.push(value),
+            Statement::Let { value, .. } | Statement::Evaluate(value) | Statement::Yield(value) => {
+                expressions.push(value)
+            }
         }
     } else {
         match terminator {

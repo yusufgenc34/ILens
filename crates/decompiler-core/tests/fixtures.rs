@@ -81,17 +81,37 @@ fn fixture_cfg_and_stack() {
 fn common_csharp_patterns() {
     let a = fixture();
     for (name, expected) in [
-        ("Add", "return (left + right);"),
+        ("Add", "return left + right;"),
         ("Absolute", "if ("),
-        ("Sum", "for ("),
+        ("Sum", "for (int num2 = 0; num2 < count; num2++)"),
         ("Countdown", "while ("),
         ("Describe", "switch ("),
+        // Single-use label blocks after an exhaustive switch move into their cases.
+        (
+            "Describe",
+            "    default:\n            return \"many\";\n    }\n}",
+        ),
+        ("Sum", "    int num = 0;\n"),
+        ("Countdown", "value--;"),
+        ("Absolute", "    }\n    return -value;"),
         ("MakeArray", "new System.Int32[3]"),
         ("SafeDivide", "catch (System.DivideByZeroException"),
         ("Identity", "T value"),
-        ("UnsignedMax", "unchecked((uint)(-1))"),
-        ("LargeInteger", "unchecked((ulong)(unchecked((long)(-1))))"),
-        ("UnsignedDivide", "unchecked((uint)"),
+        ("UnsignedMax", "return uint.MaxValue;"),
+        ("LargeInteger", "return ulong.MaxValue;"),
+        // Unsigned operands need no reinterpreting casts.
+        ("UnsignedDivide", "return a / b;"),
+        ("SafeDivide", "catch (System.DivideByZeroException)\n"),
+        (
+            "ReadLength",
+            "using (System.IO.StringReader stringReader = new System.IO.StringReader(path))",
+        ),
+        ("Each", "foreach (int num3 in values)"),
+        (
+            "WithFinally",
+            "this.Changed?.Invoke(this, System.EventArgs.Empty);",
+        ),
+        ("MakeAdder", "return value => value + amount;"),
     ] {
         let n = a
             .nodes
@@ -164,13 +184,37 @@ fn mismatched_version_is_not_silently_unified() {
 }
 
 #[test]
-fn async_and_iterator_patterns_are_explicit_limitations() {
+fn async_and_iterator_methods_are_rebuilt_from_state_machines() {
     let a = fixture();
-    for name in ["Later", "Range"] {
+    for (name, expected) in [
+        (
+            "Later",
+            "await System.Threading.Tasks.Task.Yield();\n    return value + 1;",
+        ),
+        (
+            "Range",
+            "for (int i = 0; i < n; i++)\n    {\n        yield return i;\n    }",
+        ),
+    ] {
         let token = a.nodes.iter().find(|n| n.name == name).unwrap().token;
         let result = decompiler_core::decompile::decompile(&a, token).unwrap();
-        assert_eq!(result.quality, "annotated_il");
-        assert!(result.diagnostics[0].detail.contains("state-machine"));
+        assert_eq!(result.quality, "csharp_like", "{:?}", result.diagnostics);
+        assert!(result.csharp.contains(expected), "{}", result.csharp);
+        // No compiler machinery leaks into the rebuilt body.
+        for internal in [
+            "<>1__state",
+            "<>t__builder",
+            "<>2__current",
+            "MoveNext",
+            "GetAwaiter",
+        ] {
+            assert!(
+                !result.csharp.contains(internal),
+                "{internal} in {}",
+                result.csharp
+            );
+        }
+        // The IL view still shows the kickoff method that starts the machine.
         assert!(result.il.contains("IL_"));
     }
 }

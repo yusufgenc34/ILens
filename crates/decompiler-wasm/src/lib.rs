@@ -62,6 +62,23 @@ impl Decompiler {
     pub fn get_tree(&self, id: u32) -> Result<JsValue, JsValue> {
         js(&self.session.assembly(id).map_err(error)?.nodes)
     }
+    pub fn detect_protection(&self, id: u32) -> Result<JsValue, JsValue> {
+        let a = self.session.assembly(id).map_err(error)?;
+        js(&decompiler_core::detect::scan(&a.bytes, Some(a)).map_err(error)?)
+    }
+    // Scans files that could not be loaded as assemblies, such as native packer stubs.
+    pub fn detect_file(&self, bytes: &[u8]) -> Result<JsValue, JsValue> {
+        if bytes.len() > decompiler_core::pe::MAX_FILE {
+            return Err(error(Error::limit("Maximum file size is 64 MiB")));
+        }
+        js(&decompiler_core::detect::scan(bytes, None).map_err(error)?)
+    }
+    pub fn get_pe_headers(&self, id: u32) -> Result<JsValue, JsValue> {
+        js(
+            &decompiler_core::headers::headers(self.session.assembly(id).map_err(error)?)
+                .map_err(error)?,
+        )
+    }
     pub fn get_type(&self, id: u32, token: u32) -> Result<JsValue, JsValue> {
         js(&self.session.type_view(id, token).map_err(error)?)
     }

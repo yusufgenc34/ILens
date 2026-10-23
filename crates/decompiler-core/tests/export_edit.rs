@@ -21,16 +21,46 @@ fn emits_complete_static_type_and_all_pattern_members() {
     let t = plan.iter().find(|t| t.name == "Arithmetic").unwrap();
     assert!(t.declaration.contains("public static class Arithmetic"));
     let m = export::member(&a, method(&a, "Twice")).unwrap();
-    assert!(m.body.unwrap().contains("return (value * 2)"));
+    assert!(m.body.unwrap().contains("return value * 2;"));
     assert!(m.diagnostics.is_empty());
     let p = Assembly::load(PAT.to_vec()).unwrap();
     let plan = export::plan(&p, None).unwrap();
     let count: usize = plan.iter().map(|t| t.members.len()).sum();
-    assert_eq!(count, p.nodes.iter().filter(|n| n.token >> 24 != 2).count());
+    // Closure classes and state machines are hidden; every other member is planned.
+    let hidden: Vec<u32> = p
+        .nodes
+        .iter()
+        .filter(|n| {
+            n.token >> 24 == 2
+                && n.parent >> 24 == 2
+                && n.name.starts_with('<')
+                && decompiler_core::attributes::compiler_generated(&p, n.token)
+        })
+        .map(|n| n.token)
+        .collect();
+    assert_eq!(hidden.len(), 3);
+    assert!(plan.iter().all(|t| !hidden.contains(&t.token)));
+    assert_eq!(
+        count,
+        p.nodes
+            .iter()
+            .filter(|n| n.token >> 24 != 2 && !hidden.contains(&n.parent))
+            .count()
+    );
+    // async and iterator bodies are rebuilt from their state machines.
     let asynchronous = export::member(&p, method(&p, "Later")).unwrap();
-    assert_eq!(asynchronous.quality, "annotated_il");
-    assert!(asynchronous.body.is_none());
+    assert_eq!(asynchronous.quality, "csharp_like");
+    assert!(asynchronous.declaration.contains("public static async "));
+    assert_eq!(
+        asynchronous.body.as_deref(),
+        Some("{\n    await System.Threading.Tasks.Task.Yield();\n    return value + 1;\n}\n")
+    );
     assert!(!asynchronous.il.is_empty());
+    let iterator = export::member(&p, method(&p, "Range")).unwrap();
+    assert_eq!(
+        iterator.body.as_deref(),
+        Some("{\n    for (int i = 0; i < n; i++)\n    {\n        yield return i;\n    }\n}\n")
+    );
 }
 #[test]
 fn validates_and_reopens_changed_binary() {
@@ -234,12 +264,13 @@ fn constructor_initialization_is_emitted_from_ast_and_resources_survive_writing(
         .unwrap()
         .token;
     let source = export::member(&a, constructor).unwrap();
-    assert!(
-        source.declaration.contains(": base()"),
-        "{} {:?}",
-        source.declaration,
+    // A parameterless base call is implicit in C#, so the declaration omits it.
+    assert_eq!(
+        source.declaration, "public Calculator(int offset)",
+        "{:?}",
         source.diagnostics
     );
+    assert_eq!(source.quality, "csharp_like");
     assert!(source.body.unwrap().contains("Offset"));
     let token = method(&a, "Multiply");
     let mut rows = cil_encode::from_body(&a.body(token).unwrap().unwrap());
@@ -268,4 +299,28 @@ fn enum_literals_are_source_constants_not_field_rva_limitations() {
     let field = export::member(&a, token).unwrap();
     assert_eq!(field.declaration, "Thorough = 2,");
     assert!(field.diagnostics.is_empty());
+}
+#[test]
+fn loading_dependencies_keeps_open_edits_current() {
+    let mut session = Session::default();
+    let loaded = session.load(DEP.to_vec()).unwrap();
+    let token = method(session.assembly(loaded.id).unwrap(), "Twice");
+    let original = session.open_edit(loaded.id, token).unwrap();
+    // Automatic dependency resolution loads assemblies while an editor is open.
+    session.load(PAT.to_vec()).unwrap();
+    let mut rows = original.instructions.clone();
+    rows.iter_mut()
+        .find(|r| r.opcode == "ldc.i4.2")
+        .unwrap()
+        .opcode = "ldc.i4.3".into();
+    let current = session
+        .apply_edit(loaded.id, token, original.revision, rows)
+        .unwrap();
+    session.load(PAT.to_vec()).unwrap();
+    assert!(
+        !session
+            .export_modified(loaded.id, current.revision)
+            .unwrap()
+            .is_empty()
+    );
 }

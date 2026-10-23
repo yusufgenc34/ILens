@@ -1,5 +1,5 @@
 //! Conservative CFG region structuring. Arbitrary graphs retain explicit labels and gotos.
-use crate::{cfg::ControlFlowGraph, ir::*, signature::Type};
+use crate::{cfg::ControlFlowGraph, cil::ExceptionRegion, ir::*, signature::Type};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 #[derive(Debug, Clone, Serialize)]
@@ -34,6 +34,75 @@ pub enum Ast {
     Return(Option<Expr>),
     Throw(Option<Expr>),
     Break,
+    Try {
+        body: Vec<Ast>,
+        handlers: Vec<Handler>,
+    },
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct Handler {
+    /// "catch" or "finally".
+    pub kind: String,
+    pub catch_type: Option<u32>,
+    /// The handler's entry stack slot, which holds the caught exception.
+    pub variable: Option<String>,
+    pub body: Vec<Ast>,
+}
+/// One protected range with its sibling handlers, in handler order.
+#[derive(Debug, Clone)]
+struct Group {
+    try_start: u32,
+    try_end: u32,
+    handlers: Vec<ExceptionRegion>,
+}
+impl Group {
+    fn end(&self) -> u32 {
+        self.handlers.last().map_or(self.try_end, |h| h.handler_end)
+    }
+}
+/// Groups exception clauses for structuring, or None for layouts that stay explicit:
+/// filters, fault blocks, and ranges that overlap without nesting.
+fn groups(exceptions: &[ExceptionRegion]) -> Option<Vec<Group>> {
+    let mut groups: Vec<Group> = vec![];
+    for e in exceptions {
+        if !matches!(e.kind.as_str(), "catch" | "finally") {
+            return None;
+        }
+        match groups
+            .iter_mut()
+            .find(|g| g.try_start == e.try_start && g.try_end == e.try_end)
+        {
+            Some(g) => g.handlers.push(e.clone()),
+            None => groups.push(Group {
+                try_start: e.try_start,
+                try_end: e.try_end,
+                handlers: vec![e.clone()],
+            }),
+        }
+    }
+    for g in &mut groups {
+        g.handlers.sort_by_key(|h| h.handler_start);
+        let mut next = g.try_end;
+        for h in &g.handlers {
+            if h.handler_start != next {
+                return None;
+            }
+            next = h.handler_end;
+        }
+    }
+    for (i, a) in groups.iter().enumerate() {
+        for b in &groups[i + 1..] {
+            let (a0, a1, b0, b1) = (a.try_start, a.end(), b.try_start, b.end());
+            let disjoint = a1 <= b0 || b1 <= a0;
+            let nested = a0 <= b0 && b1 <= a1 || b0 <= a0 && a1 <= b1;
+            if !disjoint && !nested {
+                return None;
+            }
+        }
+    }
+    // Outermost first: try/catch/finally compiles to two ranges sharing a start.
+    groups.sort_by_key(|g| (g.try_start, std::cmp::Reverse(g.end())));
+    Some(groups)
 }
 /// Edge arguments are simultaneous: a backedge can rotate stack slots.
 /// Tuple assignment evaluates every RHS before overwriting any destination.
@@ -81,6 +150,10 @@ struct Builder<'a> {
     blocks: HashMap<usize, &'a IrBlock>,
     seen: HashSet<usize>,
     post: Vec<HashSet<usize>>,
+    groups: Vec<Group>,
+    entered: HashSet<usize>,
+    /// Offset ranges of the try bodies and handlers being structured, innermost last.
+    bounds: Vec<(u32, u32)>,
 }
 impl Builder<'_> {
     fn edge(&self, e: &Edge) -> Vec<Ast> {
@@ -114,11 +187,57 @@ impl Builder<'_> {
         }
         Some(path)
     }
+    // Structures one protected statement; returns where control continues after it.
+    fn protected(&mut self, group: usize, id: usize, depth: usize) -> (Ast, Option<usize>) {
+        self.entered.insert(group);
+        let g = self.groups[group].clone();
+        let exit = self.cfg.by_offset.get(&g.end()).copied();
+        self.bounds.push((g.try_start, g.try_end));
+        let body = self.region(id, exit, depth + 1);
+        self.bounds.pop();
+        let mut handlers = vec![];
+        for h in &g.handlers {
+            let entry = self.cfg.by_offset.get(&h.handler_start).copied();
+            self.bounds.push((h.handler_start, h.handler_end));
+            let body = entry.map_or_else(Vec::new, |e| self.region(e, exit, depth + 1));
+            self.bounds.pop();
+            handlers.push(Handler {
+                kind: h.kind.clone(),
+                catch_type: h.catch_type,
+                variable: (h.kind == "catch").then(|| format!("stack_{:04X}_0", h.handler_start)),
+                body,
+            });
+        }
+        (Ast::Try { body, handlers }, exit)
+    }
     fn region(&mut self, mut id: usize, stop: Option<usize>, depth: usize) -> Vec<Ast> {
         let mut out = Vec::new();
         loop {
             if Some(id) == stop {
                 return out;
+            }
+            // Control leaving the current try or handler range continues outside it.
+            if let (Some(&(low, high)), Some(block)) = (self.bounds.last(), self.cfg.blocks.get(id))
+                && (block.start < low || block.start >= high)
+            {
+                out.push(Ast::Goto(id));
+                return out;
+            }
+            if depth <= 64
+                && !self.seen.contains(&id)
+                && let Some(start) = self.cfg.blocks.get(id).map(|b| b.start)
+                && let Some(group) = (0..self.groups.len())
+                    .find(|g| self.groups[*g].try_start == start && !self.entered.contains(g))
+            {
+                let (statement, exit) = self.protected(group, id, depth);
+                out.push(statement);
+                match exit {
+                    Some(next) if Some(next) != stop => {
+                        id = next;
+                        continue;
+                    }
+                    _ => return out,
+                }
             }
             if depth > 64 || self.seen.contains(&id) {
                 out.push(Ast::Goto(id));
@@ -277,15 +396,29 @@ fn postdominators(cfg: &ControlFlowGraph) -> Vec<HashSet<usize>> {
     }
     sets
 }
-pub fn structure(ir: &TypedIr, cfg: &ControlFlowGraph) -> Vec<Ast> {
+/// Structures a method body. Supported exception layouts become `Ast::Try` nodes;
+/// others are left out so the emitter keeps its explicit labeled form.
+pub fn structure(ir: &TypedIr, cfg: &ControlFlowGraph, exceptions: &[ExceptionRegion]) -> Vec<Ast> {
+    structure_from(ir, cfg, exceptions, 0)
+}
+/// Structures from `entry`, which differs from block 0 for recovered state machines.
+pub fn structure_from(
+    ir: &TypedIr,
+    cfg: &ControlFlowGraph,
+    exceptions: &[ExceptionRegion],
+    entry: usize,
+) -> Vec<Ast> {
     let mut b = Builder {
         ir,
         cfg,
         blocks: ir.blocks.iter().map(|b| (b.id, b)).collect(),
         seen: HashSet::new(),
         post: postdominators(cfg),
+        groups: groups(exceptions).unwrap_or_default(),
+        entered: HashSet::new(),
+        bounds: vec![],
     };
-    let mut ast = b.region(0, None, 0);
+    let mut ast = b.region(entry, None, 0);
     for block in &b.ir.blocks {
         if !b.seen.contains(&block.id) {
             ast.extend(b.region(block.id, None, 0));
@@ -311,6 +444,12 @@ fn labels(nodes: &[Ast], needed: &mut HashSet<usize>) {
                 }
                 labels(default, needed);
             }
+            Ast::Try { body, handlers } => {
+                labels(body, needed);
+                for h in handlers {
+                    labels(&h.body, needed);
+                }
+            }
             _ => {}
         }
     }
@@ -332,6 +471,12 @@ fn clean(nodes: &mut Vec<Ast>) {
                         trim(a, needed);
                     }
                     trim(default, needed);
+                }
+                Ast::Try { body, handlers } => {
+                    trim(body, needed);
+                    for h in handlers {
+                        trim(&mut h.body, needed);
+                    }
                 }
                 _ => {}
             }

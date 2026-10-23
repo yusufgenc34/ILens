@@ -78,6 +78,6 @@ it('workspace tree qualifies identical tokens by assembly and keeps references i
   const overview={info:info(),references:[{token:0x23000001,identity,resolved_id:2}],resources:[]} as unknown as Overview
   const tree=createWorkspaceTree([1,2].map(id=>({id,overview,declarations:[{token:0x02000001,parent:0,kind:'class',name:'Sample',namespace:'Example',full_name:'Example.Sample',flags:1}]})))
   expect(tree).toHaveLength(2);expect(pathToToken(tree,0x02000001,2)?.[0]).toBe('a:2:overview')
-  expect(tree[0].children[0].children[0].children[0].reference?.resolved_id).toBe(2)
+  expect(tree[0].children[0].children.find(n=>n.kind==='references')!.children[0].reference?.resolved_id).toBe(2)
   expect(pathToToken(tree,0x02000001,3)).toBeNull()
 })

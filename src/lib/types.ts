@@ -5,18 +5,25 @@ export interface FrameworkInfo { display_name: string; moniker: string | null; v
 export interface ObfuscationInfo { status: 'markers_found' | 'possible' | 'no_markers' | 'inconclusive'; scan_complete: boolean; evidence: {kind: string; tool: string | null; confidence: 'marker' | 'heuristic'; detail: string; token: number | null}[] }
 export interface AssemblyInfo { module_name?: string; ready_to_run?: boolean; reference_assembly?: boolean; identity: Identity; runtime: string; target_framework: FrameworkInfo; obfuscation: ObfuscationInfo; size: number; machine: string; type_count: number; method_count: number; diagnostics: string[] }
 export interface Loaded { id: number; info: AssemblyInfo }
-export interface Declaration { token: number; parent: number; kind: string; name: string; display_name?: string; accessor_of?: number | null; namespace: string; full_name: string; flags: number }
+export interface TypeLink { token: number; name: string }
+export interface Declaration { token: number; parent: number; kind: string; name: string; display_name?: string; accessor_of?: number | null; namespace: string; full_name: string; flags: number; base?: TypeLink; interfaces?: TypeLink[] }
+export interface HeaderField { name: string; offset: number; size: number; value: string; info: string }
+export interface HeaderGroup { id: string; title: string; offset: number; size: number; fields: HeaderField[] }
+export interface SectionInfo { name: string; virtual_address: number; virtual_size: number; raw_offset: number; raw_size: number; characteristics: number; flags: string; entropy: number }
+export interface Detection { name: string; kind: string; confidence: 'signature' | 'heuristic'; evidence: string[] }
+export interface DetectionReport { managed: boolean; verdict: 'packed' | 'protected' | 'obfuscated' | 'suspicious' | 'no_findings'; detections: Detection[]; signals: {kind: string; detail: string}[] }
+export interface PeHeaders { groups: HeaderGroup[]; sections: SectionInfo[]; overlay: [number, number] | null; entropy: number }
 export interface SearchHit { token: number; kind: string; name: string; context: string }
 export interface Reference { token: number; identity: Identity; resolved_id: number | null; status: 'resolved' | 'unresolved' }
 export interface Instruction { offset: number; size: number; opcode: number; name: string; bytes: string; operand: { kind: string; value?: unknown }; resolved: string | null }
 export interface MethodBody { code_size: number; max_stack: number; file_offset: number; local_signature: number; init_locals: boolean; instructions: Instruction[]; exceptions: {kind: string; try_start: number; try_end: number; handler_start: number; handler_end: number; catch_type: number | null; filter_start: number | null}[] }
 export interface Block { id: number; start: number; end: number; successors: number[]; predecessors: number[]; exception_successors: number[] }
 export interface SourceReference {start: number; end: number; token: number}
-export interface MethodAnalysis { references: SourceReference[]; token: number; csharp: string; il: string; quality: 'csharp_like' | 'annotated_il' | 'declaration'; diagnostics: Diagnostic[]; body: MethodBody | null; cfg: { blocks: Block[] } | null; stack: { maximum: number; reachable_blocks: number } | null }
+export interface MethodAnalysis { references: SourceReference[]; token: number; csharp: string; source_declaration?: string | null; source_body?: string | null; il: string; quality: 'csharp_like' | 'annotated_il' | 'declaration'; diagnostics: Diagnostic[]; body: MethodBody | null; cfg: { blocks: Block[] } | null; stack: { maximum: number; reachable_blocks: number } | null }
 export interface AnalysisHit {assembly: number; token: number; name: string; offset: number | null; relation: string}
 export interface AnalysisPage {hits: AnalysisHit[]; next: number; total: number; done: boolean; skipped: number; truncated: boolean}
 export interface XrefPage { hits: {token: number; name: string; offset: number}[]; skipped: {token: number; error: Diagnostic}[]; next: number; total: number; done: boolean }
-export interface TypeView { declaration: string; metadata: Record<string, unknown> }
+export interface TypeView { declaration: string; metadata: Record<string, unknown>; references?: SourceReference[]; partial?: boolean }
 export interface Overview { info: AssemblyInfo; pe: Record<string, unknown>; streams: {name: string; offset: number; size: number}[]; tables: {name: string; id: number; rows: number}[]; references: Reference[]; resources: {token: number; name: string; embedded: boolean; offset: number; flags: number}[] }
 export interface ResourcePreview {size: number; kind: string; text: string | null; hex: string; entries: {index:number; name:string; kind:string; size:number; value:string | null}[]; diagnostic: string | null}
 export interface Operations {
@@ -40,6 +47,9 @@ export interface Operations {
   analyzeReferences: {input: {assembly: number; token: number; source: number; cursor: number; outgoing: boolean}; output: AnalysisPage}
   getTree: { input: {assembly: number}; output: Declaration[] }
   getInfo: { input: {assembly: number}; output: Overview }
+  getPeHeaders: { input: {assembly: number}; output: PeHeaders }
+  detectProtection: { input: {assembly: number}; output: DetectionReport }
+  detectFile: { input: {buffer: ArrayBuffer}; output: DetectionReport }
   getType: { input: {assembly: number; token: number}; output: TypeView }
   getMetadata: { input: {assembly: number; token: number}; output: Record<string, unknown> }
   decompileMethod: { input: {assembly: number; token: number}; output: MethodAnalysis }
@@ -53,7 +63,7 @@ export interface Operations {
 }
 export interface EditableInstruction {id: string; opcode: string; operand: string}
 export interface EditPreview {token: number; revision: number; instructions: EditableInstruction[]; original: EditableInstruction[]; changed: boolean; il: string; max_stack: number; code_size: number}
-export interface EditsInfo {revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null}
+export interface EditsInfo {revision: number; edit_revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null}
 export type Operation = keyof Operations
 export type Request = { [K in Operation]: {id: number; op: K} & Operations[K]['input'] }[Operation]
 export type Response = { id: number; kind: 'success'; result: unknown } | {id: number; kind: 'error'; error: Diagnostic} | {id: number; kind: 'fatal'; error: Diagnostic} | {id: number; kind: 'progress'; message: string}

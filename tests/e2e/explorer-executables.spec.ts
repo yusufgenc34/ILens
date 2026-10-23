@@ -19,7 +19,7 @@ test('Explorer follows assembly/module/namespace/type/member and property access
   await page.getByRole('treeitem',{name:'Calculator',exact:true}).locator('.disclosure').click()
   const add=page.getByRole('treeitem',{name:'Add(int, int) : int',exact:true})
   await expect(add).toHaveAttribute('aria-level','5');await add.click()
-  await expect(page.getByLabel('C# code viewer')).toContainText('return (left + right)')
+  await expect(page.getByLabel('C# code viewer')).toContainText('return left + right;')
   await expect(page.locator('.cm-scroller')).toHaveJSProperty('scrollLeft',0)
   await page.screenshot({path:info.outputPath('assembly-explorer-hierarchy.png'),animations:'disabled'})
   await expect(page.getByRole('treeitem',{name:/^(Methods|Fields|Properties|Events|Constructors)$/})).toHaveCount(0)

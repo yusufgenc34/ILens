@@ -66,6 +66,10 @@ test('Analyze finds cross-assembly field readers and writers', async ({page}, in
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('2')
   await page.locator('[role=treeitem][data-kind=assembly][data-assembly-id="2"]').click()
   await find(page,'Number')
+  // The analyzer is a dnSpy-style tool window that opens on demand.
+  await expect(page.getByRole('region',{name:'Analyze declaration'})).toHaveCount(0)
+  await page.getByRole('menuitem',{name:'View',exact:true}).click()
+  await page.getByRole('menuitemcheckbox',{name:'Analyzer',exact:true}).click()
   const panel = page.getByRole('region',{name:'Analyze declaration'})
   await panel.getByRole('button',{name:'Find references',exact:true}).click()
   await expect(panel.getByRole('status')).toHaveText(/\d+ references/)

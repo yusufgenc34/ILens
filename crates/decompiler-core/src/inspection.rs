@@ -385,6 +385,7 @@ mod tests {
             namespace: "".into(),
             full_name: name.into(),
             flags: 0,
+            ..Node::default()
         };
         assert!(
             name_evidence(&[

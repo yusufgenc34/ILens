@@ -50,7 +50,7 @@ jobs:
         env:
           ILENS_PAGES_BASE: ${{ steps.pages.outputs.base_path }}/
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install --with-deps chromium firefox webkit
       - name: Test static application
         run: npm run test:pages
         env:

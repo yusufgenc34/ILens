@@ -23,3 +23,28 @@ it('puts modules, direct members, nested types and real property accessors in a 
  expect(members.map(n=>n.name)).toEqual(['Z(int) : void','Z(string) : void','Name','Nested'])
  expect(flattenTree(tree,new Set(path)).some(r=>r.node.kind==='group')).toBe(false)
 })
+
+it('adds dnSpy base/derived type folders, a PE node and access information', async () => {
+ const {createWorkspaceTree, accessOf, peTokens}=await import('../src/lib/tree')
+ const declarations: Declaration[] = [
+  {token: 0x02000002, parent: 0, kind: 'class', name: 'Base', namespace: 'N', full_name: 'N.Base', flags: 1, base: {token: 0x01000001, name: 'System.Object'}},
+  {token: 0x02000003, parent: 0, kind: 'class', name: 'Derived', namespace: 'N', full_name: 'N.Derived', flags: 0, base: {token: 0x02000002, name: 'N.Base'}},
+  {token: 0x04000001, parent: 0x02000003, kind: 'field', name: 'Limit', display_name: 'Limit : int', namespace: '', full_name: 'N.Derived.Limit', flags: 0x51},
+  {token: 0x06000001, parent: 0x02000003, kind: 'method', name: 'get_Value', accessor_of: 0x17000001, namespace: '', full_name: 'N.Derived.get_Value', flags: 0x04},
+  {token: 0x17000001, parent: 0x02000003, kind: 'property', name: 'Value', namespace: '', full_name: 'N.Derived.Value', flags: 0},
+ ]
+ const overview={info:{identity:{name:'Fixture'},module_name:'Fixture.dll'},references:[],resources:[]} as unknown as Overview
+ const module=createWorkspaceTree([{id:1,declarations,overview}])[0].children[0]
+ expect(module.children[0]).toMatchObject({name: 'PE', token: peTokens.pe})
+ expect(module.children[0].children.map(n=>n.token)).toContain(peTokens.cor20)
+ const types=module.children.find(n=>n.kind==='namespace')!.children
+ const base=types.find(n=>n.name==='Base')!, derived=types.find(n=>n.name==='Derived')!
+ expect(base.children.map(n=>n.name)).toEqual(['Base Type and Interfaces','Derived Types'])
+ expect(base.children[1].children[0]).toMatchObject({name: 'N.Derived', target: 0x02000003}); expect(base.children[1].children[0].token).toBeUndefined()
+ expect(derived.children[0].children[0]).toMatchObject({name: 'N.Base', target: 0x02000002})
+ // Links do not own tokens, so revealing a type still finds the declaration itself.
+ expect(pathToToken([module],0x02000003,1)?.at(-1)).toBe('a:1:t:33554435')
+ expect(accessOf(base)).toEqual({access:'public',isStatic:false,constant:false})
+ expect(accessOf(derived.children.find(n=>n.name==='Limit : int')!)).toEqual({access:'private',isStatic:true,constant:true})
+ expect(accessOf(derived.children.find(n=>n.kind==='property')!)?.access).toBe('protected')
+})

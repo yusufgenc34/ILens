@@ -43,7 +43,8 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
   await expect(page.getByLabel('C# code viewer')).toContainText('for (')
   await expect(page.locator('.cm-scroller')).toHaveCSS('font-family', /monospace/)
   await expect(page.locator('.cm-gutters')).toBeVisible()
-  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(10, 10, 10)')
+  // Dracula is the default code theme, independent of the workspace appearance.
+  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(40, 42, 54)')
   await page.screenshot({path: testInfo.outputPath('styled-dark-method.png'), fullPage: true})
   await page.getByRole('tab', {name: 'IL', exact: true}).click()
   await expect(page.getByLabel('IL code viewer')).toContainText('blt.s')
@@ -52,7 +53,7 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
   await page.getByRole('menuitem', {name: 'View', exact: true}).click(); await page.getByRole('menuitemcheckbox', {name: 'Light Appearance'}).click()
   await expect(page.locator('.application')).toHaveClass(/(?:^|\s)light(?:\s|$)/)
   await expect(page.locator('.application')).toHaveCSS('background-color', 'rgb(255, 255, 255)')
-  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(255, 255, 255)')
+  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(40, 42, 54)')
   await expect(page.locator('.workspace')).toHaveCSS('display', 'grid')
   await page.screenshot({path: testInfo.outputPath('styled-light-method.png'), fullPage: true})
   expect(failures).toEqual([])

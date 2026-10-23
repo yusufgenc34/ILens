@@ -45,7 +45,7 @@ export default function ExportDialog({client, assembly, info, filename, member, 
     if (!edits) return
     const abort = new AbortController(); controller.current = abort; setBusy(true); setError(null); setStatus('Validating the modified PE and unchanged members…')
     try {
-      const result = await client.call('exportModifiedAssembly', {assembly, revision: edits.revision}, {signal: abort.signal})
+      const result = await client.call('exportModifiedAssembly', {assembly, revision: edits.edit_revision}, {signal: abort.signal})
       if (abort.signal.aborted || !mounted.current) return
       downloadFile({name: `${safeName(filename.replace(/\.(dll|exe)$/i, ''))}.modified.${/\.exe$/i.test(filename) ? 'exe' : 'dll'}`, mime: 'application/octet-stream', buffer: result.buffer}); setStatus('Validated modified assembly downloaded.')
     } catch (error) {if (mounted.current && !abort.signal.aborted) setError(diagnostic(error))}

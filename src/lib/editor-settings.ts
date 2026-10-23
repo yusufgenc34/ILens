@@ -16,7 +16,7 @@ export interface EditorSettings {
 }
 export const editorSettingsKey = 'ilens:editor-settings'
 export const fontSizes = [12, 13, 14, 16, 18] as const
-export const defaultEditorSettings: EditorSettings = {theme: 'neutral', highlighting: true, fontSize: 13, lineNumbers: true, wrap: false}
+export const defaultEditorSettings: EditorSettings = {theme: 'dracula', highlighting: true, fontSize: 13, lineNumbers: true, wrap: false}
 
 // Browser storage is optional and untrusted. Never forward arbitrary CSS into
 // the editor from saved preferences.
@@ -26,7 +26,7 @@ export function parseEditorSettings(raw: string | null): EditorSettings {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {...defaultEditorSettings}
     const saved = value as Record<string, unknown>
     return {
-      theme: editorThemes.some(t => t.id === saved.theme) ? saved.theme as EditorTheme : 'neutral',
+      theme: editorThemes.some(t => t.id === saved.theme) ? saved.theme as EditorTheme : defaultEditorSettings.theme,
       highlighting: typeof saved.highlighting === 'boolean' ? saved.highlighting : true,
       fontSize: fontSizes.some(size => size === saved.fontSize) ? saved.fontSize as number : 13,
       lineNumbers: typeof saved.lineNumbers === 'boolean' ? saved.lineNumbers : true,

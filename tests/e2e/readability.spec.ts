@@ -15,8 +15,9 @@ test('worker output simplifies a message array and saves C# that compiles', asyn
   await page.getByLabel('Search members and strings').fill('BuildMessage')
   await page.getByRole('button', {name: /BuildMessage.*FormValues.BuildMessage/}).click()
   const viewer = page.getByLabel('C# code viewer')
-  await expect(viewer).toContainText('new System.String[12]')
-  await expect(viewer).toContainText('System.Convert.ToString(this.Checked)')
+  // dnSpy-style view: keyword types, short names and type-derived local names.
+  await expect(viewer).toContainText('array = new string[12]')
+  await expect(viewer).toContainText('Convert.ToString(this.Checked)')
   await expect(viewer).not.toContainText('v_')
   await expect(page.locator('.workspace')).toHaveCSS('display', 'grid')
   await page.screenshot({path: testInfo.outputPath('readable-message.png'), fullPage: true})

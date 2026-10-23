@@ -21,7 +21,7 @@ npm test
 npm run build:wasm
 npm run typecheck
 npm run lint
-npx playwright install --with-deps chromium
+npx playwright install --with-deps chromium firefox webkit
 npm run test:e2e
 npm run build
 npm run test:production

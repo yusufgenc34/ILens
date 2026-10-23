@@ -35,22 +35,23 @@ fn message_array_is_readable_without_changing_accessor_order() {
     assert_eq!(
         elements,
         [
-            "local0",
+            "text",
             "this.Text",
-            "local0",
+            "text",
             "this.Text",
-            "local0",
+            "text",
             "System.Convert.ToString(this.Checked)",
-            "local0",
+            "text",
             "this.Text",
-            "local0",
+            "text",
             "System.Convert.ToString(this.Checked)",
-            "local0",
+            "text",
             "this.get_NotAProperty()"
         ]
     );
     assert!(text.contains("try\n") && text.contains("catch (System.Exception"));
-    assert!(text.contains("System.String.Concat(local1)"));
+    // Locals are named from their types, as ILSpy/dnSpy name them.
+    assert!(text.contains("System.String.Concat(array)"), "{text}");
     let token = a
         .nodes
         .iter()
@@ -71,14 +72,19 @@ fn message_array_is_readable_without_changing_accessor_order() {
 fn fresh_initializer_folds_but_partial_array_stays_visible_to_catch() {
     let a = fixture();
     assert!(
-        source(&a, "Initializer")
-            .contains("return new System.Int32[3] { value, (value + 1), 42 };")
+        source(&a, "Initializer").contains("return new System.Int32[3] { value, value + 1, 42 };")
     );
     let partial = source(&a, "PartialArray");
-    assert!(partial.contains("local0 = new System.Int32[3];"));
-    assert!(partial.contains("(10 / value)"));
-    assert!(partial.contains("local0[1] = "));
-    assert!(partial.find("(10 / value)").unwrap() < partial.find("local0[1] = ").unwrap());
+    assert!(
+        partial.contains("array = new System.Int32[3];"),
+        "{partial}"
+    );
+    assert!(partial.contains("10 / value"));
+    assert!(partial.contains("array[1] = "));
+    // The division still runs before the element store, inside the same statement.
+    assert!(partial.contains("array[1] = 10 / value;"), "{partial}");
+    // A C# general catch compiles to a System.Object clause.
+    assert!(partial.contains("    catch\n    {"), "{partial}");
     assert!(!partial.contains("new System.Int32[3] {"));
     // This catch exits past another normal block: its goto is necessary.
     for part in partial.split("goto ").skip(1) {
@@ -144,6 +150,7 @@ fn simplify(statements: Vec<Statement>, terminator: Terminator) -> IrBlock {
             maximum: 8,
             reachable_blocks: 1,
         },
+        local_names: Default::default(),
     };
     transform::simplify(&mut ir);
     ir.blocks.remove(0)
@@ -317,4 +324,71 @@ fn array_rhs_needs_a_nonnull_in_range_receiver_proof() {
             "length={length:?}, index={index}: {block:?}"
         );
     }
+}
+fn binary(op: &str, left: Expr, right: Expr) -> Expr {
+    Expr {
+        ty: Type::primitive("int"),
+        kind: ExprKind::Binary {
+            op: op.into(),
+            left: Box::new(left),
+            right: Box::new(right),
+            checked: false,
+            unsigned: false,
+        },
+    }
+}
+#[test]
+fn parentheses_follow_csharp_precedence_and_associativity() {
+    let a = fixture();
+    let render = |e: &Expr| decompiler_core::emit::expression(&a, 0, e).unwrap();
+    let (x, y, z) = (var("x"), var("y"), var("z"));
+    let sum = binary("+", x.clone(), y.clone());
+    assert_eq!(render(&binary("*", sum.clone(), z.clone())), "(x + y) * z");
+    assert_eq!(
+        render(&binary("+", x.clone(), binary("*", y.clone(), z.clone()))),
+        "x + y * z"
+    );
+    // Left-associative operators keep parentheses only on the right.
+    assert_eq!(
+        render(&binary("-", binary("-", x.clone(), y.clone()), z.clone())),
+        "x - y - z"
+    );
+    assert_eq!(
+        render(&binary("-", x.clone(), binary("-", y.clone(), z.clone()))),
+        "x - (y - z)"
+    );
+    assert_eq!(
+        render(&binary("==", binary("&", x.clone(), y.clone()), number(0))),
+        "(x & y) == 0"
+    );
+    let negative = number(-1);
+    let cast = |value: Expr| Expr {
+        ty: Type::primitive("long"),
+        kind: ExprKind::Cast {
+            mode: "convert".into(),
+            value: Box::new(value),
+            target: Type::primitive("long"),
+        },
+    };
+    // Constant conversions fold as the C# compiler would.
+    assert_eq!(render(&cast(negative)), "-1L");
+    // (T)-x would parse as a subtraction for a named type, so signs stay wrapped.
+    let minus_x = Expr {
+        ty: Type::primitive("int"),
+        kind: ExprKind::Unary {
+            op: "-".into(),
+            value: Box::new(x.clone()),
+        },
+    };
+    assert_eq!(render(&cast(minus_x)), "(long)(-x)");
+    assert_eq!(render(&cast(sum)), "(long)(x + y)");
+    let not_equal = binary("!=", x.clone(), y.clone());
+    let negated = Expr {
+        ty: Type::primitive("bool"),
+        kind: ExprKind::Unary {
+            op: "!".into(),
+            value: Box::new(not_equal),
+        },
+    };
+    assert_eq!(render(&negated), "x == y");
 }

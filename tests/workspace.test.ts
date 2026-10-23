@@ -1,5 +1,5 @@
 import {describe, expect, it, vi} from 'vitest'
-import {emptyNavigation, visit, travel, toggleBookmark} from '../src/lib/navigation'
+import {emptyNavigation, visit, travel, toggleBookmark, forgetAssembly} from '../src/lib/navigation'
 import {indexDependencyFolder, resolveDependencyFolder} from '../src/lib/dependency-folder'
 import type {DecompilerClient} from '../src/lib/rpc'
 import type {Identity, Loaded} from '../src/lib/types'
@@ -9,6 +9,15 @@ const identity = (name: string, version = '1.0.0.0'): Identity => ({name, versio
 const loaded = (id: number, name: string) => ({id, info:{identity:identity(name)}} as Loaded)
 const reference = (name: string) => ({identity:identity(name), resolved_id:null})
 describe('workspace navigation', () => {
+  it('forgets a closed assembly while keeping history on a surviving entry', () => {
+    let state = visit(visit(visit(emptyNavigation, location(1)), {...location(2), assembly:2}), location(3))
+    state = toggleBookmark(state, {...location(2), assembly:2})
+    state = travel(state, -1)
+    const next = forgetAssembly(state, 2)
+    expect(next.tabs.map(t => t.token)).toEqual([1,3]); expect(next.bookmarks).toEqual([])
+    expect(next.history[next.index].token).toBe(1)
+    expect(forgetAssembly(next, 1)).toEqual({tabs:[], history:[], index:-1, bookmarks:[]})
+  })
   it('preserves per-document views, walks history and forks only on new navigation', () => {
     let state = visit(visit(emptyNavigation, location(1)), location(2))
     state = visit(state, {...location(2), view:'IL'})

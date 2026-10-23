@@ -161,14 +161,14 @@ The warning panel separates metadata evidence from heuristic findings. This capt
 | `npm run typecheck` | Check TypeScript |
 | `npm run lint` | Run frontend lint and Rust Clippy |
 | `npm run format:check` | Check Rust formatting |
-| `npm run test:e2e` | Test the development application in Chromium |
-| `npm run test:production` | Test the production application in Chromium |
+| `npm run test:e2e` | Test the development application in Chromium, Firefox, WebKit and phone emulation |
+| `npm run test:production` | Test the production application in the same browsers |
 | `npm run fixtures` | Regenerate test DLLs using the .NET 10 SDK |
 
 Install the browser once before browser tests:
 
 ```sh
-npx playwright install --with-deps chromium
+npx playwright install --with-deps chromium firefox webkit
 dotnet tool restore
 npm run build:wasm
 npm run test:e2e
@@ -228,7 +228,7 @@ Obfuscation detection recognizes selected metadata markers and naming heuristics
 
 Source exports can be partial; generated solutions and projects are not guaranteed to compile. IL editing supports nongeneric static/instance reference-class methods, vectors and jagged arrays, primitive and verified local enum boxing/casts, local fields and supported calls. Generics, constructor bodies, other custom value types, external enums and exception handlers remain read-only. Binary output is restricted to supported unsigned x86/x64 managed PE layouts. See [export and editing support](docs/export-edit.md) for exact limits.
 
-A current desktop Chromium browser is tested. Current Firefox and Safari provide the required WebAssembly/module-worker APIs but have not been validated in this release. Optional NuGet extraction also requires `DecompressionStream('deflate-raw')`; if unavailable, add dependencies locally. Use localhost HTTP or HTTPS; opening files through `file://` is unsupported. No browser extension, managed runtime, or shared-memory configuration is required.
+Browser tests run in desktop Chromium, Firefox and WebKit (Safari's engine), and a phone layout runs in Pixel 7 and iPhone 14 emulation. Select one engine with `npm run test:e2e -- --project=webkit`. On narrow screens the Assembly Explorer and Inspector become drawers, and a long press opens the declaration menu. Optional NuGet extraction also requires `DecompressionStream('deflate-raw')`; if unavailable, add dependencies locally. Use localhost HTTP or HTTPS; opening files through `file://` is unsupported. No browser extension, managed runtime, or shared-memory configuration is required.
 
 ## Documentation
 

@@ -1,4 +1,5 @@
 import {defineConfig} from '@playwright/test'
+import {browserProjects} from './tests/e2e/projects'
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -6,6 +7,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: process.env.CI ? 2 : undefined,
   reporter: [['list'], ['html', {outputFolder: 'playwright-report/dev', open: 'never'}]],
-  use: {baseURL: 'http://localhost:5173', viewport: {width: 1512, height: 982}, screenshot: 'only-on-failure', trace: 'retain-on-failure'},
+  use: {baseURL: 'http://localhost:5173', screenshot: 'only-on-failure', trace: 'retain-on-failure'},
+  projects: browserProjects(),
   webServer: {command: 'node node_modules/rari/dist/cli.mjs dev', url: 'http://localhost:5173', reuseExistingServer: !process.env.CI, timeout: 120_000},
 })

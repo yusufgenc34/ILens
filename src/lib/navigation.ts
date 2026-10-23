@@ -26,3 +26,10 @@ export function toggleBookmark(state: Navigation, location: Location): Navigatio
   const present = state.bookmarks.some(t => locationKey(t) === locationKey(location))
   return {...state, bookmarks: present ? state.bookmarks.filter(t => locationKey(t) !== locationKey(location)) : [...state.bookmarks.slice(-63), location]}
 }
+// Drop every location in a closed assembly, keeping the history index on a surviving entry.
+export function forgetAssembly(state: Navigation, assembly: number): Navigation {
+  const keep = (l: Location) => l.assembly !== assembly
+  const history = state.history.filter(keep)
+  const before = state.history.slice(0, state.index + 1).filter(keep).length
+  return {tabs: state.tabs.filter(keep), history, index: Math.min(history.length - 1, Math.max(before - 1, history.length ? 0 : -1)), bookmarks: state.bookmarks.filter(keep)}
+}

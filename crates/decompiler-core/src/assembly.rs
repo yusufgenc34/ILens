@@ -9,7 +9,10 @@ use crate::{
 use clrmeta::CodedIndex;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+};
 pub fn coded(c: CodedIndex) -> u32 {
     c.table.map(|t| (t as u32) << 24).unwrap_or(0) | c.row
 }
@@ -50,6 +53,11 @@ pub struct AssemblyInfo {
     pub diagnostics: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize)]
+pub struct TypeLink {
+    pub token: u32,
+    pub name: String,
+}
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Node {
     pub token: u32,
     pub parent: u32,
@@ -60,6 +68,11 @@ pub struct Node {
     pub namespace: String,
     pub full_name: String,
     pub flags: u32,
+    /// Declared base class and interfaces of a type, for the explorer's base-type nodes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<TypeLink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<TypeLink>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchHit {
@@ -95,6 +108,56 @@ pub struct Assembly {
     nested: HashMap<u32, u32>,
     pub attributes: HashMap<u32, Vec<usize>>,
     pub semantics: HashMap<u32, Vec<(u16, u32)>>,
+    short_names: RefCell<Option<ShortNames>>,
+}
+/// While active, source emission writes unambiguous top-level type names without their
+/// namespace and records that namespace for a `using` directive. Analysis, matching and
+/// export keep fully qualified names because the context is off by default.
+struct ShortNames {
+    ambiguous: HashSet<String>,
+    current: String,
+    used: BTreeSet<String>,
+}
+/// Restores fully qualified names when dropped, even if emission fails midway.
+pub struct ShortNameScope<'a>(&'a Assembly);
+impl ShortNameScope<'_> {
+    /// Namespaces referenced so far, excluding the document's own namespace.
+    pub fn usings(&self) -> Vec<String> {
+        self.0
+            .short_names
+            .borrow()
+            .as_ref()
+            .map(|s| s.used.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
+impl Drop for ShortNameScope<'_> {
+    fn drop(&mut self) {
+        self.0.short_names.replace(None);
+        RAW_IDENTIFIERS.with(|raw| raw.set(false));
+    }
+}
+/// C# keyword for a System type, as written in display views.
+fn keyword(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "Boolean" => "bool",
+        "Byte" => "byte",
+        "SByte" => "sbyte",
+        "Char" => "char",
+        "Int16" => "short",
+        "UInt16" => "ushort",
+        "Int32" => "int",
+        "UInt32" => "uint",
+        "Int64" => "long",
+        "UInt64" => "ulong",
+        "Single" => "float",
+        "Double" => "double",
+        "Decimal" => "decimal",
+        "String" => "string",
+        "Object" => "object",
+        "Void" => "void",
+        _ => return None,
+    })
 }
 fn charge_names(total: &mut usize, bytes: usize) -> Result<()> {
     *total = total
@@ -170,6 +233,7 @@ impl Assembly {
             nested: HashMap::new(),
             attributes: HashMap::new(),
             semantics: HashMap::new(),
+            short_names: RefCell::new(None),
         };
         a.index()?;
         a.info.reference_assembly = a
@@ -300,6 +364,19 @@ impl Assembly {
             charge_names(&mut name_bytes, name.len())?;
             self.names.insert(0x02000001 + i as u32, name);
         }
+        let mut interfaces: HashMap<u32, Vec<TypeLink>> = HashMap::new();
+        for i in &m.interface_impls {
+            let interface = coded(i.interface);
+            let links = interfaces.entry(0x02000000 | i.class).or_default();
+            if links.len() < 256 {
+                let name = self.resolve(interface);
+                charge_names(&mut name_bytes, name.len())?;
+                links.push(TypeLink {
+                    token: interface,
+                    name,
+                });
+            }
+        }
         for (i, t) in m.type_defs.iter().enumerate() {
             let token = 0x02000001 + i as u32;
             let base = self.resolve(coded(t.extends));
@@ -326,6 +403,12 @@ impl Assembly {
                 namespace: self.string(t.type_namespace)?.to_owned(),
                 full_name: self.resolve(token),
                 flags: t.flags,
+                // A nil TypeDefOrRef keeps its table tag with row zero.
+                base: (coded(t.extends) & 0xffffff != 0).then(|| TypeLink {
+                    token: coded(t.extends),
+                    name: base.clone(),
+                }),
+                interfaces: interfaces.remove(&token).unwrap_or_default(),
             });
             charge_node(&mut name_bytes, self.nodes.last().expect("just inserted"))?;
         }
@@ -434,6 +517,23 @@ impl Assembly {
         {
             self.info.diagnostics.push("Some methods have native/runtime implementations; their metadata is inspectable but no CIL is available.".to_owned());
         }
+        // Explorer labels use short type names like dnSpy; full_name stays qualified.
+        let labels: Vec<_> = {
+            let _scope = self.short_names("");
+            self.nodes
+                .iter()
+                .map(|n| {
+                    matches!(n.token >> 24, 4 | 6 | 20 | 23)
+                        .then(|| self.tree_label(n.token).ok())
+                        .flatten()
+                })
+                .collect()
+        };
+        for (node, label) in self.nodes.iter_mut().zip(labels) {
+            if let Some(label) = label {
+                node.display_name = label;
+            }
+        }
         Ok(())
     }
     fn node(&self, token: u32, kind: &str, name: u32, flags: u32) -> Result<Node> {
@@ -450,6 +550,7 @@ impl Assembly {
             display_name,
             accessor_of: None,
             flags,
+            ..Node::default()
         })
     }
     fn tree_label(&self, token: u32) -> Result<String> {
@@ -533,6 +634,70 @@ impl Assembly {
             .raw_row(&self.bytes[self.image.metadata.clone()], token)?;
         Ok(())
     }
+    /// Enables short type names for source emitted inside `namespace`.
+    pub fn short_names(&self, namespace: &str) -> ShortNameScope<'_> {
+        let m = self.metadata();
+        let mut seen: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut add = |ns: &str, name: &str| {
+            seen.entry(name.to_owned())
+                .or_default()
+                .insert(ns.to_owned());
+        };
+        for (i, t) in m.type_defs.iter().enumerate() {
+            if !self.nested.contains_key(&(0x02000001 + i as u32))
+                && let (Ok(ns), Ok(name)) =
+                    (self.string(t.type_namespace), self.string(t.type_name))
+            {
+                add(ns, name);
+            }
+        }
+        for t in &m.type_refs {
+            if coded(t.resolution_scope) >> 24 != 1
+                && let (Ok(ns), Ok(name)) =
+                    (self.string(t.type_namespace), self.string(t.type_name))
+            {
+                add(ns, name);
+            }
+        }
+        // A short name that is also a namespace root would bind to the namespace instead.
+        let roots: HashSet<String> = seen
+            .values()
+            .flatten()
+            .filter_map(|ns| ns.split('.').next().map(str::to_owned))
+            .collect();
+        let ambiguous = seen
+            .into_iter()
+            .filter(|(name, namespaces)| namespaces.len() > 1 || roots.contains(name))
+            .map(|(name, _)| name)
+            .collect();
+        self.short_names.replace(Some(ShortNames {
+            ambiguous,
+            current: namespace.to_owned(),
+            used: BTreeSet::new(),
+        }));
+        RAW_IDENTIFIERS.with(|raw| raw.set(true));
+        ShortNameScope(self)
+    }
+    fn qualified(&self, ns: &str, name: &str) -> String {
+        if ns.is_empty() {
+            return name.to_owned();
+        }
+        if ns == "System"
+            && self.short_names.borrow().is_some()
+            && let Some(keyword) = keyword(name)
+        {
+            return keyword.to_owned();
+        }
+        if let Some(context) = self.short_names.borrow_mut().as_mut()
+            && !context.ambiguous.contains(name)
+        {
+            if ns != context.current && !context.current.starts_with(&format!("{ns}.")) {
+                context.used.insert(ns.to_owned());
+            }
+            return name.to_owned();
+        }
+        format!("{ns}.{name}")
+    }
     fn type_name_depth(&self, token: u32, depth: usize) -> Result<String> {
         if depth > 48 {
             return Err(Error::limit("Type resolution exceeds 48 levels"));
@@ -551,11 +716,7 @@ impl Assembly {
                         name
                     ))
                 } else {
-                    Ok(if ns.is_empty() {
-                        name.to_owned()
-                    } else {
-                        format!("{ns}.{name}")
-                    })
+                    Ok(self.qualified(ns, name))
                 }
             }
             2 => {
@@ -569,11 +730,7 @@ impl Assembly {
                         name
                     ))
                 } else {
-                    Ok(if ns.is_empty() {
-                        name.to_owned()
-                    } else {
-                        format!("{ns}.{name}")
-                    })
+                    Ok(self.qualified(ns, name))
                 }
             }
             27 => {
@@ -621,6 +778,14 @@ impl Assembly {
             Type::Pointer(t) => format!("{}*", inner(t)?),
             Type::ByRef(t) => format!("ref {}", inner(t)?),
             Type::Pinned(t) => format!("{} /* pinned */", inner(t)?),
+            // Nullable<T> is written T?, as in C# source.
+            Type::GenericInstance { base, args }
+                if args.len() == 1
+                    && matches!(base.as_ref(), Type::ValueType(t) | Type::Named(t)
+                        if self.resolve_full(*t) == "System.Nullable`1") =>
+            {
+                format!("{}?", inner(&args[0])?)
+            }
             Type::GenericInstance { base, args } => format!(
                 "{}<{}>",
                 strip_arity(&inner(base)?),
@@ -655,6 +820,16 @@ impl Assembly {
         }
         Ok(rendered)
     }
+    /// The fully qualified name even while a display short-name scope is active.
+    /// Identity and definition matching must use this, never the display name.
+    pub fn resolve_full(&self, token: u32) -> String {
+        let saved = self.short_names.take();
+        let raw = RAW_IDENTIFIERS.with(|raw| raw.replace(false));
+        let name = self.resolve(token);
+        self.short_names.replace(saved);
+        RAW_IDENTIFIERS.with(|cell| cell.set(raw));
+        name
+    }
     pub fn resolve(&self, token: u32) -> String {
         self.resolve_depth(token, 0)
             .unwrap_or_else(|_| format!("unresolved_0x{token:08X}"))
@@ -663,7 +838,9 @@ impl Assembly {
         if depth > 48 {
             return Err(Error::limit("Token resolution depth exceeds 48"));
         }
-        if let Some(name) = self.names.get(&token) {
+        if let Some(name) = self.names.get(&token)
+            && self.short_names.borrow().is_none()
+        {
             return Ok(name.clone());
         }
         let m = self.metadata();
@@ -897,7 +1074,7 @@ impl Assembly {
                         " abstract"
                     } else if r.flags & 0x2000 != 0 {
                         " extern"
-                    } else if r.flags & 0x40 != 0 {
+                    } else if r.flags & 0x40 != 0 && !implicit_interface_member(r.flags) {
                         " virtual"
                     } else {
                         ""
@@ -1217,7 +1394,24 @@ pub fn visibility(flags: u32) -> &'static str {
         _ => "internal",
     }
 }
+thread_local! {
+    // Display views show metadata names as dnSpy does (`<Value>k__BackingField`);
+    // exported sources keep escaped, compilable identifiers.
+    static RAW_IDENTIFIERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// `virtual final newslot` without `abstract`: how C# compiles an ordinary member that
+/// implements an interface member. Source shows it as a plain, non-virtual member.
+pub fn implicit_interface_member(flags: u16) -> bool {
+    flags & 0x560 == 0x160
+}
+/// True while rendering a display view (short names, raw metadata identifiers).
+pub fn display_view() -> bool {
+    RAW_IDENTIFIERS.with(|raw| raw.get())
+}
 pub fn identifier(name: &str) -> String {
+    if RAW_IDENTIFIERS.with(|raw| raw.get()) && !name.is_empty() {
+        return name.to_owned();
+    }
     let mut s = String::new();
     for (i, c) in name.chars().enumerate() {
         if c == '_' || c.is_alphabetic() || (i > 0 && c.is_numeric()) {

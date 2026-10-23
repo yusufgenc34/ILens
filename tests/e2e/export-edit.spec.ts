@@ -5,7 +5,7 @@ import {execFileSync} from 'node:child_process'
 const dependency = path.resolve('samples/fixtures/ILens.Dependency.dll')
 const patterns = path.resolve('samples/fixtures/ILens.Patterns.dll')
 async function open(page: Page, file: string) {await page.goto('./'); await expect(page.getByLabel('Open assembly files')).toBeEnabled(); await page.getByLabel('Open assembly files').setInputFiles(file); await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')}
-async function select(page: Page, query: string, name: RegExp) {await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Search Assembly…', exact: true}).click(); await page.getByLabel('Search members and strings').fill(query); await page.getByRole('button', {name}).click(); await expect(page.getByLabel('C# code viewer')).toContainText('return (value *')}
+async function select(page: Page, query: string, name: RegExp) {await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Search Assembly…', exact: true}).click(); await page.getByLabel('Search members and strings').fill(query); await page.getByRole('button', {name}).click(); await expect(page.getByLabel('C# code viewer')).toContainText('return value *')}
 function archiveData(buffer: Buffer): {names: string[]; files: Record<string, string>; report: {outcome: string; members: unknown[]; resources: {path: string | null}[]; projects?: {project: string; report: string}[]}} {
   return JSON.parse(execFileSync('python3', ['-c', 'import sys,io,zipfile,json; z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())); assert z.testzip() is None; assert all(i.date_time==(1980,1,1,0,0,0) and not i.extra for i in z.infolist()); print(json.dumps({"names":z.namelist(),"files":{n:z.read(n).decode() for n in z.namelist() if n.endswith((".cs",".csproj",".il",".sln",".json"))},"report":json.loads(z.read("export-report.json" if "export-report.json" in z.namelist() else "_ilens/export-report.json"))}))'], {input: buffer, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024}))
 }
@@ -14,7 +14,7 @@ test('downloads exact method output and a fixture project that compiles without 
   await open(page, dependency); await select(page, 'Arithmetic.Twice', /Twice.*Arithmetic.Twice/)
   await page.getByRole('menuitem', {name: 'File', exact: true}).click(); await page.getByRole('menuitem', {name: 'Save Code…', exact: true}).click()
   let download = page.waitForEvent('download'); await page.getByRole('button', {name: 'Download C#', exact: true}).click()
-  const source = await download; expect(source.suggestedFilename()).toMatch(/Twice_06000001.cs/); expect(await fs.readFile((await source.path())!, 'utf8')).toContain('return (value * 2)')
+  const source = await download; expect(source.suggestedFilename()).toMatch(/Twice_06000001.cs/); expect(await fs.readFile((await source.path())!, 'utf8')).toContain('return value * 2;')
   download = page.waitForEvent('download'); await page.getByRole('button', {name: 'Download IL', exact: true}).click(); expect(await fs.readFile((await (await download).path())!, 'utf8')).toContain('ldc.i4.2')
   await page.getByRole('button', {name: 'Close export'}).click()
   await page.getByRole('menuitem', {name: 'File', exact: true}).click(); await page.getByRole('menuitem', {name: 'Export to Project…', exact: true}).click()
@@ -38,6 +38,7 @@ test('downloads exact method output and a fixture project that compiles without 
   await page.setViewportSize({width: 1512, height: 982})
   await page.getByRole('button', {name: 'Close project export'}).click()
   await page.getByRole('treeitem', {name: /^Arithmetic/}).click({button: 'right'})
+  await page.getByRole('menu', {name: /^Arithmetic actions$/}).getByRole('menuitem', {name: 'Save Code…', exact: true}).click()
   download = page.waitForEvent('download'); await page.getByRole('button', {name: 'Download type C#', exact: true}).click()
   const typeSource = await download
   expect(typeSource.suggestedFilename()).toBe('Arithmetic_02000002.cs')
@@ -65,11 +66,17 @@ test('source archive reports partial reconstruction, includes resources, and can
   const data = archiveData(await fs.readFile((await (await download).path())!))
   expect(data.report.outcome).toBe('partial'); expect(data.report.projects).toHaveLength(2)
   const report = JSON.parse(data.files['ILens.Patterns/_ilens/export-report.json'])
-  expect(report.members.length).toBeGreaterThan(60); expect(report.resources.some((r: {path: string | null}) => r.path)).toBe(true)
+  expect(report.members.length).toBeGreaterThan(50); expect(report.resources.some((r: {path: string | null}) => r.path)).toBe(true)
   expect(data.files['ILens.Patterns/ILens.Patterns.csproj']).toContain('<ProjectReference Include="../ILens.Dependency/ILens.Dependency.csproj"')
   expect(data.files['ILens.Patterns.sln']).toContain('ILens.Dependency\\ILens.Dependency.csproj')
   expect(data.names.some(n => n.includes('/_ilens/il/') && n.endsWith('.il'))).toBe(true)
-  expect(data.files[Object.keys(data.files).find(n => n.endsWith('/Calculator.cs'))!]).toContain('public int Value')
+  const calculator = data.files[Object.keys(data.files).find(n => n.endsWith('/Calculator.cs'))!]
+  expect(calculator).toContain('public int Value')
+  // Rebuilt async/iterator/lambda bodies replace the compiler's generated types.
+  expect(calculator).toContain('await System.Threading.Tasks.Task.Yield();')
+  expect(calculator).toContain('yield return i;')
+  expect(calculator).toContain('return value => value + amount;')
+  expect(calculator).not.toMatch(/DisplayClass|d__3[67]/)
 })
 test('edits IL with undo, rejects invalid types, validates and reopens a real modified DLL', async ({page}, testInfo) => {
   await open(page, dependency); await select(page, 'Arithmetic.Twice', /Twice.*Arithmetic.Twice/)
@@ -97,5 +104,5 @@ test('edits IL with undo, rejects invalid types, validates and reopens a real mo
   expect(verification).toContain('Verified')
   await page.getByRole('button', {name: 'Close export'}).click(); await page.getByRole('button', {name: 'Close workspace', exact: true}).click()
   await page.getByLabel('Open assembly files').setInputFiles(saved); await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1'); await select(page, 'Arithmetic.Twice', /Twice.*Arithmetic.Twice/)
-  await expect(page.getByLabel('C# code viewer')).toContainText('return (value * 3)')
+  await expect(page.getByLabel('C# code viewer')).toContainText('return value * 3;')
 })

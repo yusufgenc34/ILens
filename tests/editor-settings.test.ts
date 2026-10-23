@@ -7,6 +7,7 @@ it('restores valid preferences and rejects malformed or injected values', () => 
   for (const raw of [null, '', '{', 'null', '[]', '42', '"dark"']) expect(parseEditorSettings(raw)).toEqual(defaultEditorSettings)
   expect(parseEditorSettings(JSON.stringify({theme: 'url(https://example.com)', fontSize: 999999, lineNumbers: 'false', highlighting: 0, wrap: {}}))).toEqual(defaultEditorSettings)
 })
+it('defaults to the Dracula code theme', () => expect(defaultEditorSettings.theme).toBe('dracula'))
 it('keeps explicit code palettes independent of the workspace appearance', () => {
   expect(editorPalette('dracula', 'dark')).toEqual(editorPalette('dracula', 'light'))
   expect(editorPalette('light', 'dark').dark).toBe(false)

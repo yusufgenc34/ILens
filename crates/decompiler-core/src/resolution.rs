@@ -72,7 +72,7 @@ fn named_identity(a: &Assembly, token: u32) -> Option<(Identity, String)> {
                         .resolution_scope,
                 )
             }
-            0 | 2 => return Some((a.info.identity.clone(), a.resolve(token))),
+            0 | 2 => return Some((a.info.identity.clone(), a.resolve_full(token))),
             35 => {
                 return Some((
                     a.references
@@ -80,7 +80,7 @@ fn named_identity(a: &Assembly, token: u32) -> Option<(Identity, String)> {
                         .find(|r| r.token == scope)?
                         .identity
                         .clone(),
-                    a.resolve(token),
+                    a.resolve_full(token),
                 ));
             }
             _ => return None,

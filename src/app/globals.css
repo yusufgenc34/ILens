@@ -108,6 +108,20 @@
   --information-background: #111c2d;
   --information-border: #283c57;
   --information-accent: #bfdbfe;
+  /* dnSpy-style explorer colors per declaration kind. */
+  --tree-namespace: #e5e5e5;
+  --tree-type: #4ec9b0;
+  --tree-interface: #b8d7a3;
+  --tree-value-type: #86c691;
+  --tree-delegate: #4ec9b0;
+  --tree-method: #dcdcaa;
+  --tree-field: #9cdcfe;
+  --tree-constant: #4fc1ff;
+  --tree-property: #d7ba7d;
+  --tree-event: #c586c0;
+  --tree-assembly: #e5e5e5;
+  --tree-folder: #d7ba7d;
+  --tree-signature: #8a8a8a;
   color-scheme: dark;
 }
 .application.light {
@@ -142,6 +156,19 @@
   --information-background: #eff6ff;
   --information-border: #cbdcf2;
   --information-accent: #1e40af;
+  --tree-namespace: #1f1f1f;
+  --tree-type: #267f99;
+  --tree-interface: #3a7d44;
+  --tree-value-type: #2b7a4b;
+  --tree-delegate: #267f99;
+  --tree-method: #795e26;
+  --tree-field: #0451a5;
+  --tree-constant: #0070c1;
+  --tree-property: #8a5a00;
+  --tree-event: #8b2f8b;
+  --tree-assembly: #1f1f1f;
+  --tree-folder: #8a5a00;
+  --tree-signature: #737373;
   color-scheme: light;
 }
 @keyframes warning-pulse {

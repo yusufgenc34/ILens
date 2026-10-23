@@ -19,6 +19,9 @@ pub struct Session {
     cache_bytes: usize,
     edits: BTreeMap<(u32, u32), crate::edit::ValidatedEdit>,
     pub revision: u32,
+    // Edits are keyed by assembly ID and token, so loading unrelated assemblies must
+    // not invalidate an open editor. Only edit-set changes advance this counter.
+    pub edit_revision: u32,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -29,6 +32,7 @@ impl Default for Session {
             cache_bytes: 0,
             edits: BTreeMap::new(),
             revision: 0,
+            edit_revision: 0,
         }
     }
 }
@@ -137,7 +141,7 @@ impl Session {
             return Ok(result);
         }
         let result =
-            decompile::decompile_with(self.assembly(id)?, token, &|t| self.accessor(id, t))?;
+            decompile::decompile_view(self.assembly(id)?, token, &|t| self.accessor(id, t))?;
         // Serialized size is a conservative accounting base with 4x structural overhead allowance.
         let size = serde_json::to_vec(&result)
             .map_err(|e| Error::metadata(e.to_string()))?
@@ -198,26 +202,19 @@ impl Session {
     pub fn type_view(&self, id: u32, token: u32) -> Result<Value> {
         let a = self.assembly(id)?;
         a.validate_token(token)?;
-        let mut text = a.declaration(token)?;
         if token >> 24 == 2 {
-            text.push_str("\n{\n");
-            for n in a.nodes.iter().filter(|n| n.parent == token).take(2000) {
-                text.push_str("    ");
-                match a.declaration(n.token) {
-                    Ok(s) => text.push_str(&s),
-                    Err(e) => text.push_str(&format!("// {}", e.message)),
-                }
-                if n.token >> 24 == 6 {
-                    text.push(';');
-                }
-                text.push('\n');
-                if text.len() > 1024 * 1024 {
-                    text.push_str("    // Type preview truncated at 1 MiB. Select individual members in the explorer.\n");
-                    break;
-                }
-            }
-            text.push_str("}\n");
+            let source = crate::typeview::type_source(a, token, &|t| self.accessor(id, t))?;
+            return Ok(
+                json!({"declaration":source.text,"references":source.references,"partial":source.partial,"metadata":self.metadata(id,token)?}),
+            );
         }
+        if matches!(token >> 24, 4 | 20 | 23) {
+            let source = crate::typeview::member_source(a, token, &|t| self.accessor(id, t))?;
+            return Ok(
+                json!({"declaration":source.text,"references":source.references,"partial":source.partial,"metadata":self.metadata(id,token)?}),
+            );
+        }
+        let text = a.declaration(token)?;
         Ok(json!({"declaration":text,"metadata":self.metadata(id,token)?}))
     }
     /// Resolve an external declaration only when a loaded assembly matches the full identity.
@@ -292,7 +289,7 @@ impl Session {
                     return None;
                 };
                 let target = self.assemblies.get(&target_id)?;
-                let name = source.resolve(token);
+                let name = source.resolve_full(token);
                 let mut matches = target
                     .nodes
                     .iter()
@@ -377,7 +374,7 @@ impl Session {
     pub fn close(&mut self, id: u32) {
         self.assemblies.remove(&id);
         self.edits.retain(|(a, _), _| *a != id);
-        self.bump_revision();
+        self.bump_edit_revision();
         self.cache.retain(|((a, _), _, _)| *a != id);
         self.cache_bytes = self.cache.iter().map(|(_, _, n)| n).sum();
     }
@@ -386,12 +383,25 @@ impl Session {
         self.cache.clear();
         self.cache_bytes = 0;
         self.edits.clear();
-        self.bump_revision();
+        self.bump_edit_revision();
     }
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
         self.cache.clear();
         self.cache_bytes = 0;
+    }
+    fn bump_edit_revision(&mut self) {
+        self.edit_revision = self.edit_revision.wrapping_add(1);
+        self.bump_revision();
+    }
+    fn check_edit_revision(&self, revision: u32) -> Result<()> {
+        if self.edit_revision != revision {
+            return Err(Error::new(
+                crate::error::ErrorCode::Cancelled,
+                "Method edits changed during the operation; reopen the editor",
+            ));
+        }
+        Ok(())
     }
     pub fn check_revision(&self, revision: u32) -> Result<()> {
         if self.revision != revision {
@@ -406,7 +416,7 @@ impl Session {
         crate::edit::preview(
             self.assembly(id)?,
             token,
-            self.revision,
+            self.edit_revision,
             self.edits.get(&(id, token)),
         )
     }
@@ -417,7 +427,7 @@ impl Session {
         revision: u32,
         rows: Vec<crate::cil_encode::EditableInstruction>,
     ) -> Result<crate::edit::EditPreview> {
-        self.check_revision(revision)?;
+        self.check_edit_revision(revision)?;
         if self.edits.len() >= 256 && !self.edits.contains_key(&(id, token)) {
             return Err(Error::limit("At most 256 method edits per workspace"));
         }
@@ -432,7 +442,7 @@ impl Session {
         } else {
             self.edits.insert((id, token), edit);
         }
-        self.bump_revision();
+        self.bump_edit_revision();
         self.open_edit(id, token)
     }
     pub fn discard_edit(
@@ -441,19 +451,19 @@ impl Session {
         token: u32,
         revision: u32,
     ) -> Result<crate::edit::EditPreview> {
-        self.check_revision(revision)?;
+        self.check_edit_revision(revision)?;
         self.edits.remove(&(id, token));
-        self.bump_revision();
+        self.bump_edit_revision();
         self.open_edit(id, token)
     }
     pub fn edits_info(&self, id: u32) -> Result<Value> {
         let a = self.assembly(id)?;
         Ok(
-            json!({"revision":self.revision,"methods":self.edits.iter().filter(|((assembly,_),_)|*assembly==id).map(|((_,token),edit)|json!({"token":token,"name":a.resolve(*token),"code_size":edit.code.len()})).collect::<Vec<_>>(),"writer_error":crate::pe_write::capability(a).err()}),
+            json!({"revision":self.revision,"edit_revision":self.edit_revision,"methods":self.edits.iter().filter(|((assembly,_),_)|*assembly==id).map(|((_,token),edit)|json!({"token":token,"name":a.resolve(*token),"code_size":edit.code.len()})).collect::<Vec<_>>(),"writer_error":crate::pe_write::capability(a).err()}),
         )
     }
     pub fn export_modified(&self, id: u32, revision: u32) -> Result<Vec<u8>> {
-        self.check_revision(revision)?;
+        self.check_edit_revision(revision)?;
         let edits = self
             .edits
             .iter()

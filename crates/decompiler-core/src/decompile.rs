@@ -23,6 +23,38 @@ pub struct MethodAnalysis {
     pub source_body: Option<String>,
     pub source_declaration: Option<String>,
 }
+/// The code-viewer form: dnSpy-style short type names in C#, while the IL keeps the
+/// fully qualified names that IL syntax requires.
+pub fn decompile_view(
+    a: &Assembly,
+    token: u32,
+    accessor: &dyn Fn(u32) -> Option<crate::resolution::Accessor>,
+) -> Result<MethodAnalysis> {
+    let full = decompile_with(a, token, accessor)?;
+    if full.quality != "csharp_like" {
+        return Ok(full);
+    }
+    let namespace = {
+        let mut owner = *a.owners.get(&token).unwrap_or(&0);
+        while let Some(parent) = a.owners.get(&owner).filter(|p| **p >> 24 == 2) {
+            owner = *parent;
+        }
+        a.nodes
+            .iter()
+            .find(|n| n.token == owner)
+            .map(|n| n.namespace.clone())
+            .unwrap_or_default()
+    };
+    let view = {
+        let _scope = a.short_names(&namespace);
+        decompile_with(a, token, accessor)?
+    };
+    Ok(MethodAnalysis {
+        csharp: view.csharp,
+        references: view.references,
+        ..full
+    })
+}
 pub fn decompile(a: &Assembly, token: u32) -> Result<MethodAnalysis> {
     decompile_with(a, token, &|t| crate::resolution::local_accessor(a, t))
 }
@@ -78,65 +110,22 @@ pub fn decompile_with(
         }
         let stack = analysis::analyze(a, token, &body, &cfg)?;
         result.stack = Some(stack.clone());
-        if a.attributes.get(&token).into_iter().flatten().any(|i| {
-            let name = a.resolve(crate::assembly::coded(
-                a.metadata().custom_attributes[*i].attr_type,
-            ));
-            name.contains("AsyncStateMachineAttribute")
-                || name.contains("IteratorStateMachineAttribute")
-                || name.contains("AsyncIteratorStateMachineAttribute")
-        }) {
-            return Err(Error::limitation(
-                "Async/iterator state-machine reconstruction is not implemented. Inspect the original CIL and generated types.",
-            ));
+        if crate::statemachine::kind_of(a, token).is_some() {
+            // async and iterator methods are rebuilt from their compiler state machine.
+            let lowered = crate::statemachine::lower(a, token, accessor)?;
+            let ast = ast::structure_from(
+                &lowered.ir,
+                &lowered.cfg,
+                &lowered.body.exceptions,
+                lowered.entry,
+            );
+            let source = emit::state_machine_source(a, token, &lowered, &ast)?;
+            return finish(a, token, &mut result, source);
         }
-        let mut ir = ir::lift(a, token, &body, &cfg, stack)?;
-        // Repeated calls in a method should bind a metadata token only once.
-        let mut accessors = std::collections::HashMap::new();
-        for block in &mut ir.blocks {
-            let mut resolve = |expr: &mut ir::Expr| {
-                if let ir::ExprKind::Call {
-                    token,
-                    accessor: value,
-                    virtual_call,
-                    ..
-                } = &mut expr.kind
-                {
-                    *value = accessors
-                        .entry(*token)
-                        .or_insert_with(|| accessor(*token))
-                        .clone()
-                        .filter(|p| *virtual_call || !p.is_virtual);
-                }
-            };
-            for statement in &mut block.statements {
-                transform::statement_exprs(statement, &mut resolve);
-            }
-            transform::terminator_exprs(&mut block.terminator, &mut resolve);
-        }
-        transform::simplify(&mut ir);
-        let ast = ast::structure(&ir, &cfg);
+        let ir = lift_with(a, token, &body, &cfg, stack, accessor)?;
+        let ast = ast::structure(&ir, &cfg, &body.exceptions);
         let source = emit::method_source(a, token, &body, &ir, &cfg, &ast)?;
-        let code = format!(
-            "// Reconstructed from CIL and metadata; local names are synthetic.\n// Integer arithmetic follows unchecked CIL unless checked is explicit.\n{}\n{}",
-            source.declaration, source.body
-        );
-        let prefix_len = code.encode_utf16().count()
-            - source.declaration.encode_utf16().count()
-            - 1
-            - source.body.encode_utf16().count();
-        result.references = source
-            .references
-            .into_iter()
-            .map(|mut r| {
-                r.start += prefix_len;
-                r.end += prefix_len;
-                r
-            })
-            .collect();
-        result.source_body = Some(source.body);
-        result.source_declaration = Some(source.declaration);
-        Ok(code)
+        finish(a, token, &mut result, source)
     })();
     match reconstructed {
         Ok(code) => {
@@ -154,4 +143,72 @@ pub fn decompile_with(
         }
     }
     Ok(result)
+}
+
+/// CIL → typed IR with accessor binding and simplification, shared by ordinary methods
+/// and state-machine `MoveNext` bodies.
+pub fn lift_with(
+    a: &Assembly,
+    token: u32,
+    body: &MethodBody,
+    cfg: &ControlFlowGraph,
+    stack: analysis::StackAnalysis,
+    accessor: &dyn Fn(u32) -> Option<crate::resolution::Accessor>,
+) -> Result<ir::TypedIr> {
+    let mut ir = ir::lift(a, token, body, cfg, stack)?;
+    // Repeated calls in a method should bind a metadata token only once.
+    let mut accessors = std::collections::HashMap::new();
+    for block in &mut ir.blocks {
+        let mut resolve = |expr: &mut ir::Expr| {
+            if let ir::ExprKind::Call {
+                token,
+                accessor: value,
+                virtual_call,
+                ..
+            } = &mut expr.kind
+            {
+                *value = accessors
+                    .entry(*token)
+                    .or_insert_with(|| accessor(*token))
+                    .clone()
+                    .filter(|p| *virtual_call || !p.is_virtual);
+            }
+        };
+        for statement in &mut block.statements {
+            transform::statement_exprs(statement, &mut resolve);
+        }
+        transform::terminator_exprs(&mut block.terminator, &mut resolve);
+    }
+    transform::simplify(&mut ir);
+    Ok(ir)
+}
+// Header comment, attributes and navigation ranges for the code viewer.
+fn finish(
+    a: &Assembly,
+    token: u32,
+    result: &mut MethodAnalysis,
+    source: emit::MethodSource,
+) -> Result<String> {
+    let mut header = crate::typeview::token_comment(a, "", token);
+    for attribute in crate::attributes::render(a, token) {
+        header.push('\n');
+        header.push_str(&attribute);
+    }
+    let code = format!("{header}\n{}\n{}", source.declaration, source.body);
+    let prefix_len = code.encode_utf16().count()
+        - source.declaration.encode_utf16().count()
+        - 1
+        - source.body.encode_utf16().count();
+    result.references = source
+        .references
+        .into_iter()
+        .map(|mut r| {
+            r.start += prefix_len;
+            r.end += prefix_len;
+            r
+        })
+        .collect();
+    result.source_body = Some(source.body);
+    result.source_declaration = Some(source.declaration);
+    Ok(code)
 }
