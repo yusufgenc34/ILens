@@ -182,12 +182,17 @@ pub fn accessor(a: &Assembly, token: u32) -> Option<Accessor> {
         return None;
     }
     let (info, _) = framework_type(a, method.owner)?;
+    // Compare the reference's own signature: members of generic types keep `!0` there,
+    // as the definition does, while `method_ref` substitutes the instantiation.
+    let row = a
+        .metadata()
+        .member_refs
+        .get((token & 0xffffff).checked_sub(1)? as usize)?;
+    let raw = crate::signature::method(a.blob(row.signature).ok()?).ok()?;
     let signature = format!(
         "{}({})",
-        canonical(a, &method.signature.return_type),
-        method
-            .signature
-            .parameters
+        canonical(a, &raw.return_type),
+        raw.parameters
             .iter()
             .map(|p| canonical(a, p))
             .collect::<Vec<_>>()

@@ -261,6 +261,8 @@ pub fn lift(
             .collect();
         let mut statements = Vec::new();
         let mut terminator = None;
+        // `constrained. T` makes the next callvirt dispatch on the addressed value.
+        let mut constrained = false;
         for i in &body.instructions[b.first..b.last] {
             let op = i.opcode;
             let mut pushed = None;
@@ -380,16 +382,53 @@ pub fn lift(
                         });
                     } else {
                         let instance = if called.signature.has_this {
-                            Some(Box::new(pop(&mut stack)?))
+                            let receiver = pop(&mut stack)?;
+                            Some(Box::new(match receiver.kind {
+                                ExprKind::Address(value) if constrained => *value,
+                                _ => receiver,
+                            }))
                         } else {
                             None
                         };
-                        // Direct calls to a virtual method do not have C# virtual dispatch semantics.
-                        if op == 0x28 && t >> 24 == 6 && a.method_row(t)?.flags & 0x40 != 0 {
-                            return Err(Error::limitation(
-                                "Nonvirtual invocation of a virtual method requires IL",
-                            ));
+                        constrained = false;
+                        // A nonvirtual call to a virtual method is C# `base.M()` when the
+                        // receiver is `this` and the method belongs to a base type. Sealed
+                        // methods and value-type methods have no virtual dispatch to lose.
+                        let mut base_call = false;
+                        // Constructor chaining keeps its `this` receiver for the emitter.
+                        let constructor = called.name == ".ctor";
+                        if constructor {
+                        } else if op == 0x28 && t >> 24 == 6 && a.method_row(t)?.flags & 0x40 != 0 {
+                            let flags = a.method_row(t)?.flags;
+                            let this = instance.as_ref().is_some_and(
+                                |i| matches!(&i.kind, ExprKind::Variable(n) if n == "this"),
+                            );
+                            let value_type = a.nodes.iter().any(|n| {
+                                n.token == called.owner
+                                    && matches!(n.kind.as_str(), "struct" | "enum")
+                            });
+                            if this && called.owner != mr.owner {
+                                base_call = true;
+                            } else if flags & 0x20 == 0 && !value_type {
+                                return Err(Error::limitation(
+                                    "Nonvirtual invocation of a virtual method requires IL",
+                                ));
+                            }
+                        } else if op == 0x28
+                            && t >> 24 == 10
+                            && instance.as_ref().is_some_and(
+                                |i| matches!(&i.kind, ExprKind::Variable(n) if n == "this"),
+                            )
+                            && called.owner != mr.owner
+                        {
+                            // A direct call to an external base member from `this` is `base.M()`.
+                            base_call = true;
                         }
+                        let instance = if base_call {
+                            Some(Box::new(Expr::var("base", Type::Named(called.owner))))
+                        } else {
+                            instance
+                        };
                         let value = Expr {
                             ty: called.signature.return_type.clone(),
                             kind: ExprKind::Call {
@@ -752,6 +791,7 @@ pub fn lift(
                         kind: ExprKind::SizeOf(Type::Named(operand_token(i)?)),
                     })
                 }
+                0xfe16 => constrained = true,
                 _ => {
                     return Err(Error::limitation(format!(
                         "{} at IL_{:04X} requires annotated CIL (prefixes, filters, indirect calls and specialized instructions are preserved)",

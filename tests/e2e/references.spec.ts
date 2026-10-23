@@ -103,8 +103,9 @@ test('C# reference navigation uses the automatically loaded external definition 
   await page.keyboard.press('ControlOrMeta+k');await page.getByLabel('Search members and strings').fill('UnicodeBeforeCall')
   await page.locator('.search-results > button').filter({has:page.locator('strong',{hasText:/^UnicodeBeforeCall$/})}).click()
   const viewer=page.getByLabel('C# code viewer')
-  await expect(viewer).toContainText('Concat')
-  await viewer.locator('.cursor-pointer').filter({hasText:/^Concat$/}).click({modifiers:['ControlOrMeta']})
+  // string.Concat reads as +, and the operator symbol navigates to Concat.
+  await expect(viewer).toContainText('"😀" + widget')
+  await viewer.locator('.cursor-pointer').filter({hasText:/^\+$/}).click({modifiers:['ControlOrMeta']})
   await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','2')
   await expect(viewer).toContainText('Reference assembly')
   await expect(viewer).not.toContainText('throw null')

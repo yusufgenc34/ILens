@@ -1052,7 +1052,16 @@ impl Assembly {
                         )
                     })
                     .unwrap_or_default();
-                let n = if mr.name == ".ctor" || mr.name == ".cctor" {
+                let returns = self.format_type(&sig.return_type, token);
+                let n = if r.flags & 0x800 != 0
+                    && let Some(symbol) = operator_symbol(&mr.name)
+                {
+                    // Operators and conversions as C# declares them.
+                    match symbol {
+                        "implicit" | "explicit" => format!("{symbol} operator {returns}"),
+                        _ => format!("{returns} operator {symbol}"),
+                    }
+                } else if mr.name == ".ctor" || mr.name == ".cctor" {
                     strip_arity(&self.resolve(mr.owner))
                         .rsplit('.')
                         .next()
@@ -1398,6 +1407,36 @@ thread_local! {
     // Display views show metadata names as dnSpy does (`<Value>k__BackingField`);
     // exported sources keep escaped, compilable identifiers.
     static RAW_IDENTIFIERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// The C# operator symbol (or conversion kind) declared by an op_ special name.
+pub fn operator_symbol(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "op_Addition" | "op_UnaryPlus" => "+",
+        "op_Subtraction" | "op_UnaryNegation" => "-",
+        "op_Multiply" => "*",
+        "op_Division" => "/",
+        "op_Modulus" => "%",
+        "op_Equality" => "==",
+        "op_Inequality" => "!=",
+        "op_LessThan" => "<",
+        "op_GreaterThan" => ">",
+        "op_LessThanOrEqual" => "<=",
+        "op_GreaterThanOrEqual" => ">=",
+        "op_BitwiseAnd" => "&",
+        "op_BitwiseOr" => "|",
+        "op_ExclusiveOr" => "^",
+        "op_LeftShift" => "<<",
+        "op_RightShift" => ">>",
+        "op_LogicalNot" => "!",
+        "op_OnesComplement" => "~",
+        "op_Increment" => "++",
+        "op_Decrement" => "--",
+        "op_True" => "true",
+        "op_False" => "false",
+        "op_Implicit" => "implicit",
+        "op_Explicit" => "explicit",
+        _ => return None,
+    })
 }
 /// `virtual final newslot` without `abstract`: how C# compiles an ordinary member that
 /// implements an interface member. Source shows it as a plain, non-virtual member.

@@ -12,6 +12,11 @@ if (editing.status !== 0) process.exit(editing.status ?? 1)
 copyFileSync('samples/bin/ILens.Editing.dll', 'samples/fixtures/ILens.Editing.dll')
 
 
+// C# language constructs for reconstruction tests; compiled only, never executed.
+const language = spawnSync('dotnet', ['build', 'samples/Language', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
+if (language.status !== 0) process.exit(language.status ?? 1)
+copyFileSync('samples/bin/ILens.Language.dll', 'samples/fixtures/ILens.Language.dll')
+
 // Source-readability regression fixtures, also compiled only for static inspection.
 const readability = spawnSync('dotnet', ['build', 'samples/Readability', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
 if (readability.status !== 0) process.exit(readability.status ?? 1)

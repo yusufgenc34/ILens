@@ -79,6 +79,18 @@ fn local_base(a: &Assembly, ty: &Type, context: u32) -> String {
         _ => "local".to_owned(),
     }
 }
+fn strip_final_returns(nodes: &mut Vec<Ast>) {
+    match nodes.last_mut() {
+        Some(Ast::Return(None)) => {
+            nodes.pop();
+        }
+        Some(Ast::If { yes, no, .. }) => {
+            strip_final_returns(yes);
+            strip_final_returns(no);
+        }
+        _ => {}
+    }
+}
 fn catch_variables(ast: &[Ast]) -> Vec<String> {
     let mut found = vec![];
     for n in ast {
@@ -296,7 +308,59 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             unsigned,
         } => {
             let precedence = binary_precedence(op);
+            // (x as T) == null tests the type: !(x is T); != null is x is T.
+            if matches!(op.as_str(), "==" | "!=") {
+                let cast = match (&left.kind, &right.kind) {
+                    (Cast { mode, .. }, Null) if mode == "as" => Some(left),
+                    (Null, Cast { mode, .. }) if mode == "as" => Some(right),
+                    _ => None,
+                };
+                if let Some(cast) = cast
+                    && let Cast { value, target, .. } = &cast.kind
+                {
+                    let test = format!("{} is {}", at(value, 11)?, type_name(a, target, context));
+                    return Ok(if op == "!=" {
+                        (test, 10)
+                    } else {
+                        (format!("!({test})"), UNARY)
+                    });
+                }
+            }
             let (mut l, mut r) = (at(left, precedence)?, at(right, precedence + 1)?);
+            // CIL `ceq` on references is reference equality; C# `==` would call a
+            // user-defined operator (string, delegates, records), so it needs (object).
+            if matches!(op.as_str(), "==" | "!=")
+                && !*unsigned
+                && left.ty.is_reference()
+                && right.ty.is_reference()
+                && !matches!(left.kind, Null)
+                && !matches!(right.kind, Null)
+                && (may_overload_equality(a, &left.ty) || may_overload_equality(a, &right.ty))
+            {
+                l = format!("(object){}", cast_operand(expr(left)?));
+            }
+            // A null test on a type with its own operator would call that operator
+            // (recursively inside it); framework operators treat null like ceq does.
+            if matches!(op.as_str(), "==" | "!=") && !*unsigned {
+                if matches!(right.kind, Null) && declares_equality(a, &left.ty) {
+                    l = format!("(object){}", cast_operand(expr(left)?));
+                } else if matches!(left.kind, Null) && declares_equality(a, &right.ty) {
+                    r = format!("(object){}", cast_operand(expr(right)?));
+                }
+            }
+            // A character compared with an integer constant reads as a character literal.
+            if is_char(&left.ty)
+                && let Constant(c) = &right.kind
+                && let Ok(n) = c.parse::<i128>()
+            {
+                r = char_literal(n);
+            }
+            if is_char(&right.ty)
+                && let Constant(c) = &left.kind
+                && let Ok(n) = c.parse::<i128>()
+            {
+                l = char_literal(n);
+            }
             // Operands already typed unsigned need no reinterpreting cast.
             let already = |e: &Expr, ty: &str| e.ty == Type::primitive(ty);
             let mut reinterpreted = false;
@@ -393,6 +457,103 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             accessor,
             ..
         } => {
+            // In-place value construction: `local = new T(args)`.
+            if name == ".ctor"
+                && let Some(i) = instance
+                && !matches!(&i.kind, Variable(n) if n == "this" || n == "base")
+            {
+                let target = match &i.kind {
+                    Address(inner) => inner.as_ref(),
+                    _ => i.as_ref(),
+                };
+                let args = args
+                    .iter()
+                    .map(|e| expr(e).map(|r| r.0))
+                    .collect::<Result<Vec<_>>>()?
+                    .join(", ");
+                return Ok((
+                    format!(
+                        "{} = new {}({args})",
+                        expr(target)?.0,
+                        source_reference(*owner, &strip_arity(&a.resolve(*owner)))
+                    ),
+                    ASSIGNMENT,
+                ));
+            }
+            if instance.is_none() {
+                // Type.GetTypeFromHandle(ldtoken T) is typeof(T).
+                if name == "GetTypeFromHandle"
+                    && let [
+                        Expr {
+                            kind: TypeToken(t), ..
+                        },
+                    ] = args.as_slice()
+                    && a.resolve_full(*owner) == "System.Type"
+                {
+                    return Ok((format!("typeof({})", typeof_name(a, *t)), PRIMARY));
+                }
+                // Operators: only MethodDefs flagged specialname, or references, whose
+                // explicit invocation C# forbids anyway.
+                let operator = *token >> 24 == 10
+                    || a.method_row(*token).is_ok_and(|row| row.flags & 0x800 != 0);
+                if operator {
+                    if let (Some(op), [left, right]) = (binary_operator(name), args.as_slice()) {
+                        // The operator symbol navigates to the operator method.
+                        let precedence = binary_precedence(op);
+                        return Ok((
+                            format!(
+                                "{} {} {}",
+                                at(left, precedence)?,
+                                source_reference(*token, op),
+                                at(right, precedence + 1)?
+                            ),
+                            precedence,
+                        ));
+                    }
+                    if let (Some(op), [value]) = (unary_operator(name), args.as_slice()) {
+                        let unary = Expr {
+                            ty: e.ty.clone(),
+                            kind: Unary {
+                                op: op.to_owned(),
+                                value: Box::new(value.clone()),
+                            },
+                        };
+                        return render(a, context, &unary);
+                    }
+                    if let ("op_Implicit", [value]) = (name.as_str(), args.as_slice()) {
+                        return expr(value);
+                    }
+                    if let ("op_Explicit", [value]) = (name.as_str(), args.as_slice()) {
+                        return Ok((
+                            format!(
+                                "({}){}",
+                                type_name(a, &e.ty, context),
+                                cast_operand(expr(value)?)
+                            ),
+                            UNARY,
+                        ));
+                    }
+                }
+                // string.Concat of strings is string concatenation.
+                if name == "Concat"
+                    && (2..=4).contains(&args.len())
+                    && args
+                        .iter()
+                        .all(|arg| is_string(a, &arg.ty) || matches!(arg.kind, String(_)))
+                    && a.resolve_full(*owner) == "System.String"
+                {
+                    // Left-associative `+`; each symbol navigates to Concat.
+                    let mut joined = at(&args[0], 12)?;
+                    for next in &args[1..] {
+                        joined = format!(
+                            "{joined} {} {}",
+                            source_reference(*token, "+"),
+                            at(next, 13)?
+                        );
+                    }
+                    return Ok((joined, 12));
+                }
+            }
             let receiver = if let Some(i) = instance {
                 receiver(i)?
             } else {
@@ -560,6 +721,9 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                     ("long" | "System.Int64", n) => (format!("{n}L"), PRIMARY),
                     ("int" | "System.Int32", n) => {
                         (n.to_string(), if n < 0 { UNARY } else { PRIMARY })
+                    }
+                    ("char" | "System.Char", n) if (0..=0xffff).contains(&n) => {
+                        (char_literal(n), PRIMARY)
                     }
                     (_, n) if n < 0 => (format!("({t})({n})"), UNARY),
                     (_, n) => (format!("({t}){n}"), UNARY),
@@ -779,6 +943,135 @@ fn enum_constant(a: &Assembly, value: &Expr, target: &Type) -> Option<std::strin
     let enum_name = strip_arity(&a.resolve(*enum_token));
     Some(crate::bcl::enum_text(&enum_name, &members, number))
 }
+/// Whether `==` on this static type could bind a user-defined operator. Only `object`,
+/// arrays and local classes whose local hierarchy declares no operator are known not to.
+fn may_overload_equality(a: &Assembly, ty: &Type) -> bool {
+    let mut token = match ty {
+        Type::Primitive(name) => return name != "object",
+        Type::Array(..) | Type::MultiArray(..) => return false,
+        Type::Named(t) => *t,
+        Type::GenericInstance { base, .. } => match base.as_ref() {
+            Type::Named(t) => *t,
+            _ => return true,
+        },
+        _ => return true,
+    };
+    for _ in 0..32 {
+        if a.resolve_full(token) == "System.Object" {
+            return false;
+        }
+        if token >> 24 != 2 {
+            return true;
+        }
+        if a.nodes.iter().any(|n| {
+            n.parent == token
+                && n.token >> 24 == 6
+                && matches!(n.name.as_str(), "op_Equality" | "op_Inequality")
+        }) {
+            return true;
+        }
+        let Some(row) = a.metadata().type_defs.get((token & 0xffffff) as usize - 1) else {
+            return true;
+        };
+        token = crate::assembly::coded(row.extends);
+        if token & 0xffffff == 0 {
+            return true;
+        }
+    }
+    true
+}
+/// Whether a local class or one of its local bases declares `==`/`!=`.
+fn declares_equality(a: &Assembly, ty: &Type) -> bool {
+    let Type::Named(mut token) = *ty else {
+        return false;
+    };
+    for _ in 0..32 {
+        if token >> 24 != 2 {
+            return false;
+        }
+        if a.nodes.iter().any(|n| {
+            n.parent == token
+                && n.token >> 24 == 6
+                && matches!(n.name.as_str(), "op_Equality" | "op_Inequality")
+        }) {
+            return true;
+        }
+        let Some(row) = a.metadata().type_defs.get((token & 0xffffff) as usize - 1) else {
+            return false;
+        };
+        token = crate::assembly::coded(row.extends);
+    }
+    false
+}
+/// A C# character literal for a UTF-16 code unit.
+fn char_literal(n: i128) -> std::string::String {
+    match u32::try_from(n).ok().and_then(char::from_u32) {
+        Some('\'') => "'\\''".to_owned(),
+        Some('\\') => "'\\\\'".to_owned(),
+        Some(c) if c.is_ascii_graphic() || c == ' ' => format!("'{c}'"),
+        _ => format!("'\\u{:04X}'", n.clamp(0, 0xffff)),
+    }
+}
+fn is_char(ty: &Type) -> bool {
+    *ty == Type::primitive("char")
+}
+fn is_string(a: &Assembly, ty: &Type) -> bool {
+    *ty == Type::primitive("string")
+        || matches!(ty, Type::Named(t) if a.resolve_full(*t) == "System.String")
+}
+/// An integer constant written for its destination type: enum members
+/// (`ByteMode.Ready`) and character literals (`'a'`), as dnSpy shows them.
+fn typed_constant(a: &Assembly, value: &Expr, target: &Type) -> Option<std::string::String> {
+    if is_char(target)
+        && let ExprKind::Constant(text) = &value.kind
+        && let Ok(n) = text.parse::<i128>()
+    {
+        return Some(char_literal(n));
+    }
+    enum_constant(a, value, target)
+}
+// `typeof` operand: open generics are written List<> / Dictionary<,>.
+fn typeof_name(a: &Assembly, token: u32) -> std::string::String {
+    let name = a.resolve(token);
+    match (token >> 24, name.rsplit_once('`')) {
+        (1 | 2, Some((base, arity))) if arity.chars().all(|c| c.is_ascii_digit()) => {
+            let n: usize = arity.parse().unwrap_or(1);
+            format!("{base}<{}>", ",".repeat(n.saturating_sub(1)))
+        }
+        _ => strip_arity(&name),
+    }
+}
+// C# operators behind op_ methods; calling them by name is not legal C#.
+fn binary_operator(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "op_Addition" => "+",
+        "op_Subtraction" => "-",
+        "op_Multiply" => "*",
+        "op_Division" => "/",
+        "op_Modulus" => "%",
+        "op_Equality" => "==",
+        "op_Inequality" => "!=",
+        "op_LessThan" => "<",
+        "op_GreaterThan" => ">",
+        "op_LessThanOrEqual" => "<=",
+        "op_GreaterThanOrEqual" => ">=",
+        "op_BitwiseAnd" => "&",
+        "op_BitwiseOr" => "|",
+        "op_ExclusiveOr" => "^",
+        "op_LeftShift" => "<<",
+        "op_RightShift" => ">>",
+        _ => return None,
+    })
+}
+fn unary_operator(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "op_UnaryNegation" => "-",
+        "op_UnaryPlus" => "+",
+        "op_LogicalNot" => "!",
+        "op_OnesComplement" => "~",
+        _ => return None,
+    })
+}
 /// The value of an integer constant after the conversions applied to it, when every
 /// step is a plain integer conversion that the C# compiler would evaluate itself.
 fn integer_constant(e: &Expr) -> Option<i128> {
@@ -791,6 +1084,7 @@ fn integer_constant(e: &Expr) -> Option<i128> {
                 "ushort" => (16, false),
                 "int" => (32, true),
                 "uint" => (32, false),
+                "char" => (16, false),
                 "long" => (64, true),
                 "ulong" => (64, false),
                 _ => return None,
@@ -878,7 +1172,7 @@ fn statement(a: &Assembly, token: u32, s: &Statement) -> Result<String> {
             None => format!(
                 "{} = {};",
                 expression(a, token, target)?,
-                match enum_constant(a, value, &target.ty) {
+                match typed_constant(a, value, &target.ty) {
                     Some(text) => text,
                     None => expression(a, token, value)?,
                 }
@@ -892,6 +1186,15 @@ fn statement(a: &Assembly, token: u32, s: &Statement) -> Result<String> {
         }) => std::string::String::new(),
         Statement::Evaluate(e) => {
             let v = expression(a, token, e)?;
+            // Invocations, object creation and await are statements of their own.
+            let invocation = match &e.kind {
+                ExprKind::Call { accessor, .. } => accessor.as_ref().is_none_or(|p| !p.getter),
+                ExprKind::New { .. } | ExprKind::Await(_) => true,
+                _ => false,
+            };
+            if invocation {
+                return Ok(format!("{v};"));
+            }
             if e.ty.is_void() {
                 format!("{v};")
             } else {
@@ -940,7 +1243,7 @@ fn nodes(
             Ast::Return(v) => {
                 let returns = a.method_ref(token)?.signature.return_type;
                 let value = match v {
-                    Some(e) => Some(match enum_constant(a, e, &returns) {
+                    Some(e) => Some(match typed_constant(a, e, &returns) {
                         Some(text) => text,
                         None => expression(a, token, e)?,
                     }),
@@ -1331,7 +1634,15 @@ pub fn method_source(
     let mut declaration = a.declaration(token)?;
     let mut nodes = ast;
     let reordered: Vec<Ast>;
-    if method.name == ".ctor" {
+    // Struct constructors need no base constructor call.
+    let value_type = a
+        .nodes
+        .iter()
+        .any(|n| n.token == method.owner && matches!(n.kind.as_str(), "struct" | "enum"));
+    let chained = ast.iter().any(|n| {
+        matches!(n, Ast::Statement(Statement::Evaluate(Expr { kind: ExprKind::Call { name, .. }, .. })) if name == ".ctor")
+    });
+    if method.name == ".ctor" && (chained || !value_type) {
         // Field stores that precede the base call (C# field initializers and primary
         // constructor parameters) may follow it only when the base constructor cannot
         // observe them: System.Object and System.Attribute run no derived code.
@@ -1347,10 +1658,11 @@ pub fn method_source(
             .position(|n| matches!(n, Ast::Statement(Statement::Evaluate(Expr { kind: ExprKind::Call { name, .. }, .. })) if name == ".ctor"))
             .unwrap_or(0);
         let leading_stores = ast[..first_call].iter().all(|n| {
-            matches!(n, Ast::Statement(Statement::Assign {
-                target: Expr { kind: ExprKind::Field { instance: Some(instance), .. }, .. },
-                ..
-            }) if matches!(&instance.kind, ExprKind::Variable(v) if v == "this"))
+            matches!(n, Ast::Statement(Statement::Let { .. }))
+                || matches!(n, Ast::Statement(Statement::Assign {
+                    target: Expr { kind: ExprKind::Field { instance: Some(instance), .. }, .. },
+                    ..
+                }) if matches!(&instance.kind, ExprKind::Variable(v) if v == "this"))
         });
         let ast: &[Ast] = if first_call > 0 && inert_base && leading_stores {
             reordered = ast[first_call..first_call + 1]
@@ -1653,11 +1965,13 @@ pub fn csharp_body(
     let catches = catch_variables(ast);
     name_catches(&catches);
     name_temporaries(a, token, ast);
-    // A void method's final `return;` is implicit in C#.
-    let ast = match ast.split_last() {
-        Some((Ast::Return(None), rest)) if structured => rest,
-        _ => ast,
-    };
+    // A void method's final `return;` is implicit in C#, also at the end of its last
+    // if/else branches.
+    let mut owned = ast.to_vec();
+    if structured {
+        strip_final_returns(&mut owned);
+    }
+    let ast = owned.as_slice();
     line(&mut out, 0, "{");
     for (i, t) in ir.locals.iter().enumerate() {
         line(
