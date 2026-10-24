@@ -200,3 +200,13 @@ test('the docked Search window filters by kind and searches every assembly', asy
   await pane.getByRole('button', {name: /^Twice/}).first().click()
   await expect(page.getByLabel('C# code viewer')).toContainText('return value * 2;')
 })
+test('PE header offsets open the hex editor at that byte', async ({page}) => {
+  await page.goto('./'); await expect(page.getByLabel('Open assembly files')).toBeEnabled()
+  await page.getByLabel('Open assembly files').setInputFiles(path.resolve('samples/fixtures/ILens.Dependency.dll'))
+  await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id', '1')
+  await page.getByRole('treeitem', {name: /^PE$/}).click(); await page.keyboard.press('ArrowRight')
+  await page.getByRole('treeitem', {name: /^File Header/}).click()
+  await page.getByLabel('PE header view').getByRole('button', {name: /in hex editor$/}).nth(1).click()
+  const hex = page.getByRole('region', {name: 'Hex editor'})
+  await expect(hex).toContainText('offset 0x00000084')
+})
