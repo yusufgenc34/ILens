@@ -198,15 +198,32 @@ impl Decompiler {
         if instructions.len() > 1024 * 1024 {
             return Err(error(Error::limit("Edit input exceeds 1 MiB")));
         }
-        let rows = serde_json::from_str(instructions).map_err(|e| {
+        // Either the instruction rows, or {instructions, locals} with new local types.
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Request {
+            Rows(Vec<decompiler_core::cil_encode::EditableInstruction>),
+            Edit {
+                instructions: Vec<decompiler_core::cil_encode::EditableInstruction>,
+                locals: Option<Vec<String>>,
+            },
+        }
+        let request: Request = serde_json::from_str(instructions).map_err(|e| {
             error(Error::new(
                 decompiler_core::error::ErrorCode::InvalidEdit,
                 e.to_string(),
             ))
         })?;
+        let (rows, locals) = match request {
+            Request::Rows(rows) => (rows, None),
+            Request::Edit {
+                instructions,
+                locals,
+            } => (instructions, locals),
+        };
         js(&self
             .session
-            .apply_edit(id, token, revision, rows)
+            .apply_edit(id, token, revision, rows, locals)
             .map_err(error)?)
     }
     pub fn discard_method_edit(

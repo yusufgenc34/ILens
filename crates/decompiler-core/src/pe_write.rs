@@ -249,20 +249,28 @@ fn header_and_code(a: &Assembly, token: u32) -> Result<Range<usize>> {
     };
     a.image.range(&a.bytes, rva, header + size)
 }
-fn body_bytes(a: &Assembly, token: u32, code: &[u8], max_stack: u16) -> Result<Vec<u8>> {
+/// A method body; `locals` replaces the original local signature token when present.
+fn body_bytes(
+    a: &Assembly,
+    token: u32,
+    code: &[u8],
+    max_stack: u16,
+    locals: Option<u32>,
+) -> Result<Vec<u8>> {
     let original = a
         .body(token)?
         .ok_or_else(|| unsupported("Cannot write a bodyless member"))?;
+    let signature = locals.unwrap_or(original.local_signature);
+    // Compilers zero-initialize declared locals; new ones are declared the same way.
+    let init = original.init_locals || locals.is_some_and(|s| s != 0);
     let mut out = Vec::new();
-    if code.len() < 64 && max_stack <= 8 && original.local_signature == 0 && !original.init_locals {
+    if code.len() < 64 && max_stack <= 8 && signature == 0 && !init {
         out.push(((code.len() as u8) << 2) | 2);
     } else {
-        out.extend_from_slice(
-            &(0x3003u16 | if original.init_locals { 0x10 } else { 0 }).to_le_bytes(),
-        );
+        out.extend_from_slice(&(0x3003u16 | if init { 0x10 } else { 0 }).to_le_bytes());
         out.extend_from_slice(&max_stack.to_le_bytes());
         out.extend_from_slice(&(code.len() as u32).to_le_bytes());
-        out.extend_from_slice(&original.local_signature.to_le_bytes());
+        out.extend_from_slice(&signature.to_le_bytes());
     }
     out.extend_from_slice(code);
     Ok(out)
@@ -465,6 +473,39 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             }
         }
     }
+    // New local signatures: an identical existing StandAloneSig is reused, otherwise
+    // its blob is appended and a row added.
+    let mut blob_heap = stream(a, "#Blob").unwrap_or_default().to_vec();
+    let existing_sigs = &a.metadata().stand_alone_sigs;
+    let mut new_sigs: Vec<(Vec<u8>, u32)> = vec![];
+    let mut signatures = BTreeMap::new();
+    for (&token, edit) in edits {
+        let Some(types) = &edit.locals else { continue };
+        if types.is_empty() {
+            signatures.insert(token, 0);
+            continue;
+        }
+        let blob = crate::signature::local_signature(types)?;
+        let reused = existing_sigs
+            .iter()
+            .position(|r| a.blob(r.signature).is_ok_and(|b| b == blob.as_slice()))
+            .map(|i| 0x1100_0001 + i as u32)
+            .or_else(|| {
+                new_sigs
+                    .iter()
+                    .position(|(b, _)| *b == blob)
+                    .map(|i| 0x1100_0001 + (existing_sigs.len() + i) as u32)
+            });
+        let sig = match reused {
+            Some(sig) => sig,
+            None => {
+                let offset = crate::metadata_write::append_blob(&mut blob_heap, &blob)?;
+                new_sigs.push((blob, offset));
+                0x1100_0000 | (existing_sigs.len() + new_sigs.len()) as u32
+            }
+        };
+        signatures.insert(token, sig);
+    }
     let mut output = a.bytes.clone();
     let mut metadata = a.bytes[a.image.metadata.clone()].to_vec();
     let method_table = &a.store.tables[6];
@@ -486,10 +527,11 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
         }
     }
     for (&token, edit) in edits {
-        let validated = edit::validate(a, token, &edit.instructions)?;
+        let validated = edit::validate_types(a, token, &edit.instructions, edit.locals.clone())?;
         if validated.code != edit.code
             || validated.max_stack != edit.max_stack
             || validated.strings != edit.strings
+            || validated.locals != edit.locals
         {
             return Err(unsupported("Edit validation is stale"));
         }
@@ -500,7 +542,13 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             ));
         }
         let code = patch_strings(&edit.code, &edit.strings, &string_tokens)?;
-        let bytes = body_bytes(a, token, &code, edit.max_stack)?;
+        let bytes = body_bytes(
+            a,
+            token,
+            &code,
+            edit.max_stack,
+            signatures.get(&token).copied(),
+        )?;
         codes.insert(token, code);
         if bytes.len() <= range.len()
             && (bytes[0] & 3 != 3 || a.method_row(token)?.rva.is_multiple_of(4))
@@ -511,7 +559,7 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             growing.push((token, bytes, range));
         }
     }
-    let moved = !appended.is_empty();
+    let moved = !appended.is_empty() || !new_sigs.is_empty();
     if !growing.is_empty() || moved {
         let region = region(a, &layout, &output)?;
         let mut data = Vec::new();
@@ -528,7 +576,36 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             data.resize(align(data.len(), 4)?, 0);
             let rva = u32::try_from(region.rva + data.len())
                 .map_err(|_| unsupported("Metadata RVA overflow"))?;
-            metadata = crate::metadata_write::with_user_strings(&metadata, &appended)?;
+            let mut replaced = vec![];
+            if !appended.is_empty() {
+                let heap = [stream(a, "#US").unwrap_or_default(), &appended].concat();
+                if heap.len() >= crate::metadata_write::MAX_USER_STRINGS {
+                    return Err(Error::limit("The #US heap would exceed its token range"));
+                }
+                replaced.push(("#US", heap));
+            }
+            if !new_sigs.is_empty() {
+                // Re-encode the tables from the RVA-patched copy with the new rows.
+                let s = a
+                    .store
+                    .streams
+                    .iter()
+                    .find(|s| s.name == "#~")
+                    .ok_or_else(|| unsupported("Missing tables stream"))?;
+                let mut tables =
+                    crate::metadata_write::Tables::decode(&metadata[s.offset..s.offset + s.size])?;
+                for (_, offset) in &new_sigs {
+                    tables.push(17, vec![*offset])?;
+                }
+                tables.widen_heaps(
+                    stream(a, "#Strings").map_or(0, <[u8]>::len),
+                    stream(a, "#GUID").map_or(0, <[u8]>::len),
+                    blob_heap.len(),
+                );
+                replaced.push(("#~", tables.encode()));
+                replaced.push(("#Blob", blob_heap.clone()));
+            }
+            metadata = crate::metadata_write::rebuild(&metadata, &replaced)?;
             put32(&mut output, layout.cli.start + 8, rva)?;
             put32(&mut output, layout.cli.start + 12, metadata.len() as u32)?;
             data.extend_from_slice(&metadata);
@@ -554,35 +631,50 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             "Output identity/entry point changed unexpectedly",
         ));
     }
-    // Independently of how it was written: every stream except the grown #US equals
-    // the input, with only the edited MethodDef RVAs changed in #~.
-    let mut tables = stream(a, "#~")
-        .ok_or_else(|| unsupported("Missing tables stream"))?
-        .to_vec();
-    let tables_start = a
-        .store
-        .streams
+    // Independently of how it was written: every original table row and heap byte is
+    // unchanged, apart from edited MethodDef RVAs and the appended rows and heap data.
+    let decode = |assembly: &Assembly| {
+        crate::metadata_write::Tables::decode(
+            stream(assembly, "#~").ok_or_else(|| unsupported("Missing tables stream"))?,
+        )
+    };
+    let (before_tables, after_tables) = (decode(a)?, decode(&parsed)?);
+    for (table, (before, after)) in before_tables
+        .rows
         .iter()
-        .find(|s| s.name == "#~")
-        .map_or(0, |s| s.offset);
-    for token in edits.keys() {
-        put32(
-            &mut tables,
-            rva_at(*token) - tables_start,
-            parsed.method_row(*token)?.rva,
-        )?;
+        .zip(&after_tables.rows)
+        .enumerate()
+    {
+        let added: Vec<Vec<u32>> = if table == 17 {
+            new_sigs.iter().map(|(_, offset)| vec![*offset]).collect()
+        } else {
+            vec![]
+        };
+        if after.len() != before.len() + added.len() || after[before.len()..] != added[..] {
+            return Err(unsupported(format!(
+                "Metadata table {table} changed unexpectedly"
+            )));
+        }
+        for (row, (x, y)) in before.iter().zip(after).enumerate() {
+            let edited = table == 6 && edits.contains_key(&(0x0600_0001 + row as u32));
+            if if edited { x[1..] != y[1..] } else { x != y } {
+                return Err(unsupported(format!(
+                    "Metadata table {table} row {} changed unexpectedly",
+                    row + 1
+                )));
+            }
+        }
     }
     for s in &a.store.streams {
-        let before = if s.name == "#~" {
-            tables.clone()
-        } else {
-            stream(a, &s.name).unwrap_or_default().to_vec()
-        };
+        if s.name == "#~" {
+            continue;
+        }
+        let before = stream(a, &s.name).unwrap_or_default();
         let after = stream(&parsed, &s.name).unwrap_or_default();
-        let same = if s.name == "#US" {
-            after.starts_with(&before)
+        let same = if s.name == "#US" || s.name == "#Blob" {
+            after.starts_with(before)
         } else {
-            after == before.as_slice()
+            after == before
         };
         if !same {
             return Err(unsupported(format!(

@@ -426,18 +426,19 @@ impl Session {
         token: u32,
         revision: u32,
         rows: Vec<crate::cil_encode::EditableInstruction>,
+        locals: Option<Vec<String>>,
     ) -> Result<crate::edit::EditPreview> {
         self.check_edit_revision(revision)?;
         if self.edits.len() >= 256 && !self.edits.contains_key(&(id, token)) {
             return Err(Error::limit("At most 256 method edits per workspace"));
         }
         let a = self.assembly(id)?;
-        let edit = crate::edit::validate(a, token, &rows)?;
+        let edit = crate::edit::validate_with_locals(a, token, &rows, locals.as_deref())?;
         let original = a
             .body(token)?
             .ok_or_else(|| Error::cil("Missing method body"))?;
         let original_code = crate::cil_encode::encode(&crate::cil_encode::from_body(&original))?;
-        if original_code == edit.code {
+        if original_code == edit.code && edit.locals.is_none() {
             self.edits.remove(&(id, token));
         } else {
             self.edits.insert((id, token), edit);

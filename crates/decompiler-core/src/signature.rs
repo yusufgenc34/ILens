@@ -268,6 +268,88 @@ pub fn method_spec(data: &[u8]) -> Result<Vec<Type>> {
     complete(&r)?;
     Ok(result)
 }
+fn put_compressed(n: u32, out: &mut Vec<u8>) -> Result<()> {
+    match n {
+        0..=0x7f => out.push(n as u8),
+        0x80..=0x3fff => out.extend_from_slice(&(0x8000 | n as u16).to_be_bytes()),
+        0x4000..=0x1fff_ffff => out.extend_from_slice(&(0xc000_0000 | n).to_be_bytes()),
+        _ => return Err(Error::limit("Signature value exceeds 29 bits")),
+    }
+    Ok(())
+}
+/// Encodes the element types a written local signature may hold: primitives, vectors
+/// and TypeDef/TypeRef/TypeSpec classes or value types.
+pub fn encode_type(t: &Type, out: &mut Vec<u8>) -> Result<()> {
+    const PRIMITIVES: [(&str, u8); 18] = [
+        ("bool", 2),
+        ("char", 3),
+        ("sbyte", 4),
+        ("byte", 5),
+        ("short", 6),
+        ("ushort", 7),
+        ("int", 8),
+        ("uint", 9),
+        ("long", 10),
+        ("ulong", 11),
+        ("float", 12),
+        ("double", 13),
+        ("string", 14),
+        ("TypedReference", 22),
+        ("nint", 24),
+        ("nuint", 25),
+        ("object", 28),
+        ("void", 1),
+    ];
+    match t {
+        Type::Primitive(name) => {
+            let code = PRIMITIVES
+                .iter()
+                .find(|(n, _)| n == name)
+                .ok_or_else(|| Error::metadata(format!("Unknown primitive {name}")))?;
+            out.push(code.1);
+        }
+        Type::Named(token) | Type::ValueType(token) => {
+            out.push(if matches!(t, Type::Named(_)) {
+                0x12
+            } else {
+                0x11
+            });
+            let tag = match token >> 24 {
+                2 => 0,
+                1 => 1,
+                27 => 2,
+                _ => {
+                    return Err(Error::metadata(
+                        "Signature types must be TypeDef/TypeRef/TypeSpec",
+                    ));
+                }
+            };
+            put_compressed(((token & 0xff_ffff) << 2) | tag, out)?;
+        }
+        Type::Array(element, 1) => {
+            out.push(0x1d);
+            encode_type(element, out)?;
+        }
+        _ => {
+            return Err(Error::metadata(
+                "Only primitive, class, value-type and vector locals can be written",
+            ));
+        }
+    }
+    Ok(())
+}
+/// A LocalVarSig blob (ECMA-335 II.23.2.6).
+pub fn local_signature(types: &[Type]) -> Result<Vec<u8>> {
+    let mut out = vec![0x07];
+    put_compressed(
+        u32::try_from(types.len()).map_err(|_| Error::limit("Too many locals"))?,
+        &mut out,
+    )?;
+    for t in types {
+        encode_type(t, &mut out)?;
+    }
+    Ok(out)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +374,17 @@ mod tests {
     fn signed_compressed() {
         assert_eq!(Reader::new(&[0x7f]).compressed_signed().unwrap(), -1);
         assert_eq!(Reader::new(&[0x01]).compressed_signed().unwrap(), -64);
+    }
+    #[test]
+    fn local_signatures_round_trip() {
+        let types = vec![
+            Type::primitive("int"),
+            Type::primitive("string"),
+            Type::Array(Box::new(Type::primitive("byte")), 1),
+            Type::Named(0x0200_0003),
+            Type::ValueType(0x0100_0012),
+        ];
+        let blob = local_signature(&types).unwrap();
+        assert_eq!(locals(&blob).unwrap(), types);
     }
 }

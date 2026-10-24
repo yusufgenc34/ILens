@@ -17,6 +17,8 @@ pub struct ValidatedEdit {
     pub max_stack: u16,
     /// New `ldstr` literals; `code` addresses them with placeholder tokens.
     pub strings: Vec<String>,
+    /// Replacement local variable types, or None to keep the method's signature.
+    pub locals: Option<Vec<crate::signature::Type>>,
 }
 #[derive(Serialize)]
 pub struct EditPreview {
@@ -28,6 +30,9 @@ pub struct EditPreview {
     pub il: String,
     pub max_stack: u16,
     pub code_size: usize,
+    /// Local variable types, as the editor shows and accepts them.
+    pub locals: Vec<String>,
+    pub original_locals: Vec<String>,
 }
 mod types;
 use types::{Stack, Types, Value};
@@ -153,6 +158,15 @@ pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
     Ok(body)
 }
 pub fn validate(a: &Assembly, token: u32, rows: &[EditableInstruction]) -> Result<ValidatedEdit> {
+    validate_with_locals(a, token, rows, None)
+}
+/// Validates instructions, optionally with a new list of local variable types.
+pub fn validate_with_locals(
+    a: &Assembly,
+    token: u32,
+    rows: &[EditableInstruction],
+    locals: Option<&[String]>,
+) -> Result<ValidatedEdit> {
     if a.image.ready_to_run {
         return Err(unsupported(
             "ReadyToRun images are read-only; their precompiled native code cannot be updated by the IL writer.",
@@ -163,12 +177,39 @@ pub fn validate(a: &Assembly, token: u32, rows: &[EditableInstruction]) -> Resul
             "Reference assemblies contain API declarations, not editable implementations.",
         ));
     }
+    let locals = match locals {
+        Some(texts) => {
+            if texts.len() > 1024 {
+                return Err(Error::limit(
+                    "A method can declare at most 1,024 edited locals",
+                ));
+            }
+            Some(
+                texts
+                    .iter()
+                    .map(|t| local_type(a, t))
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        }
+        None => None,
+    };
+    validate_types(a, token, rows, locals)
+}
+/// Validation with already parsed local types (the writer revalidates this way).
+pub fn validate_types(
+    a: &Assembly,
+    token: u32,
+    rows: &[EditableInstruction],
+    locals: Option<Vec<crate::signature::Type>>,
+) -> Result<ValidatedEdit> {
     let mut body = supported_body(a, token)?;
     let (rows, strings) = string_literals(a, rows)?;
     let code = cil_encode::encode(&rows)?;
     body.instructions = cil::decode(&code)?;
     body.code_size = code.len() as u32;
-    let max_stack = verify_with(a, token, &body, strings.len())?;
+    let original_locals = a.locals(&body)?;
+    let locals = locals.filter(|l| *l != original_locals);
+    let max_stack = verify_with(a, token, &body, strings.len(), locals.as_deref())?;
     let mut instructions = cil_encode::from_body(&body);
     show_literals(&mut instructions, &strings);
     Ok(ValidatedEdit {
@@ -176,6 +217,55 @@ pub fn validate(a: &Assembly, token: u32, rows: &[EditableInstruction]) -> Resul
         code,
         max_stack,
         strings,
+        locals,
+    })
+}
+/// A local variable type as written in the editor: a C# keyword (`int`, `string`), a
+/// TypeDef/TypeRef token (`0x02000003`) or a local type's full name, with `[]` for
+/// vectors.
+fn local_type(a: &Assembly, text: &str) -> Result<crate::signature::Type> {
+    use crate::signature::Type;
+    let text = text.trim();
+    if let Some(element) = text.strip_suffix("[]") {
+        return Ok(Type::Array(Box::new(local_type(a, element)?), 1));
+    }
+    const KEYWORDS: [&str; 16] = [
+        "bool", "char", "sbyte", "byte", "short", "ushort", "int", "uint", "long", "ulong",
+        "float", "double", "string", "object", "nint", "nuint",
+    ];
+    if KEYWORDS.contains(&text) {
+        return Ok(Type::primitive(text));
+    }
+    let token = match text.strip_prefix("0x") {
+        Some(hex) => u32::from_str_radix(hex, 16)
+            .map_err(|_| invalid(format!("Invalid local type token: {text}")))?,
+        None => a
+            .nodes
+            .iter()
+            .find(|n| n.token >> 24 == 2 && a.resolve_full(n.token) == text)
+            .map(|n| n.token)
+            .ok_or_else(|| invalid(format!("Unknown local type: {text}")))?,
+    };
+    let row = (token & 0xff_ffff) as usize;
+    let exists = match token >> 24 {
+        1 => (1..=a.metadata().type_refs.len()).contains(&row),
+        2 => (1..=a.metadata().type_defs.len()).contains(&row),
+        _ => false,
+    };
+    if !exists {
+        return Err(invalid(
+            "Local types must be existing TypeDef or TypeRef tokens",
+        ));
+    }
+    // Value types are written as such; the verifier decides what it supports.
+    let value_type = a
+        .nodes
+        .iter()
+        .any(|n| n.token == token && matches!(n.kind.as_str(), "struct" | "enum"));
+    Ok(if value_type {
+        Type::ValueType(token)
+    } else {
+        Type::Named(token)
     })
 }
 /// `ldstr "text"` operands: an existing #US entry keeps its token, a new literal gets a
@@ -239,14 +329,16 @@ fn pending_literal(operand: &str, strings: &[String]) -> Option<String> {
         .and_then(|s| serde_json::to_string(s).ok())
 }
 pub fn verify(a: &Assembly, token: u32, body: &MethodBody) -> Result<u16> {
-    verify_with(a, token, body, 0)
+    verify_with(a, token, body, 0, None)
 }
-/// Verifies a body that may address `pending_strings` new literals by placeholder.
+/// Verifies a body that may address `pending_strings` new literals by placeholder and
+/// may declare `locals` in place of its signature's.
 pub fn verify_with(
     a: &Assembly,
     token: u32,
     body: &MethodBody,
     pending_strings: usize,
+    locals: Option<&[crate::signature::Type]>,
 ) -> Result<u16> {
     if !body.exceptions.is_empty() {
         return Err(unsupported(
@@ -272,9 +364,13 @@ pub fn verify_with(
         let id = types.signature(&sig.return_type)?;
         Some(types.stack(id))
     };
+    let declared = match locals {
+        Some(locals) => locals.to_vec(),
+        None => a.locals(body)?,
+    };
     let mut locals = Vec::new();
-    for ty in a.locals(body)? {
-        let id = types.signature(&ty)?;
+    for ty in &declared {
+        let id = types.signature(ty)?;
         locals.push(types.stack(id));
     }
     let cfg = ControlFlowGraph::build(body)?;
@@ -809,14 +905,44 @@ pub fn preview(
     }
     let mut instructions = cil_encode::from_body(&body);
     show_literals(&mut instructions, strings);
+    let original_types = a.locals(&body)?;
+    let types = edit
+        .and_then(|e| e.locals.clone())
+        .unwrap_or_else(|| original_types.clone());
+    let shown = |types: &[crate::signature::Type]| -> Vec<String> {
+        types.iter().map(|t| a.format_type(t, token)).collect()
+    };
+    let mut il = crate::emit::il(a, token, &body);
+    if edit.is_some_and(|e| e.locals.is_some()) {
+        // The listing shows the edited locals, not the method's current signature.
+        let mut lines: Vec<String> = il
+            .lines()
+            .filter(|l| !l.starts_with(".locals"))
+            .map(str::to_owned)
+            .collect();
+        if let Some(at) = lines.iter().position(|l| l.starts_with(".maxstack"))
+            && !types.is_empty()
+        {
+            let list = types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("[{i}] {} local{i}", a.format_type(t, token)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.insert(at + 1, format!(".locals init ({list})"));
+        }
+        il = lines.join("\n") + "\n";
+    }
     Ok(EditPreview {
         token,
         revision,
         instructions,
         original,
         changed: edit.is_some(),
-        il: crate::emit::il(a, token, &body),
+        il,
         max_stack: body.max_stack,
         code_size: body.code_size as usize,
+        locals: shown(&types),
+        original_locals: shown(&original_types),
     })
 }

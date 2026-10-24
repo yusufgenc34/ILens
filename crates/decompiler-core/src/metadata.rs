@@ -8,7 +8,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
-enum Column {
+pub(crate) enum Column {
     U16,
     U32,
     String,
@@ -19,7 +19,7 @@ enum Column {
     Coded(K),
 }
 use Column::*;
-fn schema(id: usize) -> Vec<Column> {
+pub(crate) fn schema(id: usize) -> Vec<Column> {
     match id {
         0 => vec![U16, String, Guid, Guid, Guid],
         1 => vec![Coded(K::ResolutionScope), String, String],
@@ -88,7 +88,7 @@ fn coded_tables(k: K) -> Vec<Option<u8>> {
     }
     tables
 }
-fn width(c: Column, heaps: u8, counts: &[u32; 64]) -> usize {
+pub(crate) fn width(c: Column, heaps: u8, counts: &[u32; 64]) -> usize {
     match c {
         U16 => 2,
         U32 => 4,

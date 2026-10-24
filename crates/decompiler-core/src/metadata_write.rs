@@ -1,6 +1,6 @@
 //! Metadata growth for edited assemblies. Existing heap offsets, table rows and tokens
-//! never move: new user strings are appended to #US and the streams are laid out again
-//! behind an unchanged metadata root.
+//! never move: user strings and blobs are appended to their heaps, rows to free-standing
+//! tables, and the streams are laid out again behind an unchanged metadata root.
 use crate::{
     error::{Error, Result},
     reader::Reader,
@@ -10,7 +10,7 @@ use crate::{
 /// the writer replaces them with appended #US offsets.
 pub const PENDING_STRING: u32 = 0x70F0_0000;
 /// #US offsets are 24-bit token values and must stay below the placeholders.
-const MAX_USER_STRINGS: usize = (PENDING_STRING & 0xff_ffff) as usize;
+pub const MAX_USER_STRINGS: usize = (PENDING_STRING & 0xff_ffff) as usize;
 
 fn compressed(n: usize, out: &mut Vec<u8>) -> Result<()> {
     match n {
@@ -70,9 +70,9 @@ struct StreamHeader {
     name: Vec<u8>,
 }
 
-/// Metadata with `appended` added to the end of the #US heap. Every other stream is
-/// copied unchanged; stream offsets follow the original order, 4-byte aligned.
-pub fn with_user_strings(metadata: &[u8], appended: &[u8]) -> Result<Vec<u8>> {
+/// Metadata with some streams replaced (by name). Other streams are copied unchanged;
+/// stream offsets follow the original order, 4-byte aligned, behind the same root.
+pub fn rebuild(metadata: &[u8], replaced: &[(&str, Vec<u8>)]) -> Result<Vec<u8>> {
     let bad = || Error::metadata("Malformed metadata root");
     let mut r = Reader::new(metadata);
     if r.u32()? != 0x424a_5342 {
@@ -95,25 +95,24 @@ pub fn with_user_strings(metadata: &[u8], appended: &[u8]) -> Result<Vec<u8>> {
         streams.push(StreamHeader { offset, size, name });
     }
     let headers_end = r.pos;
-    let us = streams
-        .iter()
-        .position(|s| s.name == b"#US")
-        .ok_or_else(|| Error::metadata("The assembly has no #US heap to extend"))?;
-    // Heap entries start at their recorded size; zero padding inside it stays.
-    let heap_size = streams[us].size + appended.len();
-    if heap_size >= MAX_USER_STRINGS {
-        return Err(Error::limit("The #US heap would exceed its token range"));
+    for (name, _) in replaced {
+        if !streams.iter().any(|s| s.name == name.as_bytes()) {
+            return Err(Error::metadata(format!(
+                "The assembly has no {name} stream"
+            )));
+        }
     }
     let mut out = metadata[..headers_at].to_vec();
     let mut data = Vec::new();
     let mut layout = Vec::with_capacity(count);
-    for (i, s) in streams.iter().enumerate() {
-        let body = metadata.get(s.offset..s.offset + s.size).ok_or_else(bad)?;
+    for s in &streams {
+        let original = metadata.get(s.offset..s.offset + s.size).ok_or_else(bad)?;
+        let body = replaced
+            .iter()
+            .find(|(name, _)| name.as_bytes() == s.name)
+            .map_or(original, |(_, bytes)| bytes.as_slice());
         let start = headers_end + data.len();
         data.extend_from_slice(body);
-        if i == us {
-            data.extend_from_slice(appended);
-        }
         data.resize(data.len().next_multiple_of(4), 0);
         layout.push((start, headers_end + data.len() - start));
     }
@@ -127,6 +126,116 @@ pub fn with_user_strings(metadata: &[u8], appended: &[u8]) -> Result<Vec<u8>> {
     debug_assert_eq!(out.len(), headers_end);
     out.extend_from_slice(&data);
     Ok(out)
+}
+
+/// The decoded `#~` stream: header fields and every row's column values.
+pub struct Tables {
+    header: [u8; 8],
+    pub heaps: u8,
+    valid: u64,
+    sorted: u64,
+    pub counts: [u32; 64],
+    pub rows: Vec<Vec<Vec<u32>>>,
+}
+impl Tables {
+    pub fn decode(stream: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(stream);
+        let header: [u8; 8] = r
+            .take(8)?
+            .try_into()
+            .map_err(|_| Error::metadata("Short tables header"))?;
+        let heaps = header[6];
+        let valid = r.u64()?;
+        let sorted = r.u64()?;
+        let mut counts = [0u32; 64];
+        for (i, count) in counts.iter_mut().enumerate() {
+            if valid & (1 << i) != 0 {
+                *count = r.u32()?;
+            }
+        }
+        let mut rows = vec![vec![]; 64];
+        for (id, table) in rows.iter_mut().enumerate().take(45) {
+            let columns = crate::metadata::schema(id);
+            for _ in 0..counts[id] {
+                let mut row = Vec::with_capacity(columns.len());
+                for c in &columns {
+                    row.push(if crate::metadata::width(*c, heaps, &counts) == 2 {
+                        u32::from(r.u16()?)
+                    } else {
+                        r.u32()?
+                    });
+                }
+                table.push(row);
+            }
+        }
+        Ok(Self {
+            header,
+            heaps,
+            valid,
+            sorted,
+            counts,
+            rows,
+        })
+    }
+    /// Appends a row to a table no other row ranges over; returns its token.
+    pub fn push(&mut self, table: usize, row: Vec<u32>) -> Result<u32> {
+        // Owner lists (TypeDef → Field/Method, MethodDef → Param, maps) and sorted
+        // tables would need renumbering; only free-standing tables grow here.
+        if !matches!(table, 1 | 10 | 17 | 27 | 35 | 43) {
+            return Err(Error::new(
+                crate::error::ErrorCode::UnsupportedEdit,
+                "Rows can only be added to free-standing metadata tables",
+            ));
+        }
+        if row.len() != crate::metadata::schema(table).len() {
+            return Err(Error::metadata("Row does not match its table schema"));
+        }
+        self.rows[table].push(row);
+        self.counts[table] += 1;
+        self.valid |= 1 << table;
+        Ok(((table as u32) << 24) | self.counts[table])
+    }
+    /// Heap index widths for heaps of these sizes (the flags only ever widen).
+    pub fn widen_heaps(&mut self, strings: usize, guids: usize, blobs: usize) {
+        for (bit, size) in [(1, strings), (2, guids), (4, blobs)] {
+            if size >= 0x1_0000 {
+                self.heaps |= bit;
+            }
+        }
+    }
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = self.header.to_vec();
+        out[6] = self.heaps;
+        out.extend_from_slice(&self.valid.to_le_bytes());
+        out.extend_from_slice(&self.sorted.to_le_bytes());
+        for (i, count) in self.counts.iter().enumerate() {
+            if self.valid & (1 << i) != 0 {
+                out.extend_from_slice(&count.to_le_bytes());
+            }
+        }
+        for (id, table) in self.rows.iter().enumerate().take(45) {
+            let columns = crate::metadata::schema(id);
+            for row in table {
+                for (c, value) in columns.iter().zip(row) {
+                    if crate::metadata::width(*c, self.heaps, &self.counts) == 2 {
+                        out.extend_from_slice(&(*value as u16).to_le_bytes());
+                    } else {
+                        out.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+        }
+        out.resize(out.len().next_multiple_of(4), 0);
+        out
+    }
+}
+
+/// Appends `entry` to a blob heap and returns its offset.
+pub fn append_blob(heap: &mut Vec<u8>, entry: &[u8]) -> Result<u32> {
+    let offset = u32::try_from(heap.len()).map_err(|_| Error::limit("#Blob heap overflow"))?;
+    compressed(entry.len(), heap)?;
+    heap.extend_from_slice(entry);
+    Ok(offset)
 }
 
 #[cfg(test)]

@@ -47,7 +47,7 @@ async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
     case 'getEdits': return core.get_edits(request.assembly)
     case 'getOpcodes': return core.get_opcodes()
     case 'openMethodEdit': return core.open_method_edit(request.assembly, request.token)
-    case 'applyMethodEdit': return core.apply_method_edit(request.assembly, request.token, request.revision, JSON.stringify(request.instructions))
+    case 'applyMethodEdit': return core.apply_method_edit(request.assembly, request.token, request.revision, JSON.stringify(request.locals ? {instructions: request.instructions, locals: request.locals} : request.instructions))
     case 'discardMethodEdit': return core.discard_method_edit(request.assembly, request.token, request.revision)
     case 'exportModifiedAssembly': return {buffer: core.export_modified_assembly(request.assembly, request.revision).buffer}
     case 'beginExport': exportRequest = request.id; cancelExport(); exportJob = createExportJob(core, ++nextJob, request.assembly, request.options); return exportJob.progress()

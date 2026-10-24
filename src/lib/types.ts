@@ -37,7 +37,7 @@ export interface Operations {
   finishExport: {input: {job: number}; output: import('./export-types').ExportResult}
   cancelExport: {input: {job: number}; output: null}
   openMethodEdit: {input: {assembly: number; token: number}; output: EditPreview}
-  applyMethodEdit: {input: {assembly: number; token: number; revision: number; instructions: EditableInstruction[]}; output: EditPreview}
+  applyMethodEdit: {input: {assembly: number; token: number; revision: number; instructions: EditableInstruction[]; locals?: string[]}; output: EditPreview}
   discardMethodEdit: {input: {assembly: number; token: number; revision: number}; output: EditPreview}
   getEdits: {input: {assembly: number}; output: EditsInfo}
   getOpcodes: {input: Record<string, never>; output: [string, string][]}
@@ -62,7 +62,7 @@ export interface Operations {
   dispose: { input: Record<string, never>; output: null }
 }
 export interface EditableInstruction {id: string; opcode: string; operand: string}
-export interface EditPreview {token: number; revision: number; instructions: EditableInstruction[]; original: EditableInstruction[]; changed: boolean; il: string; max_stack: number; code_size: number}
+export interface EditPreview {token: number; revision: number; instructions: EditableInstruction[]; original: EditableInstruction[]; changed: boolean; il: string; max_stack: number; code_size: number; locals: string[]; original_locals: string[]}
 export interface EditsInfo {revision: number; edit_revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null}
 export type Operation = keyof Operations
 export type Request = { [K in Operation]: {id: number; op: K} & Operations[K]['input'] }[Operation]

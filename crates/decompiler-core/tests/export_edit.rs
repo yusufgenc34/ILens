@@ -99,7 +99,7 @@ fn rejects_bad_stack_types_tokens_and_stale_edits() {
         .opcode = "ldnull".into();
     assert!(
         session
-            .apply_edit(loaded.id, token, original.revision, rows)
+            .apply_edit(loaded.id, token, original.revision, rows, None)
             .is_err()
     );
     let mut rows = original.instructions.clone();
@@ -108,7 +108,7 @@ fn rejects_bad_stack_types_tokens_and_stale_edits() {
         .unwrap()
         .opcode = "ldc.i4.3".into();
     let current = session
-        .apply_edit(loaded.id, token, original.revision, rows)
+        .apply_edit(loaded.id, token, original.revision, rows, None)
         .unwrap();
     assert!(current.changed);
     assert!(
@@ -314,7 +314,7 @@ fn loading_dependencies_keeps_open_edits_current() {
         .unwrap()
         .opcode = "ldc.i4.3".into();
     let current = session
-        .apply_edit(loaded.id, token, original.revision, rows)
+        .apply_edit(loaded.id, token, original.revision, rows, None)
         .unwrap();
     session.load(PAT.to_vec()).unwrap();
     assert!(
@@ -380,4 +380,89 @@ fn new_string_literals_grow_the_user_string_heap() {
             .csharp
             .contains("return \"yeni metin ✓ 'quoted'\".Length;")
     );
+}
+#[test]
+fn metadata_tables_round_trip_byte_for_byte() {
+    for file in std::fs::read_dir("../../samples/fixtures").unwrap() {
+        let path = file.unwrap().path();
+        if path.extension().is_none_or(|e| e != "dll") {
+            continue;
+        }
+        let Ok(a) = Assembly::load(std::fs::read(&path).unwrap()) else {
+            continue;
+        };
+        let metadata = &a.bytes[a.image.metadata.clone()];
+        let stream = a.store.streams.iter().find(|s| s.name == "#~").unwrap();
+        let tables = &metadata[stream.offset..stream.offset + stream.size];
+        let decoded = decompiler_core::metadata_write::Tables::decode(tables).unwrap();
+        // Compilers may pad the stream with zeros past the rows.
+        let encoded = decoded.encode();
+        assert_eq!(encoded, tables[..encoded.len()], "{}", path.display());
+        assert!(tables[encoded.len()..].iter().all(|b| *b == 0));
+        // Rebuilding with nothing replaced reproduces the metadata.
+        assert_eq!(
+            decompiler_core::metadata_write::rebuild(metadata, &[]).unwrap(),
+            metadata,
+            "{}",
+            path.display()
+        );
+    }
+}
+#[test]
+fn new_locals_add_a_local_signature() {
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let token = method(&a, "StringLength");
+    assert!(
+        a.locals(&a.body(token).unwrap().unwrap())
+            .unwrap()
+            .is_empty()
+    );
+    let row = |opcode: &str, operand: &str, id: &str| EditableInstruction {
+        id: id.into(),
+        opcode: opcode.into(),
+        operand: operand.into(),
+    };
+    let original = cil_encode::from_body(&a.body(token).unwrap().unwrap());
+    let call = original
+        .iter()
+        .find(|r| r.opcode == "callvirt")
+        .unwrap()
+        .operand
+        .clone();
+    let rows = vec![
+        row("ldarg.0", "", "a"),
+        row("stloc.0", "", "b"),
+        row("ldloc.0", "", "c"),
+        row("callvirt", &call, "d"),
+        row("stloc.1", "", "e"),
+        row("ldloc.1", "", "f"),
+        row("ret", "", "g"),
+    ];
+    // Locals the body uses must be declared.
+    assert!(edit::validate(&a, token, &rows).is_err());
+    let locals = ["string".to_owned(), "int".to_owned()];
+    let edit = edit::validate_with_locals(&a, token, &rows, Some(&locals)).unwrap();
+    // A wrong declared type is rejected by the verifier.
+    let wrong = ["int".to_owned(), "int".to_owned()];
+    assert!(edit::validate_with_locals(&a, token, &rows, Some(&wrong)).is_err());
+    let output = pe_write::write(&a, &BTreeMap::from([(token, edit)])).unwrap();
+    let b = Assembly::load(output.clone()).unwrap();
+    let body = b.body(token).unwrap().unwrap();
+    assert!(body.init_locals);
+    assert_eq!(
+        b.locals(&body).unwrap(),
+        [
+            decompiler_core::signature::Type::primitive("string"),
+            decompiler_core::signature::Type::primitive("int")
+        ]
+    );
+    assert_eq!(
+        b.metadata().stand_alone_sigs.len(),
+        a.metadata().stand_alone_sigs.len() + 1
+    );
+    assert!(goblin::pe::PE::parse(&output).is_ok());
+    // A second edit with the same locals reuses the new signature row on rewrite.
+    let again = edit::validate_with_locals(&b, token, &rows, Some(&locals)).unwrap();
+    assert!(again.locals.is_none());
 }
