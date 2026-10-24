@@ -40,6 +40,10 @@ export interface Operations {
   applyMethodEdit: {input: {assembly: number; token: number; revision: number; instructions: EditableInstruction[]; locals?: string[]; regions?: EditRegion[]}; output: EditPreview}
   discardMethodEdit: {input: {assembly: number; token: number; revision: number}; output: EditPreview}
   getEdits: {input: {assembly: number}; output: EditsInfo}
+  assemblyIds: {input: Record<string, never>; output: number[]}
+  assemblyBytes: {input: {assembly: number}; output: {buffer: ArrayBuffer}}
+  csharpSource: {input: {assembly: number; token: number}; output: {method: string; before: string; after: string; line: number}}
+  csharpApply: {input: {assembly: number; token: number; revision: number; compiled: ArrayBuffer}; output: {preview: EditPreview; reloaded: boolean; info: AssemblyInfo}}
   readBytes: {input: {assembly: number; offset: number; length: number}; output: {buffer: ArrayBuffer}}
   checkPatched: {input: {assembly: number; patches: [number, number][]}; output: string | null}
   exportPatched: {input: {assembly: number; patches: [number, number][]}; output: {buffer: ArrayBuffer}}

@@ -1,6 +1,26 @@
-# Design note: editing methods in C#
+# Editing methods in C#
 
-Status: proposal, awaiting approval. Nothing here is implemented yet.
+Status: implemented for single method bodies (option A below). Right-click a method and choose
+**Edit Method (C#)…**. The compiler component is built with `npm run build:compiler` (requires the
+.NET 10 SDK) into `public/compiler`; builds without it show how to add it.
+
+How it works now:
+
+- `csharp_edit::source` reconstructs the method and wraps it in a skeleton of its declaring
+  type: other members become `=> throw null`, constructors `extern`, so source types win over
+  the referenced original (CS0436 is only a warning).
+- `src/workers/compiler.worker.ts` runs Roslyn (trimmed, about 19 MB, 5 MB compressed) on .NET
+  WebAssembly. References are the loaded assemblies' bytes, read as metadata. Like dnSpy it sets
+  Roslyn's internal `IgnoreAccessibility` binder flag so private and internal members are usable,
+  and it disables concurrent builds because browser WebAssembly is single-threaded.
+- `csharp_edit::merge` maps the compiled body's tokens into the edited assembly, reusing existing
+  rows by identity and appending new AssemblyRef/TypeRef/MemberRef/TypeSpec/MethodSpec rows;
+  `pe_write::add_rows` writes them and re-verifies. The body then goes through the IL write
+  verifier like any IL edit, and Save Module downloads the result.
+- Refused with an explanation: signature changes, records, and bodies needing compiler-generated
+  types (lambdas, local functions, iterators, async), until the writer can add TypeDefs.
+
+The rest of this note is the original proposal.
 
 dnSpy's **Edit Method (C#)** decompiles a method, lets the user change the C#, compiles it
 with Roslyn against the module and its references, and merges the compiled IL back into
@@ -43,8 +63,7 @@ by both. The download is opt-in, cached by the browser, and pinned by hash. The 
 version supports editing one method body at a time; adding members and editing whole
 types follow once TypeDef insertion (needed for closure classes) exists in the writer.
 
-## Open questions for approval
+## Decisions
 
-- Is a one-time download of about 30 MB acceptable for C# editing?
-- Should the first version refuse lambdas, iterators and async methods (they need new
-  types), or wait until the writer can add TypeDefs?
+- The compiler is downloaded once, on first use, from the same origin.
+- The first version refuses lambdas, iterators and async methods (they need new types).

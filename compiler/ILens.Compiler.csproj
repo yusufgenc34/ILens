@@ -4,6 +4,8 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Diagnostics are shown in English; no localized compiler resources. -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <OutputType>Exe</OutputType>
     <!-- Trim the framework, but keep Roslyn whole: it uses reflection internally. -->
     <PublishTrimmed>true</PublishTrimmed>

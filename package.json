@@ -11,6 +11,7 @@
     "build": "npm run build:wasm && npm run build:app",
     "start": "node node_modules/rari/dist/cli.mjs start",
     "build:wasm": "node scripts/build-wasm.mjs",
+    "build:compiler": "node scripts/build-compiler.mjs",
     "test": "npm run test:rust && npm run test:frontend",
     "test:rust": "cargo test --workspace --locked",
     "test:frontend": "vitest run",

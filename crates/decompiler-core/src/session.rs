@@ -775,6 +775,80 @@ impl Session {
         self.bump_edit_revision();
         self.open_edit(id, token)
     }
+    /// Assembly ids and file bytes the C# compiler references: every loaded assembly
+    /// (read as metadata by the compiler, never run).
+    pub fn ids(&self) -> Vec<u32> {
+        self.assemblies.keys().copied().collect()
+    }
+    /// The C# skeleton for editing a method, with the line the method starts on.
+    pub fn csharp_source(&self, id: u32, token: u32) -> Result<Value> {
+        let a = self.assembly(id)?;
+        crate::edit::supported_body(a, token)?;
+        let source = crate::csharp_edit::source(a, token)?;
+        Ok(
+            json!({"method": source.method, "before": source.before, "after": source.after, "line": source.before.lines().count() + 1}),
+        )
+    }
+    /// Applies a C#-compiled body: references it needs are appended first (the workspace
+    /// then holds the rewritten assembly, with pending edits written into it), and the
+    /// mapped IL is validated and stored like an IL edit.
+    pub fn csharp_apply(
+        &mut self,
+        id: u32,
+        token: u32,
+        revision: u32,
+        compiled: &[u8],
+    ) -> Result<Value> {
+        self.check_edit_revision(revision)?;
+        if compiled.len() > 64 * 1024 * 1024 {
+            return Err(Error::limit("Compiled output exceeds 64 MiB"));
+        }
+        let merged = crate::csharp_edit::merge(self.assembly(id)?, token, compiled)?;
+        let mut reloaded = false;
+        if !merged.rows.is_empty() {
+            let a = self.assembly(id)?;
+            let pending: BTreeMap<u32, crate::edit::ValidatedEdit> = self
+                .edits
+                .iter()
+                .filter(|((assembly, _), _)| *assembly == id)
+                .map(|((_, t), edit)| (*t, edit.clone()))
+                .collect();
+            let externals = self.externals(id);
+            let base = if pending.is_empty() {
+                a.bytes.clone()
+            } else {
+                crate::edit::with_externals((*externals).clone(), || {
+                    crate::pe_write::write(a, &pending)
+                })?
+            };
+            let base = Assembly::load(base)?;
+            // Writing pending edits keeps tokens; merge again against the written bytes.
+            let merged = crate::csharp_edit::merge(&base, token, compiled)?;
+            let replaced = Assembly::load(crate::pe_write::add_rows(&base, &merged.rows)?)?;
+            self.assemblies.insert(id, replaced);
+            self.edits.retain(|(assembly, _), _| *assembly != id);
+            self.cache.retain(|((assembly, _), _, _)| *assembly != id);
+            self.cache_bytes = self.cache.iter().map(|(_, _, bytes)| *bytes).sum();
+            self.revision += 1;
+            self.bump_edit_revision();
+            reloaded = true;
+        }
+        let a = self.assembly(id)?;
+        let externals = self.externals(id);
+        let edit = crate::edit::with_externals((*externals).clone(), || {
+            crate::edit::validate_types(
+                a,
+                token,
+                &merged.instructions,
+                Some(merged.locals.clone()),
+                Some(&merged.regions),
+            )
+        })?;
+        self.edits.insert((id, token), edit);
+        self.bump_edit_revision();
+        let preview = self.open_edit(id, token)?;
+        Ok(json!({"preview": preview, "reloaded": reloaded, "info": self.assembly(id)?.info}))
+    }
     /// Adds a field or method to a type: pending IL edits are written first, the member
     /// is added with renumbered tokens, and the result replaces the assembly in place.
     pub fn add_member(

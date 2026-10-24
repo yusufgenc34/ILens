@@ -27,7 +27,7 @@ async function initialize() {
   return engine
 }
 async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
-  if (['load', 'loadDependency', 'close', 'dispose', 'applyMethodEdit', 'discardMethodEdit', 'addMember'].includes(request.op)) cancelExport()
+  if (['load', 'loadDependency', 'close', 'dispose', 'applyMethodEdit', 'discardMethodEdit', 'addMember', 'csharpApply'].includes(request.op)) cancelExport()
   switch (request.op) {
     case 'resolveFrameworkReference': {
       const info=core.get_assembly_info(request.assembly) as Overview
@@ -45,6 +45,10 @@ async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
     }
     case 'beginProjectExport': exportRequest = request.id; cancelExport(); exportJob = createProjectExportJob(core, ++nextJob, request.options); return exportJob.progress()
     case 'getEdits': return core.get_edits(request.assembly)
+    case 'assemblyIds': return core.assembly_ids()
+    case 'assemblyBytes': return {buffer: core.assembly_bytes(request.assembly).buffer}
+    case 'csharpSource': return core.csharp_source(request.assembly, request.token)
+    case 'csharpApply': return core.csharp_apply(request.assembly, request.token, request.revision, new Uint8Array(request.compiled))
     case 'readBytes': return {buffer: core.read_bytes(request.assembly, request.offset, request.length).buffer}
     case 'checkPatched': return core.check_patched(request.assembly, JSON.stringify(request.patches))
     case 'exportPatched': return {buffer: core.export_patched(request.assembly, JSON.stringify(request.patches)).buffer}

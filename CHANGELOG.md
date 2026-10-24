@@ -6,6 +6,7 @@
 - IL editing now covers constructors and type initializers, generic methods and members of generic types, local structs, ref/out parameters and managed pointers, multidimensional arrays, try/catch/finally/fault regions, nested and protected access, and external types and members from loaded dependencies.
 - Edits can add `ldstr` string literals and locals; the writer grows #US/#Blob, re-encodes metadata tables and relocates the metadata, then verifies every original row and heap byte.
 - Added Add Field and Add Method, which renumber field/method/parameter tokens across all tables, method bodies and the entry point, and verify every member and body afterwards.
+- Added Edit Method (C#): Roslyn compiled to WebAssembly runs in the browser, the compiled body is merged into the assembly with new references appended, then verified like an IL edit. `npm run build:compiler` builds the component.
 - Added a whole-file hex editor with checked raw patches, a metadata table viewer, a docked Search window, and settings for token comments, Explorer tokens and compiler-generated members.
 - Added `npm run test:e2e:firefox`, which runs Firefox in Docker; it found and fixed two Firefox-only viewer bugs.
 

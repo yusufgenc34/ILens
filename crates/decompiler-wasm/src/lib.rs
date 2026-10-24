@@ -303,6 +303,27 @@ impl Decompiler {
             .map_err(error)?;
         Ok(bytes)
     }
+    pub fn assembly_ids(&self) -> Result<JsValue, JsValue> {
+        js(&self.session.ids())
+    }
+    pub fn assembly_bytes(&self, id: u32) -> Result<Vec<u8>, JsValue> {
+        Ok(self.session.assembly(id).map_err(error)?.bytes.clone())
+    }
+    pub fn csharp_source(&self, id: u32, token: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.csharp_source(id, token).map_err(error)?)
+    }
+    pub fn csharp_apply(
+        &mut self,
+        id: u32,
+        token: u32,
+        revision: u32,
+        compiled: &[u8],
+    ) -> Result<JsValue, JsValue> {
+        js(&self
+            .session
+            .csharp_apply(id, token, revision, compiled)
+            .map_err(error)?)
+    }
     pub fn get_edits(&self, id: u32) -> Result<JsValue, JsValue> {
         js(&self.session.edits_info(id).map_err(error)?)
     }

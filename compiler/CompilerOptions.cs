@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using Microsoft.CodeAnalysis;
@@ -16,7 +17,9 @@ public static class CompilerOptions
             optimizationLevel: OptimizationLevel.Release,
             allowUnsafe: true,
             nullableContextOptions: NullableContextOptions.Disable,
-            metadataImportOptions: MetadataImportOptions.All);
+            metadataImportOptions: MetadataImportOptions.All,
+            // Browser WebAssembly has one thread and cannot wait on Roslyn's workers.
+            concurrentBuild: false);
         // As dnSpy does: the edited method may use the private and internal members of
         // the assembly it belongs to (Roslyn's internal BinderFlags.IgnoreAccessibility).
         var flags = typeof(CSharpCompilationOptions).Assembly.GetType("Microsoft.CodeAnalysis.CSharp.BinderFlags")!;

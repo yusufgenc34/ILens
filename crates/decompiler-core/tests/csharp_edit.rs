@@ -91,3 +91,32 @@ fn signature_changes_and_generated_types_are_refused() {
         error.detail
     );
 }
+#[test]
+fn the_session_applies_a_compiled_body_and_exports_it() {
+    let mut session = decompiler_core::session::Session::default();
+    let id = session.load(EDITING.to_vec()).unwrap().id;
+    let token = increase(session.assembly(id).unwrap());
+    let source = session.csharp_source(id, token).unwrap();
+    assert!(
+        source["method"]
+            .as_str()
+            .unwrap()
+            .starts_with("public int Increase")
+    );
+    let result = session
+        .csharp_apply(id, token, session.edit_revision, COMPILED)
+        .unwrap();
+    // New references rewrote the assembly in the workspace; the body is a pending edit.
+    assert_eq!(result["reloaded"], true);
+    assert_eq!(result["preview"]["changed"], true);
+    let output = session.export_modified(id, session.edit_revision).unwrap();
+    let b = Assembly::load(output).unwrap();
+    assert!(
+        decompiler_core::decompile::decompile(&b, token)
+            .unwrap()
+            .csharp
+            .contains("System.Console.WriteLine")
+    );
+    // A stale revision is refused.
+    assert!(session.csharp_apply(id, token, 0, COMPILED).is_err());
+}
