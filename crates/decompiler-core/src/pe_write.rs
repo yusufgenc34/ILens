@@ -1096,3 +1096,144 @@ fn verify_addition(
     goblin::pe::PE::parse(output).map_err(|e| unsupported(e.to_string()))?;
     Ok(())
 }
+
+/// Appends reference rows (AssemblyRef, TypeRef, MemberRef, TypeSpec, MethodSpec) that a
+/// C# edit needs. Nothing is renumbered; the grown metadata moves to the appended region.
+pub fn add_rows(a: &Assembly, rows: &[crate::csharp_edit::NewRow]) -> Result<Vec<u8>> {
+    use crate::csharp_edit::NewRow;
+    use crate::metadata_write::{append_blob, append_string, encode_coded};
+    let layout = preflight(a)?;
+    if rows.is_empty() {
+        return Ok(a.bytes.clone());
+    }
+    if rows.len() > 4096 {
+        return Err(Error::limit("At most 4,096 new references per edit"));
+    }
+    let mut strings = stream(a, "#Strings").unwrap_or_default().to_vec();
+    let mut blobs = stream(a, "#Blob").unwrap_or_default().to_vec();
+    let before = crate::metadata_write::Tables::decode(
+        stream(a, "#~").ok_or_else(|| unsupported("Missing tables stream"))?,
+    )?;
+    let mut tables = crate::metadata_write::Tables::decode(stream(a, "#~").unwrap_or_default())?;
+    let mut expected: Vec<(usize, Vec<u32>)> = vec![];
+    for row in rows {
+        let values = match row {
+            NewRow::AssemblyRef {
+                version,
+                flags,
+                public_key,
+                name,
+                culture,
+            } => vec![
+                u32::from(version[0]),
+                u32::from(version[1]),
+                u32::from(version[2]),
+                u32::from(version[3]),
+                *flags,
+                append_blob(&mut blobs, public_key)?,
+                append_string(&mut strings, name)?,
+                append_string(&mut strings, culture)?,
+                0,
+            ],
+            NewRow::TypeRef {
+                scope,
+                name,
+                namespace,
+            } => vec![
+                encode_coded(1, 0, *scope)?,
+                append_string(&mut strings, name)?,
+                append_string(&mut strings, namespace)?,
+            ],
+            NewRow::MemberRef {
+                parent,
+                name,
+                signature,
+            } => vec![
+                encode_coded(10, 0, *parent)?,
+                append_string(&mut strings, name)?,
+                append_blob(&mut blobs, signature)?,
+            ],
+            NewRow::TypeSpec { signature } => vec![append_blob(&mut blobs, signature)?],
+            NewRow::MethodSpec {
+                method,
+                instantiation,
+            } => vec![
+                encode_coded(43, 0, *method)?,
+                append_blob(&mut blobs, instantiation)?,
+            ],
+        };
+        tables.push(row.table(), values.clone())?;
+        expected.push((row.table(), values));
+    }
+    tables.widen_heaps(
+        strings.len(),
+        stream(a, "#GUID").map_or(0, <[u8]>::len),
+        blobs.len(),
+    );
+    let metadata = crate::metadata_write::rebuild(
+        &a.bytes[a.image.metadata.clone()],
+        &[
+            ("#~", tables.encode()),
+            ("#Strings", strings),
+            ("#Blob", blobs),
+        ],
+    )?;
+    let mut output = a.bytes.clone();
+    let region = region(a, &layout, &output)?;
+    let rva = u32::try_from(region.rva).map_err(|_| unsupported("Metadata RVA overflow"))?;
+    put32(&mut output, layout.cli.start + 8, rva)?;
+    put32(&mut output, layout.cli.start + 12, metadata.len() as u32)?;
+    commit_region(a, &layout, &mut output, &region, metadata)?;
+    for range in layout.debug.clone() {
+        output[range].fill(0);
+    }
+    output[layout.directories + 6 * 8..layout.directories + 7 * 8].fill(0);
+    put32(&mut output, layout.optional + 64, 0)?;
+    put32(&mut output, layout.pe + 8, 0)?;
+    // Every original row and heap byte is unchanged; only the listed rows were added.
+    let parsed = Assembly::load(output.clone())?;
+    let after = crate::metadata_write::Tables::decode(
+        stream(&parsed, "#~").ok_or_else(|| unsupported("Missing tables stream"))?,
+    )?;
+    for (table, (old, new)) in before.rows.iter().zip(&after.rows).enumerate() {
+        let added: Vec<Vec<u32>> = expected
+            .iter()
+            .filter(|(t, _)| *t == table)
+            .map(|(_, r)| r.clone())
+            .collect();
+        if new.len() != old.len() + added.len()
+            || new[..old.len()] != old[..]
+            || new[old.len()..] != added[..]
+        {
+            return Err(unsupported(format!(
+                "Metadata table {table} changed unexpectedly"
+            )));
+        }
+    }
+    for s in &a.store.streams {
+        let old = stream(a, &s.name).unwrap_or_default();
+        let new = stream(&parsed, &s.name).unwrap_or_default();
+        let same = match s.name.as_str() {
+            "#~" => true,
+            "#Strings" | "#Blob" => new.starts_with(old),
+            _ => new == old,
+        };
+        if !same {
+            return Err(unsupported(format!(
+                "Metadata stream {} changed unexpectedly",
+                s.name
+            )));
+        }
+    }
+    for (index, row) in a.metadata().method_defs.iter().enumerate() {
+        let token = 0x0600_0001 + index as u32;
+        if row.rva != 0
+            && serde_json::to_vec(&a.body(token)?).ok()
+                != serde_json::to_vec(&parsed.body(token)?).ok()
+        {
+            return Err(unsupported("A method body changed while adding references"));
+        }
+    }
+    goblin::pe::PE::parse(&output).map_err(|e| unsupported(e.to_string()))?;
+    Ok(output)
+}

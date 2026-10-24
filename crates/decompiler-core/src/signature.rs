@@ -330,13 +330,152 @@ pub fn encode_type(t: &Type, out: &mut Vec<u8>) -> Result<()> {
             out.push(0x1d);
             encode_type(element, out)?;
         }
-        _ => {
-            return Err(Error::metadata(
-                "Only primitive, class, value-type and vector locals can be written",
-            ));
+        // General arrays as C# writes them: no sizes, zero lower bounds.
+        Type::MultiArray(element, rank) | Type::Array(element, rank) => {
+            out.push(0x14);
+            encode_type(element, out)?;
+            put_compressed(*rank, out)?;
+            put_compressed(0, out)?;
+            put_compressed(*rank, out)?;
+            for _ in 0..*rank {
+                out.push(0);
+            }
+        }
+        Type::GenericInstance { base, args } => {
+            out.push(0x15);
+            encode_type(base, out)?;
+            put_compressed(
+                u32::try_from(args.len()).map_err(|_| Error::limit("Too many type arguments"))?,
+                out,
+            )?;
+            for arg in args {
+                encode_type(arg, out)?;
+            }
+        }
+        Type::Generic { method, index } => {
+            out.push(if *method { 0x1e } else { 0x13 });
+            put_compressed(*index, out)?;
+        }
+        Type::ByRef(inner) => {
+            out.push(0x10);
+            encode_type(inner, out)?;
+        }
+        Type::Pointer(inner) => {
+            out.push(0x0f);
+            encode_type(inner, out)?;
+        }
+        Type::Pinned(inner) => {
+            out.push(0x45);
+            encode_type(inner, out)?;
+        }
+        Type::Modified {
+            required,
+            modifier,
+            inner,
+        } => {
+            out.push(if *required { 0x1f } else { 0x20 });
+            let tag = match modifier >> 24 {
+                2 => 0,
+                1 => 1,
+                27 => 2,
+                _ => {
+                    return Err(Error::metadata(
+                        "Modifiers must be TypeDef/TypeRef/TypeSpec",
+                    ));
+                }
+            };
+            put_compressed(((modifier & 0xff_ffff) << 2) | tag, out)?;
+            encode_type(inner, out)?;
+        }
+        Type::FunctionPointer(_) | Type::Unknown => {
+            return Err(Error::metadata("Function pointers cannot be written yet"));
         }
     }
     Ok(())
+}
+/// A MethodDefSig/MethodRefSig (ECMA-335 II.23.2.1-2).
+pub fn encode_method(sig: &MethodSignature) -> Result<Vec<u8>> {
+    let mut out = vec![
+        sig.convention
+            | if sig.has_this { 0x20 } else { 0 }
+            | if sig.explicit_this { 0x40 } else { 0 }
+            | if sig.generic_count > 0 { 0x10 } else { 0 },
+    ];
+    if sig.generic_count > 0 {
+        put_compressed(sig.generic_count, &mut out)?;
+    }
+    put_compressed(
+        u32::try_from(sig.parameters.len()).map_err(|_| Error::limit("Too many parameters"))?,
+        &mut out,
+    )?;
+    encode_type(&sig.return_type, &mut out)?;
+    for (i, p) in sig.parameters.iter().enumerate() {
+        if sig.vararg_at == Some(i) {
+            out.push(0x41);
+        }
+        encode_type(p, &mut out)?;
+    }
+    Ok(out)
+}
+pub fn encode_field(ty: &Type) -> Result<Vec<u8>> {
+    let mut out = vec![0x06];
+    encode_type(ty, &mut out)?;
+    Ok(out)
+}
+pub fn encode_method_spec(args: &[Type]) -> Result<Vec<u8>> {
+    let mut out = vec![0x0a];
+    put_compressed(
+        u32::try_from(args.len()).map_err(|_| Error::limit("Too many type arguments"))?,
+        &mut out,
+    )?;
+    for arg in args {
+        encode_type(arg, &mut out)?;
+    }
+    Ok(out)
+}
+/// Rewrites every metadata token a type mentions.
+pub fn map_tokens(t: &Type, map: &mut dyn FnMut(u32) -> Result<u32>) -> Result<Type> {
+    Ok(match t {
+        Type::Named(token) => Type::Named(map(*token)?),
+        Type::ValueType(token) => Type::ValueType(map(*token)?),
+        Type::Array(e, r) => Type::Array(Box::new(map_tokens(e, map)?), *r),
+        Type::MultiArray(e, r) => Type::MultiArray(Box::new(map_tokens(e, map)?), *r),
+        Type::Pointer(e) => Type::Pointer(Box::new(map_tokens(e, map)?)),
+        Type::ByRef(e) => Type::ByRef(Box::new(map_tokens(e, map)?)),
+        Type::Pinned(e) => Type::Pinned(Box::new(map_tokens(e, map)?)),
+        Type::GenericInstance { base, args } => Type::GenericInstance {
+            base: Box::new(map_tokens(base, map)?),
+            args: args
+                .iter()
+                .map(|a| map_tokens(a, map))
+                .collect::<Result<_>>()?,
+        },
+        Type::Modified {
+            required,
+            modifier,
+            inner,
+        } => Type::Modified {
+            required: *required,
+            modifier: map(*modifier)?,
+            inner: Box::new(map_tokens(inner, map)?),
+        },
+        Type::FunctionPointer(sig) => Type::FunctionPointer(Box::new(map_method_tokens(sig, map)?)),
+        other => other.clone(),
+    })
+}
+pub fn map_method_tokens(
+    sig: &MethodSignature,
+    map: &mut dyn FnMut(u32) -> Result<u32>,
+) -> Result<MethodSignature> {
+    Ok(MethodSignature {
+        return_type: map_tokens(&sig.return_type, map)?,
+        parameters: sig
+            .parameters
+            .iter()
+            .map(|p| map_tokens(p, map))
+            .collect::<Result<_>>()?,
+        ..sig.clone()
+    })
 }
 /// A LocalVarSig blob (ECMA-335 II.23.2.6).
 pub fn local_signature(types: &[Type]) -> Result<Vec<u8>> {
@@ -386,5 +525,41 @@ mod tests {
         ];
         let blob = local_signature(&types).unwrap();
         assert_eq!(locals(&blob).unwrap(), types);
+    }
+    #[test]
+    fn signatures_round_trip_through_the_encoder() {
+        let sig = MethodSignature {
+            has_this: true,
+            explicit_this: false,
+            convention: 0,
+            generic_count: 1,
+            return_type: Type::Generic {
+                method: true,
+                index: 0,
+            },
+            parameters: vec![
+                Type::ByRef(Box::new(Type::primitive("int"))),
+                Type::MultiArray(Box::new(Type::primitive("int")), 2),
+                Type::GenericInstance {
+                    base: Box::new(Type::Named(0x0100_0004)),
+                    args: vec![Type::Generic {
+                        method: false,
+                        index: 1,
+                    }],
+                },
+            ],
+            vararg_at: None,
+        };
+        assert_eq!(method(&encode_method(&sig).unwrap()).unwrap(), sig);
+        let field_type = Type::Array(Box::new(Type::ValueType(0x0200_0002)), 1);
+        assert_eq!(
+            field(&encode_field(&field_type).unwrap()).unwrap(),
+            field_type
+        );
+        let args = vec![Type::primitive("string")];
+        assert_eq!(
+            method_spec(&encode_method_spec(&args).unwrap()).unwrap(),
+            args
+        );
     }
 }

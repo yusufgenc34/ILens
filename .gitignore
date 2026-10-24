@@ -34,3 +34,8 @@
 Thumbs.db
 /.idea/
 /.vscode/
+
+# C# compiler component (built by npm run build:compiler)
+/compiler/bin/
+/compiler/obj/
+/public/compiler/

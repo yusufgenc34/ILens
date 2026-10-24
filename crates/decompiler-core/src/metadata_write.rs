@@ -410,6 +410,21 @@ pub fn append_string(heap: &mut Vec<u8>, text: &str) -> Result<u32> {
     heap.extend_from_slice(&needle);
     Ok(offset)
 }
+/// A token as the coded-index value of `column` in `table`.
+pub fn encode_coded(table: usize, column: usize, token: u32) -> Result<u32> {
+    let crate::metadata::Column::Coded(kind) = crate::metadata::schema(table)
+        .get(column)
+        .copied()
+        .ok_or_else(|| Error::metadata("No such metadata column"))?
+    else {
+        return Err(Error::metadata("Column is not a coded index"));
+    };
+    let tag = crate::metadata::coded_tables(kind)
+        .iter()
+        .position(|t| *t == Some((token >> 24) as u8))
+        .ok_or_else(|| Error::metadata("Token table is not allowed in this coded index"))?;
+    Ok(((token & 0xff_ffff) << kind.tag_bits()) | tag as u32)
+}
 /// Appends `entry` to a blob heap and returns its offset.
 pub fn append_blob(heap: &mut Vec<u8>, entry: &[u8]) -> Result<u32> {
     let offset = u32::try_from(heap.len()).map_err(|_| Error::limit("#Blob heap overflow"))?;

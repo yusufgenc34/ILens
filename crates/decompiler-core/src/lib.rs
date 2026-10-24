@@ -8,6 +8,7 @@ pub mod bcl;
 pub mod cfg;
 pub mod cil;
 pub mod cil_encode;
+pub mod csharp_edit;
 pub mod decompile;
 pub mod detect;
 pub mod edit;

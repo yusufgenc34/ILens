@@ -1541,7 +1541,10 @@ fn call(
     }
     if sig.has_this {
         let target = types.token(m.owner)?;
-        let structure = matches!(types.value(target), Value::Struct(_));
+        // Value types' instance methods take `this` by pointer: structs, enums and the
+        // primitive types (`int.ToString()` is `ldloca; call Int32::ToString`).
+        let structure = !types.value(target).reference()
+            && !matches!(types.value(target), Value::Generic(..) | Value::Instance(..));
         if !types.value(target).reference() && !structure {
             return Err(unsupported(
                 "Instance calls on enums and generic structs require managed-address validation",

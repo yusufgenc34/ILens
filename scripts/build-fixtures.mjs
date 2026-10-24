@@ -1,5 +1,6 @@
 import {spawnSync} from 'node:child_process'
-import {copyFileSync, mkdirSync} from 'node:fs'
+import {copyFileSync, mkdirSync, readdirSync} from 'node:fs'
+import path from 'node:path'
 const result = spawnSync('dotnet', ['build', 'samples/Patterns', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
 if (result.status !== 0) process.exit(result.status ?? 1)
 mkdirSync('samples/fixtures', {recursive: true})
@@ -45,3 +46,17 @@ if (automatic.status !== 0) process.exit(automatic.status ?? 1)
 // OutputType=Exe supplies a real managed entry point. The SDK uses .dll for the
 // filename by default; distribute this fixture as .exe to cover the EXE picker.
 copyFileSync('samples/bin/ILens.AutomaticDependencies.dll', 'samples/fixtures/ILens.AutomaticDependencies.exe')
+
+// A C# method edit compiled the way the browser compiler does (Roslyn, same options):
+// the merge test maps it back into ILens.Editing. Compiled only, never executed.
+{
+  const harness = spawnSync('dotnet', ['build', 'samples/CSharpEditHarness', '-c', 'Release', '-o', 'samples/bin/harness'], {stdio: 'inherit'})
+  if (harness.status !== 0) process.exit(harness.status ?? 1)
+  const sdks = spawnSync('dotnet', ['--list-sdks'], {encoding: 'utf8'}).stdout
+  const root = /^10\.[^\n[]+\[(.+)\]/m.exec(sdks)?.[1]
+  const packs = path.join(root, '..', 'packs', 'Microsoft.NETCore.App.Ref')
+  const version = readdirSync(packs).filter(v => v.startsWith('10.')).sort().at(-1)
+  const references = readdirSync(path.join(packs, version, 'ref', 'net10.0')).filter(f => f.endsWith('.dll')).map(f => path.join(packs, version, 'ref', 'net10.0', f))
+  const compile = spawnSync('dotnet', ['samples/bin/harness/CSharpEditHarness.dll', 'samples/CSharpEditHarness/Increase.edit.cs', 'samples/fixtures/ILens.Editing.csharp-edit.dll', 'samples/fixtures/ILens.Editing.dll', ...references], {stdio: 'inherit'})
+  if (compile.status !== 0) process.exit(compile.status ?? 1)
+}
