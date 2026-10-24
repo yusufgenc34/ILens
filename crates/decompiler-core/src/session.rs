@@ -46,6 +46,9 @@ pub struct Session {
     pub edit_revision: u32,
     // External definitions per assembly, valid for one workspace revision.
     externals: std::cell::RefCell<BTreeMap<u32, (u32, std::rc::Rc<crate::edit::Externals>)>>,
+    // Each assembly with method edits as written, so views show the edited code; valid
+    // for one edit revision.
+    views: std::cell::RefCell<BTreeMap<u32, (u32, std::rc::Rc<Assembly>)>>,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -58,6 +61,7 @@ impl Default for Session {
             revision: 0,
             edit_revision: 0,
             externals: std::cell::RefCell::new(BTreeMap::new()),
+            views: std::cell::RefCell::new(BTreeMap::new()),
         }
     }
 }
@@ -151,6 +155,39 @@ impl Session {
             .get(&id)
             .ok_or_else(|| Error::metadata("Assembly is closed or unknown"))
     }
+    /// The assembly as its method edits write it, when it has any. Views decompile this,
+    /// so an applied IL or C# edit shows in the code; tokens are unchanged by edits.
+    fn edited(&self, id: u32) -> Result<Option<std::rc::Rc<Assembly>>> {
+        if !self.edits.keys().any(|(assembly, _)| *assembly == id) {
+            return Ok(None);
+        }
+        if let Some((revision, view)) = self.views.borrow().get(&id)
+            && *revision == self.edit_revision
+        {
+            return Ok(Some(view.clone()));
+        }
+        let bytes = self.export_modified(id, self.edit_revision)?;
+        let view = std::rc::Rc::new(Assembly::load(bytes)?);
+        self.views
+            .borrow_mut()
+            .insert(id, (self.edit_revision, view.clone()));
+        Ok(Some(view))
+    }
+    /// The method's IL listing and body, from the edited assembly when it has edits.
+    pub fn disassemble(&self, id: u32, token: u32) -> Result<Value> {
+        let edited = self.edited(id)?;
+        let a = edited.as_deref().map_or_else(|| self.assembly(id), Ok)?;
+        let body = a.body(token)?;
+        Ok(json!({"il":body.as_ref().map(|b|crate::emit::il(a,token,b)),"body":body}))
+    }
+    /// Tokens of the assembly's edited methods.
+    pub fn edited_methods(&self, id: u32) -> Vec<u32> {
+        self.edits
+            .keys()
+            .filter(|(assembly, _)| *assembly == id)
+            .map(|(_, token)| *token)
+            .collect()
+    }
     pub fn decompile(&mut self, id: u32, token: u32) -> Result<MethodAnalysis> {
         if let Some(i) = self
             .cache
@@ -165,8 +202,9 @@ impl Session {
             self.cache.push_back(entry);
             return Ok(result);
         }
-        let result =
-            decompile::decompile_view(self.assembly(id)?, token, &|t| self.accessor(id, t))?;
+        let edited = self.edited(id)?;
+        let a = edited.as_deref().map_or_else(|| self.assembly(id), Ok)?;
+        let result = decompile::decompile_view(a, token, &|t| self.accessor(id, t))?;
         // Serialized size is a conservative accounting base with 4x structural overhead allowance.
         let size = serde_json::to_vec(&result)
             .map_err(|e| Error::metadata(e.to_string()))?
@@ -225,7 +263,8 @@ impl Session {
         )
     }
     pub fn type_view(&self, id: u32, token: u32) -> Result<Value> {
-        let a = self.assembly(id)?;
+        let edited = self.edited(id)?;
+        let a = edited.as_deref().map_or_else(|| self.assembly(id), Ok)?;
         a.validate_token(token)?;
         if token >> 24 == 2 {
             let source = crate::typeview::type_source(a, token, &|t| self.accessor(id, t))?;
@@ -503,6 +542,7 @@ impl Session {
     pub fn close(&mut self, id: u32) {
         self.assemblies.remove(&id);
         self.edits.retain(|(a, _), _| *a != id);
+        self.views.borrow_mut().remove(&id);
         self.bump_edit_revision();
         self.cache.retain(|((a, _), _, _)| *a != id);
         self.cache_bytes = self.cache.iter().map(|(_, _, n)| n).sum();
@@ -512,6 +552,7 @@ impl Session {
         self.cache.clear();
         self.cache_bytes = 0;
         self.edits.clear();
+        self.views.borrow_mut().clear();
         self.bump_edit_revision();
     }
     fn bump_revision(&mut self) {

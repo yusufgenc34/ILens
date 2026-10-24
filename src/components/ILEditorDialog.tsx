@@ -8,7 +8,7 @@ import type {EditorSettings} from '../lib/editor-settings'
 import CodeViewer from './CodeViewer'
 const pageSize = 100
 type Draft = {rows: EditableInstruction[]; locals: string[]; regions: EditRegion[]}
-export default function ILEditorDialog({client, assembly, token, name, settings, theme, onClose, onExport}: {client: DecompilerClient; assembly: number; token: number; name: string; settings: EditorSettings; theme: string; onClose: () => void; onExport: () => void}) {
+export default function ILEditorDialog({client, assembly, token, name, settings, theme, onClose, onExport, onChanged}: {client: DecompilerClient; assembly: number; token: number; name: string; settings: EditorSettings; theme: string; onClose: () => void; onExport: () => void; onChanged?: () => void}) {
   const dialog = useRef<HTMLDialogElement>(null); const controller = useRef(new AbortController()); const nextId = useRef(0)
   const [snapshot, setSnapshot] = useState<EditPreview | null>(null)
   const [rows, setRows] = useState<EditableInstruction[]>([]); const [locals, setLocals] = useState<string[]>([]); const [regions, setRegions] = useState<EditRegion[]>([])
@@ -44,7 +44,7 @@ export default function ILEditorDialog({client, assembly, token, name, settings,
     try {
       const result = discard ? await client.call('discardMethodEdit', {assembly, token, revision: snapshot.revision}, {signal: controller.current.signal}) : await client.call('applyMethodEdit', {assembly, token, revision: snapshot.revision, instructions: rows, locals, regions}, {signal: controller.current.signal})
       if (controller.current.signal.aborted) return
-      setSnapshot(result); setRows(result.instructions); setLocals(result.locals); setRegions(result.regions); setPast([]); setFuture([]); setMessage(discard || !result.changed ? 'Original method restored.' : 'Validation passed. This change is included in modified assembly export.')
+      setSnapshot(result); setRows(result.instructions); setLocals(result.locals); setRegions(result.regions); setPast([]); setFuture([]); setMessage(discard || !result.changed ? 'Original method restored.' : 'Validation passed. This change is included in modified assembly export.'); onChanged?.()
     } catch (error) {if (!controller.current.signal.aborted) setError(diagnostic(error))}
     finally {if (!controller.current.signal.aborted) setBusy(false)}
   }

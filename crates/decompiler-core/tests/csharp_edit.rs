@@ -117,6 +117,21 @@ fn the_session_applies_a_compiled_body_and_exports_it() {
             .csharp
             .contains("System.Console.WriteLine")
     );
+    // The workspace views show the edited body, in C# and IL, before saving.
+    assert!(
+        session
+            .decompile(id, token)
+            .unwrap()
+            .csharp
+            .contains("Console.WriteLine(\"adding \" + ")
+    );
+    assert!(
+        session.disassemble(id, token).unwrap()["il"]
+            .as_str()
+            .unwrap()
+            .contains("adding ")
+    );
+    assert_eq!(session.edited_methods(id), vec![token]);
     // A stale revision is refused.
     assert!(session.csharp_apply(id, token, 0, COMPILED).is_err());
 }

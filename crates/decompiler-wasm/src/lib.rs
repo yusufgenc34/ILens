@@ -89,11 +89,7 @@ impl Decompiler {
         js(&self.session.decompile(id, token).map_err(error)?)
     }
     pub fn disassemble_method(&self, id: u32, token: u32) -> Result<JsValue, JsValue> {
-        let a = self.session.assembly(id).map_err(error)?;
-        let body = a.body(token).map_err(error)?;
-        js(
-            &serde_json::json!({"il":body.as_ref().map(|b|decompiler_core::emit::il(a,token,b)),"body":body}),
-        )
+        js(&self.session.disassemble(id, token).map_err(error)?)
     }
     pub fn get_metadata(&self, id: u32, token: u32) -> Result<JsValue, JsValue> {
         js(&self.session.metadata(id, token).map_err(error)?)

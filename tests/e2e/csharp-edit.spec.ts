@@ -35,6 +35,12 @@ test('Edit Method (C#) compiles in the browser, merges the body and produces a v
   await expect(dialog).toContainText('Applied.', {timeout: 120_000})
   await page.screenshot({path: testInfo.outputPath('csharp-edit.png'), animations: 'disabled'})
   await dialog.getByRole('button', {name: 'Close', exact: true}).click()
+  // The workspace shows the edited method right away, marked as unsaved.
+  await expect(page.getByLabel('C# code viewer')).toContainText('Console.WriteLine("adding " + ')
+  await expect(page.getByRole('note', {name: 'Unsaved edits'})).toBeVisible()
+  await page.getByRole('tab', {name: 'IL', exact: true}).click()
+  await expect(page.getByLabel('IL code viewer')).toContainText('"adding "')
+  await page.getByRole('tab', {name: 'C#', exact: true}).click()
   await page.getByRole('menuitem', {name: 'File', exact: true}).click()
   await page.getByRole('menuitem', {name: /^Save Module/}).click()
   const download = page.waitForEvent('download')
