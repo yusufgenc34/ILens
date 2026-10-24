@@ -19,6 +19,12 @@ const HIDDEN: &[&str] = &[
     // Written as the async/iterator body itself.
     "AsyncStateMachineAttribute",
     "IteratorStateMachineAttribute",
+    "AsyncIteratorStateMachineAttribute",
+    // Written as C# syntax: `this`, `params`, indexers, tuple element names.
+    "ExtensionAttribute",
+    "ParamArrayAttribute",
+    "DefaultMemberAttribute",
+    "TupleElementNamesAttribute",
 ];
 fn short(name: &str) -> &str {
     name.rsplit(['.', '+']).next().unwrap_or(name)
@@ -287,6 +293,35 @@ pub fn render(a: &Assembly, parent: u32) -> Vec<String> {
     lines
 }
 /// True when the declaration carries [CompilerGenerated].
+/// True when `parent` carries an attribute whose type has this full name.
+pub fn has(a: &Assembly, parent: u32, full_name: &str) -> bool {
+    a.attributes
+        .get(&parent)
+        .into_iter()
+        .flatten()
+        .any(|index| {
+            let constructor = coded(a.metadata().custom_attributes[*index].attr_type);
+            a.method_ref(constructor)
+                .is_ok_and(|m| a.resolve_full(m.owner) == full_name)
+        })
+}
+/// The member named by a type's [DefaultMember("…")], which C# exposes as its indexer.
+pub fn default_member(a: &Assembly, ty: u32) -> Option<String> {
+    a.attributes
+        .get(&ty)
+        .into_iter()
+        .flatten()
+        .find_map(|index| {
+            let attribute = &a.metadata().custom_attributes[*index];
+            let constructor = a.method_ref(coded(attribute.attr_type)).ok()?;
+            if a.resolve_full(constructor.owner) != "System.Reflection.DefaultMemberAttribute" {
+                return None;
+            }
+            let mut r = Reader::new(a.blob(attribute.value).ok()?);
+            (r.u16().ok()? == 1).then_some(())?;
+            ser_string(&mut r).ok()?
+        })
+}
 pub fn compiler_generated(a: &Assembly, parent: u32) -> bool {
     a.attributes
         .get(&parent)

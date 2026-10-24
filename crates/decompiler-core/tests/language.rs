@@ -52,3 +52,38 @@ fn operators_constructors_and_framework_members() {
         ],
     );
 }
+#[test]
+fn indexers_parameters_extensions_and_tuples() {
+    let a = Assembly::load(LANGUAGE.to_vec()).unwrap();
+    let constructs = view(&a, "Constructs");
+    assert_contains(
+        &constructs,
+        &[
+            "public static bool TryParse(string text, out int value)",
+            "return int.TryParse(text, out value);",
+            "public static int Defaulted(int value = 7, string text = \"x\")",
+            "return text.Shout();",
+            "return a + b;",
+            "bag[0] = \"first\";\n            return bag[0];",
+            "public static (int, int) Tuple(int a, int b)",
+            "return (a + b, a * b);",
+            "return num + valueTuple.Item2;",
+        ],
+    );
+    assert_contains(
+        &view(&a, "Bag"),
+        &[
+            "public string this[int index]",
+            "return this.items[index];",
+            "public void Add(params string[] values)",
+        ],
+    );
+    let extensions = view(&a, "Extensions");
+    assert_contains(
+        &extensions,
+        &["public static string Shout(this string text)"],
+    );
+    // Syntax replaces the attributes the compiler emits for it.
+    assert!(!extensions.contains("[Extension]"), "{extensions}");
+    assert!(!view(&a, "Bag").contains("[DefaultMember"));
+}

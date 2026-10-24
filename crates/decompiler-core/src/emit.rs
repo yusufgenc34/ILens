@@ -554,27 +554,77 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                     return Ok((joined, 12));
                 }
             }
-            let receiver = if let Some(i) = instance {
-                receiver(i)?
-            } else {
-                strip_arity(&a.resolve(*owner))
+            // By-reference arguments carry their parameter's modifier: ref, out or in.
+            let callee = a.method_ref(*token).ok();
+            let definition = match *token >> 24 {
+                43 => a
+                    .metadata()
+                    .method_specs
+                    .get((*token & 0xffffff) as usize - 1)
+                    .map(|r| crate::assembly::coded(r.method))
+                    .unwrap_or(*token),
+                _ => *token,
             };
-            let args = args
+            let argument = |index: usize, value: &Expr| -> Result<std::string::String> {
+                let parameter = callee
+                    .as_ref()
+                    .and_then(|c| c.signature.parameters.get(index));
+                let Some(parameter @ Type::ByRef(_)) = parameter else {
+                    return Ok(expr(value)?.0);
+                };
+                let modifier = if definition >> 24 == 6 {
+                    a.by_reference(definition, index, parameter)
+                        .unwrap_or("ref")
+                } else if crate::bcl::out_parameter(a, definition, index) {
+                    "out"
+                } else {
+                    "ref"
+                };
+                let inner = match &value.kind {
+                    Address(inner) => inner.as_ref(),
+                    _ => value,
+                };
+                Ok(format!("{modifier} {}", expr(inner)?.0))
+            };
+            let rendered: Vec<std::string::String> = args
                 .iter()
-                .map(|e| expr(e).map(|r| r.0))
-                .collect::<Result<Vec<_>>>()?
-                .join(", ");
+                .enumerate()
+                .map(|(i, e)| argument(i, e))
+                .collect::<Result<_>>()?;
             if name == ".ctor" {
                 return Err(Error::limitation(
                     "Constructor chaining or in-place value construction remains explicit in IL",
                 ));
             }
+            let receiver_text = if let Some(i) = instance {
+                Some(receiver(i)?)
+            } else {
+                None
+            };
             if let Some(property) = accessor {
+                let receiver = receiver_text.unwrap_or_else(|| strip_arity(&a.resolve(*owner)));
+                if property.indexer {
+                    // Indexers: receiver[arguments] and receiver[arguments] = value.
+                    return Ok(if property.getter {
+                        (format!("{receiver}[{}]", rendered.join(", ")), PRIMARY)
+                    } else {
+                        let (value, index) = rendered
+                            .split_last()
+                            .ok_or_else(|| Error::limitation("Indexer setter without a value"))?;
+                        (
+                            format!("{receiver}[{}] = {value}", index.join(", ")),
+                            ASSIGNMENT,
+                        )
+                    });
+                }
                 let property_name = source_reference(*token, &identifier(&property.name));
-                if property.getter && args.is_empty() {
+                if property.getter && rendered.is_empty() {
                     (format!("{receiver}.{property_name}"), PRIMARY)
                 } else if !property.getter {
-                    (format!("{receiver}.{property_name} = {args}"), ASSIGNMENT)
+                    (
+                        format!("{receiver}.{property_name} = {}", rendered.join(", ")),
+                        ASSIGNMENT,
+                    )
                 } else {
                     return Err(Error::limitation("Unsupported property signature"));
                 }
@@ -591,10 +641,36 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                             .join(", ")
                     )
                 };
+                // Extension methods read as instance calls on their first argument.
+                let extension = receiver_text.is_none()
+                    && !args.is_empty()
+                    && !matches!(args[0].kind, Null)
+                    && !matches!(
+                        callee.as_ref().and_then(|c| c.signature.parameters.first()),
+                        Some(Type::ByRef(_))
+                    )
+                    && if definition >> 24 == 6 {
+                        crate::attributes::has(
+                            a,
+                            definition,
+                            "System.Runtime.CompilerServices.ExtensionAttribute",
+                        )
+                    } else {
+                        crate::bcl::is_extension(a, definition)
+                    };
+                let (receiver, rest) = if extension {
+                    (at(&args[0], PRIMARY)?, &rendered[1..])
+                } else {
+                    (
+                        receiver_text.unwrap_or_else(|| strip_arity(&a.resolve(*owner))),
+                        &rendered[..],
+                    )
+                };
                 (
                     format!(
-                        "{receiver}.{}{generic}({args})",
-                        source_reference(*token, &identifier(name))
+                        "{receiver}.{}{generic}({})",
+                        source_reference(*token, &identifier(name)),
+                        rest.join(", ")
                     ),
                     PRIMARY,
                 )
@@ -617,6 +693,19 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             {
                 return Err(Error::limitation(
                     "Delegate construction is preserved in IL until method-group binding is proven",
+                ));
+            }
+            // new ValueTuple<A, B>(a, b) is the tuple literal (a, b).
+            if (2..=7).contains(&args.len()) && value_tuple(a, *owner) == Some(args.len()) {
+                return Ok((
+                    format!(
+                        "({})",
+                        args.iter()
+                            .map(|e| expr(e).map(|r| r.0))
+                            .collect::<Result<Vec<_>>>()?
+                            .join(", ")
+                    ),
+                    PRIMARY,
                 ));
             }
             (
@@ -1002,6 +1091,27 @@ fn declares_equality(a: &Assembly, ty: &Type) -> bool {
         token = crate::assembly::coded(row.extends);
     }
     false
+}
+/// The arity of a constructed System.ValueTuple type.
+fn value_tuple(a: &Assembly, owner: u32) -> Option<usize> {
+    if owner >> 24 != 27 {
+        return None;
+    }
+    let row = a
+        .metadata()
+        .type_specs
+        .get((owner & 0xffffff) as usize - 1)?;
+    match crate::signature::type_spec(a.blob(row.signature).ok()?).ok()? {
+        Type::GenericInstance { base, args } => match *base {
+            Type::ValueType(t) | Type::Named(t)
+                if a.resolve_full(t).starts_with("System.ValueTuple`") =>
+            {
+                Some(args.len())
+            }
+            _ => None,
+        },
+        _ => None,
+    }
 }
 /// A C# character literal for a UTF-16 code unit.
 fn char_literal(n: i128) -> std::string::String {

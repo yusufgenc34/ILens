@@ -29,14 +29,22 @@ pub struct TypeInfo {
     pub accessors: HashMap<String, Vec<(String, bool, String)>>,
     /// Enum members in declaration order with their values.
     pub members: Vec<(String, i128)>,
+    /// Method name → canonical signatures with the indexes of their `out` parameters.
+    pub outs: HashMap<String, Vec<(String, Vec<usize>)>>,
+    /// Names whose every overload is an extension method.
+    pub extensions: std::collections::HashSet<String>,
+    /// Indexer accessor names (get_Item, set_Item, get_Chars).
+    pub indexers: std::collections::HashSet<String>,
 }
 fn data() -> &'static HashMap<String, TypeInfo> {
     static TYPES: OnceLock<HashMap<String, TypeInfo>> = OnceLock::new();
     TYPES.get_or_init(|| parse(DATA))
 }
 /// Format, one record per line:
-/// `T <kind> <full name>`, then `P <property> <g|s> <signature>` and `E <member> <value>`
-/// lines for that type. Accessor names follow the get_/set_ convention.
+/// `T <kind> <full name>`, then for that type `P <property> <g|s> <type>`,
+/// `I <indexer> <g|s> <type>|<parameters>`, `O <method> <i,j> <signature>`,
+/// `X <extension method>` and `E <member> <value>` lines. Accessor names follow the
+/// get_/set_ convention.
 pub fn parse(text: &str) -> HashMap<String, TypeInfo> {
     let mut types = HashMap::new();
     let mut current: Option<(String, TypeInfo)> = None;
@@ -72,6 +80,49 @@ pub fn parse(text: &str) -> HashMap<String, TypeInfo> {
                             accessor_signature(signature, getter),
                         ));
                     }
+                }
+            }
+            Some("I") => {
+                let (Some((_, info)), Some(name), Some(access), Some(rest)) =
+                    (current.as_mut(), parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                let Some((ty, parameters)) = rest.split_once('|') else {
+                    continue;
+                };
+                for getter in [true, false] {
+                    if access.contains(if getter { 'g' } else { 's' }) {
+                        let method = format!("{}_{name}", if getter { "get" } else { "set" });
+                        let signature = if getter {
+                            format!("{ty}({parameters})")
+                        } else {
+                            format!("void({parameters},{ty})")
+                        };
+                        info.indexers.insert(method.clone());
+                        info.accessors.entry(method).or_default().push((
+                            name.to_owned(),
+                            getter,
+                            signature,
+                        ));
+                    }
+                }
+            }
+            Some("O") => {
+                let (Some((_, info)), Some(name), Some(indexes), Some(signature)) =
+                    (current.as_mut(), parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                let indexes = indexes.split(',').filter_map(|i| i.parse().ok()).collect();
+                info.outs
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push((signature.to_owned(), indexes));
+            }
+            Some("X") => {
+                if let (Some((_, info)), Some(name)) = (current.as_mut(), parts.next()) {
+                    info.extensions.insert(name.to_owned());
                 }
             }
             Some("E") => {
@@ -171,6 +222,62 @@ pub fn framework_type(a: &Assembly, token: u32) -> Option<(&'static TypeInfo, St
     let name = a.resolve_full(token);
     data().get(&name).map(|info| (info, name))
 }
+// A member reference's own signature: members of generic types keep `!0` there, as the
+// definition does, while `method_ref` substitutes the instantiation.
+fn reference_signature(a: &Assembly, token: u32) -> Option<String> {
+    let row = a
+        .metadata()
+        .member_refs
+        .get((token & 0xffffff).checked_sub(1)? as usize)?;
+    let raw = crate::signature::method(a.blob(row.signature).ok()?).ok()?;
+    Some(format!(
+        "{}({})",
+        canonical(a, &raw.return_type),
+        raw.parameters
+            .iter()
+            .map(|p| canonical(a, p))
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+// The MemberRef behind a MethodSpec (generic method instantiation).
+fn member_reference(a: &Assembly, token: u32) -> Option<u32> {
+    match token >> 24 {
+        10 => Some(token),
+        43 => {
+            let row = a
+                .metadata()
+                .method_specs
+                .get((token & 0xffffff).checked_sub(1)? as usize)?;
+            Some(coded(row.method)).filter(|t| t >> 24 == 10)
+        }
+        _ => None,
+    }
+}
+/// Whether argument `index` of a framework method reference is an `out` parameter.
+pub fn out_parameter(a: &Assembly, token: u32, index: usize) -> bool {
+    (|| {
+        let token = member_reference(a, token)?;
+        let method = a.method_ref(token).ok()?;
+        let (info, _) = framework_type(a, method.owner)?;
+        let signature = reference_signature(a, token)?;
+        info.outs
+            .get(&method.name)?
+            .iter()
+            .find(|(s, _)| *s == signature)
+            .map(|(_, indexes)| indexes.contains(&index))
+    })()
+    .unwrap_or(false)
+}
+/// Whether a framework method reference is an extension method.
+pub fn is_extension(a: &Assembly, token: u32) -> bool {
+    (|| {
+        let method = a.method_ref(member_reference(a, token)?).ok()?;
+        let (info, _) = framework_type(a, method.owner)?;
+        Some(info.extensions.contains(&method.name))
+    })()
+    .unwrap_or(false)
+}
 /// Property accessor semantics for a framework method reference, verified by the
 /// reference's full signature against the reference assembly's definition.
 pub fn accessor(a: &Assembly, token: u32) -> Option<Accessor> {
@@ -182,22 +289,7 @@ pub fn accessor(a: &Assembly, token: u32) -> Option<Accessor> {
         return None;
     }
     let (info, _) = framework_type(a, method.owner)?;
-    // Compare the reference's own signature: members of generic types keep `!0` there,
-    // as the definition does, while `method_ref` substitutes the instantiation.
-    let row = a
-        .metadata()
-        .member_refs
-        .get((token & 0xffffff).checked_sub(1)? as usize)?;
-    let raw = crate::signature::method(a.blob(row.signature).ok()?).ok()?;
-    let signature = format!(
-        "{}({})",
-        canonical(a, &raw.return_type),
-        raw.parameters
-            .iter()
-            .map(|p| canonical(a, p))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
+    let signature = reference_signature(a, token)?;
     let candidates = info.accessors.get(&method.name)?;
     let [(name, getter, _)] = candidates
         .iter()
@@ -212,6 +304,7 @@ pub fn accessor(a: &Assembly, token: u32) -> Option<Accessor> {
         // Framework members bind by their declared dispatch; callvirt sites only
         // need the property syntax, which C# emits the same way.
         is_virtual: false,
+        indexer: info.indexers.contains(&method.name),
     })
 }
 /// Kind of a framework type reference: c, s, i, e or d.

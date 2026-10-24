@@ -328,7 +328,8 @@ pub fn inline_temporaries(lines: &mut Vec<String>) {
                 return None;
             }
             // Operators around the use keep precedence when the value is parenthesized.
-            let simple = value
+            // Navigation markers around identifiers do not affect precedence.
+            let simple = plain(value)
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
             let rest = &next[at + name.len()..];

@@ -1,7 +1,117 @@
 //! Generates `data/bcl.txt` from Microsoft reference assemblies (metadata only; nothing
-//! is executed): `cargo run -p decompiler-core --example bcl_summary -- <ref dir> > data/bcl.txt`.
-use decompiler_core::{assembly::Assembly, bcl::canonical, export::constant, signature};
+//! is executed): `npm run bcl`, or
+//! `cargo run -p decompiler-core --example bcl_summary -- <ref dir> > data/bcl.txt`.
+use decompiler_core::{
+    assembly::Assembly, attributes, bcl::canonical, export::constant, signature,
+};
 use std::collections::BTreeMap;
+fn signature_text(a: &Assembly, sig: &signature::MethodSignature) -> String {
+    let parameters: Vec<_> = sig.parameters.iter().map(|p| canonical(a, p)).collect();
+    format!(
+        "{}({})",
+        canonical(a, &sig.return_type),
+        parameters.join(",")
+    )
+}
+fn type_lines(a: &Assembly, node: &decompiler_core::assembly::Node, kind: char) -> Vec<String> {
+    let mut lines = vec![];
+    let default_member = attributes::default_member(a, node.token);
+    for property in a
+        .nodes
+        .iter()
+        .filter(|n| n.parent == node.token && n.token >> 24 == 23)
+    {
+        let row = &a.metadata().properties[(property.token & 0xffffff) as usize - 1];
+        let Ok(sig) = a.blob(row.property_type).and_then(signature::method) else {
+            continue;
+        };
+        // Indexed properties are usable from C# only as the default member.
+        let indexer = !sig.parameters.is_empty();
+        if indexer && default_member.as_deref() != Some(property.name.as_str()) {
+            continue;
+        }
+        let mut access = String::new();
+        for (semantics, method) in a.semantics.get(&property.token).into_iter().flatten() {
+            let public = a
+                .method_row(*method)
+                .is_ok_and(|m| matches!(m.flags & 7, 4..=6));
+            match semantics {
+                2 if public => access.push('g'),
+                1 if public => access.push('s'),
+                _ => {}
+            }
+        }
+        if access.is_empty() {
+            continue;
+        }
+        let ty = canonical(a, &sig.return_type);
+        if indexer {
+            let parameters: Vec<_> = sig.parameters.iter().map(|p| canonical(a, p)).collect();
+            lines.push(format!(
+                "I {} {access} {ty}|{}",
+                property.name,
+                parameters.join(",")
+            ));
+        } else {
+            lines.push(format!("P {} {access} {ty}", property.name));
+        }
+    }
+    // `out` parameters and extension methods of public methods.
+    let mut extension_names: BTreeMap<String, bool> = BTreeMap::new();
+    for method in a
+        .nodes
+        .iter()
+        .filter(|n| n.parent == node.token && n.token >> 24 == 6)
+    {
+        let (Ok(row), Ok(m)) = (a.method_row(method.token), a.method_ref(method.token)) else {
+            continue;
+        };
+        if !matches!(row.flags & 7, 4..=6) {
+            continue;
+        }
+        let outs: Vec<String> = m
+            .signature
+            .parameters
+            .iter()
+            .enumerate()
+            .filter(|(i, ty)| a.by_reference(method.token, *i, ty) == Some("out"))
+            .map(|(i, _)| i.to_string())
+            .collect();
+        if !outs.is_empty() {
+            lines.push(format!(
+                "O {} {} {}",
+                method.name,
+                outs.join(","),
+                signature_text(a, &m.signature)
+            ));
+        }
+        let extension = attributes::has(
+            a,
+            method.token,
+            "System.Runtime.CompilerServices.ExtensionAttribute",
+        );
+        *extension_names.entry(method.name.clone()).or_insert(true) &= extension;
+    }
+    for (name, all) in extension_names {
+        if all {
+            lines.push(format!("X {name}"));
+        }
+    }
+    if kind == 'e' {
+        for field in a
+            .nodes
+            .iter()
+            .filter(|n| n.parent == node.token && n.token >> 24 == 4 && n.name != "value__")
+        {
+            if let Ok(Some(value)) = constant(a, field.token)
+                && let Ok(value) = value.trim_end_matches(['L', 'U']).parse::<i128>()
+            {
+                lines.push(format!("E {} {value}", field.name));
+            }
+        }
+    }
+    lines
+}
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = std::env::args()
         .nth(1)
@@ -38,53 +148,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "delegate" => 'd',
                 _ => 'c',
             };
-            let mut lines = vec![];
-            for property in a
-                .nodes
-                .iter()
-                .filter(|n| n.parent == node.token && n.token >> 24 == 23)
-            {
-                let row = &a.metadata().properties[(property.token & 0xffffff) as usize - 1];
-                let Ok(sig) = a.blob(row.property_type).and_then(signature::method) else {
-                    continue;
-                };
-                if !sig.parameters.is_empty() {
-                    continue;
-                }
-                let mut access = String::new();
-                for (semantics, method) in a.semantics.get(&property.token).into_iter().flatten() {
-                    let public = a
-                        .method_row(*method)
-                        .is_ok_and(|m| matches!(m.flags & 7, 4..=6));
-                    match semantics {
-                        2 if public => access.push('g'),
-                        1 if public => access.push('s'),
-                        _ => {}
-                    }
-                }
-                if !access.is_empty() {
-                    lines.push(format!(
-                        "P {} {access} {}",
-                        property.name,
-                        canonical(&a, &sig.return_type)
-                    ));
-                }
-            }
-            if kind == 'e' {
-                for field in a
-                    .nodes
-                    .iter()
-                    .filter(|n| n.parent == node.token && n.token >> 24 == 4 && n.name != "value__")
-                {
-                    if let Ok(Some(value)) = constant(&a, field.token)
-                        && let Ok(value) = value.trim_end_matches(['L', 'U']).parse::<i128>()
-                    {
-                        lines.push(format!("E {} {value}", field.name));
-                    }
-                }
-            }
-            let name = a.resolve_full(node.token);
-            let entry = types.entry(format!("T {kind} {name}")).or_default();
+            let lines = type_lines(&a, node, kind);
+            let entry = types
+                .entry(format!("T {kind} {}", a.resolve_full(node.token)))
+                .or_default();
             if entry.is_empty() {
                 *entry = lines;
             }

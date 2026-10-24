@@ -10,6 +10,9 @@ pub struct Accessor {
     pub name: String,
     pub getter: bool,
     pub is_virtual: bool,
+    /// The type's default member with parameters: C# `receiver[arguments]`.
+    #[serde(default)]
+    pub indexer: bool,
 }
 
 pub fn local_accessor(a: &Assembly, token: u32) -> Option<Accessor> {
@@ -38,25 +41,35 @@ pub fn local_accessor(a: &Assembly, token: u32) -> Option<Accessor> {
         .properties
         .get((token & 0xffffff).checked_sub(1)? as usize)?;
     let property = signature::method(a.blob(row.property_type).ok()?).ok()?;
-    if !property.parameters.is_empty() || property.has_this != method.signature.has_this {
+    let name = a.string(row.name).ok()?.to_owned();
+    // A property with parameters is usable from C# only as the type's indexer.
+    let indexer = !property.parameters.is_empty();
+    if indexer
+        && crate::attributes::default_member(a, *a.owners.get(&token)?).as_deref()
+            != Some(name.as_str())
+        || property.has_this != method.signature.has_this
+    {
         return None;
     }
     let getter = flags == 2;
     if getter {
-        if !method.signature.parameters.is_empty()
+        if method.signature.parameters != property.parameters
             || method.signature.return_type != property.return_type
         {
             return None;
         }
-    } else if !method.signature.return_type.is_void()
-        || method.signature.parameters != [property.return_type]
-    {
-        return None;
+    } else {
+        let mut expected = property.parameters.clone();
+        expected.push(property.return_type.clone());
+        if !method.signature.return_type.is_void() || method.signature.parameters != expected {
+            return None;
+        }
     }
     Some(Accessor {
-        name: a.string(row.name).ok()?.to_owned(),
+        name,
         getter,
         is_virtual: a.method_row(method.token).ok()?.flags & 0x40 != 0,
+        indexer,
     })
 }
 

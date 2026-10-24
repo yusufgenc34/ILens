@@ -786,6 +786,20 @@ impl Assembly {
             {
                 format!("{}?", inner(&args[0])?)
             }
+            // ValueTuple<A, B> is written (A, B).
+            Type::GenericInstance { base, args }
+                if (2..=7).contains(&args.len())
+                    && matches!(base.as_ref(), Type::ValueType(t) | Type::Named(t)
+                        if self.resolve_full(*t).starts_with("System.ValueTuple`")) =>
+            {
+                format!(
+                    "({})",
+                    args.iter()
+                        .map(inner)
+                        .collect::<Result<Vec<_>>>()?
+                        .join(", ")
+                )
+            }
             Type::GenericInstance { base, args } => format!(
                 "{}<{}>",
                 strip_arity(&inner(base)?),
@@ -1024,6 +1038,106 @@ impl Assembly {
         }
         names
     }
+    /// Param rows of a method definition by parameter index (sequence − 1).
+    pub fn parameter_tokens(&self, token: u32, count: usize) -> Vec<Option<(u32, u16)>> {
+        let mut rows = vec![None; count];
+        if token >> 24 != 6 {
+            return rows;
+        }
+        let Ok(m) = self.method_row(token) else {
+            return rows;
+        };
+        let end = self
+            .metadata()
+            .method_defs
+            .get((token & 0xffffff) as usize)
+            .map(|m| m.param_list)
+            .unwrap_or(self.metadata().params.len() as u32 + 1);
+        for index in m.param_list..end {
+            if let Ok(p) = row(&self.metadata().params, index)
+                && p.sequence > 0
+                && let Some(slot) = rows.get_mut(p.sequence as usize - 1)
+            {
+                *slot = Some((0x08000000 | index, p.flags));
+            }
+        }
+        rows
+    }
+    /// `ref`, `out` or `in` for a by-reference parameter of a method definition.
+    pub fn by_reference(&self, token: u32, index: usize, ty: &Type) -> Option<&'static str> {
+        if !matches!(ty, Type::ByRef(_)) {
+            return None;
+        }
+        let (param, flags) = self.parameter_tokens(token, index + 1)[index]?;
+        Some(if flags & 2 != 0 && flags & 1 == 0 {
+            "out"
+        } else if crate::attributes::has(
+            self,
+            param,
+            "System.Runtime.CompilerServices.IsReadOnlyAttribute",
+        ) {
+            "in"
+        } else {
+            "ref"
+        })
+    }
+    /// The parameter list as C# declares it: modifiers, `this`, `params` and defaults.
+    pub fn parameter_list(&self, token: u32, sig: &MethodSignature) -> String {
+        let names = self.parameter_names(token, sig);
+        let rows = self.parameter_tokens(token, sig.parameters.len());
+        let extension = token >> 24 == 6
+            && crate::attributes::has(
+                self,
+                token,
+                "System.Runtime.CompilerServices.ExtensionAttribute",
+            );
+        sig.parameters
+            .iter()
+            .zip(names)
+            .enumerate()
+            .map(|(i, (ty, name))| {
+                let mut text = String::new();
+                if i == 0 && extension {
+                    text.push_str("this ");
+                }
+                let row = rows[i];
+                if let Some((param, _)) = row
+                    && crate::attributes::has(self, param, "System.ParamArrayAttribute")
+                {
+                    text.push_str("params ");
+                }
+                match (self.by_reference(token, i, ty), ty) {
+                    (Some(modifier), Type::ByRef(inner)) => {
+                        text.push_str(&format!("{modifier} {}", self.format_type(inner, token)))
+                    }
+                    _ => text.push_str(&self.format_type(ty, token)),
+                }
+                text.push(' ');
+                text.push_str(&name);
+                // Optional parameters keep their compile-time default value.
+                if let Some((param, flags)) = row
+                    && flags & 0x1000 != 0
+                    && let Ok(Some(value)) = crate::export::constant(self, param)
+                {
+                    let value = match ty {
+                        Type::ValueType(t) => match (
+                            crate::bcl::members_of(self, *t),
+                            value.trim_end_matches(['L', 'U']).parse::<i128>(),
+                        ) {
+                            (Some(members), Ok(n)) => {
+                                crate::bcl::enum_text(&strip_arity(&self.resolve(*t)), &members, n)
+                            }
+                            _ => value,
+                        },
+                        _ => value,
+                    };
+                    text.push_str(&format!(" = {value}"));
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
     pub fn declaration(&self, token: u32) -> Result<String> {
         let m = self.metadata();
         Ok(match token >> 24 {
@@ -1031,14 +1145,7 @@ impl Assembly {
                 let r = self.method_row(token)?;
                 let mr = self.method_ref(token)?;
                 let sig = &mr.signature;
-                let names = self.parameter_names(token, sig);
-                let params = sig
-                    .parameters
-                    .iter()
-                    .zip(names)
-                    .map(|(t, n)| format!("{} {n}", self.format_type(t, token)))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let params = self.parameter_list(token, sig);
                 let gs = self
                     .generics
                     .get(&token)

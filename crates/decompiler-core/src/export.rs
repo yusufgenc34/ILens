@@ -361,17 +361,27 @@ pub fn member_with(
             if token >> 24 == 23 {
                 let row = &a.metadata().properties[(token & 0xffffff) as usize - 1];
                 let sig = signature::method(a.blob(row.property_type)?)?;
-                if !sig.parameters.is_empty() {
+                // A property with parameters is C#'s indexer when it is the default member.
+                let indexer = !sig.parameters.is_empty();
+                let default = crate::attributes::default_member(a, node.parent);
+                if indexer && default.as_deref() != Some(node.name.as_str()) {
                     output.diagnostics.push(
-                        "Indexer parameter/accessor name reconstruction is not yet complete."
+                        "Indexed properties other than the default member have no C# syntax."
                             .to_owned(),
                     );
                 }
-                output.declaration = format!(
-                    "{prefix} {} {}",
-                    a.format_type(&sig.return_type, token),
+                let name = if indexer {
+                    // Index parameter names come from the getter (or the setter's leading ones).
+                    let (_, accessor) = semantics.first().copied().unwrap_or((0, first.1));
+                    let accessor_sig = a.method_ref(accessor)?.signature;
+                    let mut index_sig = accessor_sig.clone();
+                    index_sig.parameters.truncate(sig.parameters.len());
+                    format!("this[{}]", a.parameter_list(accessor, &index_sig))
+                } else {
                     identifier(&node.name)
-                );
+                };
+                output.declaration =
+                    format!("{prefix} {} {name}", a.format_type(&sig.return_type, token),);
             } else {
                 let row = &a.metadata().events[(token & 0xffffff) as usize - 1];
                 output.declaration = format!(
