@@ -698,3 +698,38 @@ fn structs_and_managed_pointers_are_editable() {
     let written = pe_write::write(&a, &BTreeMap::from([(output, edit)])).unwrap();
     Assembly::load(written).unwrap();
 }
+#[test]
+fn multidimensional_arrays_are_editable() {
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let rows = |token: u32| cil_encode::from_body(&a.body(token).unwrap().unwrap());
+    for name in ["Matrix", "MakeGrid"] {
+        let token = method(&a, name);
+        edit::validate(&a, token, &rows(token)).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+    }
+    // Get needs one index per dimension.
+    let matrix = method(&a, "Matrix");
+    let mut missing = rows(matrix);
+    let index = missing.iter().position(|r| r.opcode == "ldc.i4.0").unwrap();
+    missing.remove(index);
+    assert!(edit::validate(&a, matrix, &missing).is_err());
+    let grid = method(&a, "MakeGrid");
+    let mut changed = rows(grid);
+    changed
+        .iter_mut()
+        .find(|r| r.opcode == "ldc.i4.5")
+        .unwrap()
+        .opcode = "ldc.i4.6".into();
+    let edit = edit::validate(&a, grid, &changed).unwrap();
+    let output = pe_write::write(&a, &BTreeMap::from([(grid, edit)])).unwrap();
+    let b = Assembly::load(output).unwrap();
+    assert!(
+        decompiler_core::decompile::decompile(&b, grid)
+            .unwrap()
+            .csharp
+            .contains("local[0, 1] = 6;")
+    );
+    // The C# view writes multidimensional creation and access as C# does.
+    let source = decompiler_core::decompile::decompile(&a, grid).unwrap().csharp;
+    assert!(source.contains("new int[rows, columns];"), "{source}");
+}

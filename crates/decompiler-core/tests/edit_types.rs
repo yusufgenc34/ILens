@@ -285,13 +285,10 @@ fn reference_merges_widen_and_revisit_successors() {
     rejected(&a, "SelectKinds", &bad, "Incompatible stack");
 }
 #[test]
-fn unsupported_signatures_have_specific_diagnostics() {
+fn formerly_unsupported_signatures_open() {
     let a = Assembly::load(EDIT.to_vec()).unwrap();
-    let error = edit::preview(&a, token(&a, "Matrix"), 0, None)
-        .err()
-        .expect("unsupported method");
-    assert_eq!(error.code, ErrorCode::UnsupportedEdit);
-    assert!(error.detail.contains("Multidimensional"), "{error}");
+    // Multidimensional arrays open: Get/Set/Address and constructors are verified.
+    edit::preview(&a, token(&a, "Matrix"), 0, None).unwrap();
     // Byref parameters and struct values open as managed pointers and opaque values.
     edit::preview(&a, token(&a, "ByRef"), 0, None).unwrap();
     edit::preview(&a, token(&a, "Struct"), 0, None).unwrap();

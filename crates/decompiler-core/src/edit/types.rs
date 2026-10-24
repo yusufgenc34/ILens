@@ -42,6 +42,8 @@ pub enum Value {
     Struct(u32),
     /// A managed pointer (`ref T`) in a signature.
     Pointer(TypeId),
+    /// A multidimensional array of this element type and rank.
+    MultiArray(TypeId, u32),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stack {
@@ -76,6 +78,7 @@ impl Value {
                 | Self::Class(_)
                 | Self::Array(_)
                 | Self::Boxed(_)
+                | Self::MultiArray(..)
                 | Self::Generic(_, _, true)
                 | Self::Instance(_, _, true)
         )
@@ -270,9 +273,10 @@ impl<'a> Types<'a> {
                 let element = self.signature_depth(element, depth + 1)?;
                 self.intern(Value::Array(element))
             }
-            Type::Array(_, _) | Type::MultiArray(_, _) => Err(unsupported(
-                "Multidimensional and non-zero-based arrays are not editable yet; zero-based vectors and jagged arrays are supported",
-            )),
+            Type::MultiArray(element, rank) | Type::Array(element, rank) => {
+                let element = self.signature_depth(element, depth + 1)?;
+                self.intern(Value::MultiArray(element, *rank))
+            }
             Type::Generic { method, index } => {
                 let owner = if *method {
                     self.context.0
@@ -574,6 +578,11 @@ impl<'a> Types<'a> {
         match self.value(id) {
             Value::Class(t) | Value::Enum(t, _) | Value::Struct(t) => self.a.resolve(t),
             Value::Pointer(target) => format!("ref {}", self.describe_value(target)),
+            Value::MultiArray(e, rank) => format!(
+                "{}[{}]",
+                self.describe_value(e),
+                ",".repeat(rank.saturating_sub(1) as usize)
+            ),
             Value::Array(e) => format!("{}[]", self.describe_value(e)),
             Value::Boxed(e) => format!("boxed {}", self.describe_value(e)),
             Value::Generic(method, index, _) => {

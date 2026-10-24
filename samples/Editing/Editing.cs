@@ -109,3 +109,7 @@ public static class Structs
     public static int SwapPoint(ref Point2 p) { int t = p.X; p.X = p.Y; p.Y = t; return t; }
     public static int Defaulted() { Point2 p = default; p.X = 3; p.Scale(2); return p.X; }
 }
+public static class Grids
+{
+    public static int[,] MakeGrid(int rows, int columns) { var grid = new int[rows, columns]; grid[0, 1] = 5; return grid; }
+}

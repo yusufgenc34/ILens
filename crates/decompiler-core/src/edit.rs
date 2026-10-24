@@ -1083,6 +1083,62 @@ fn generic_instance(a: &Assembly, spec: u32) -> Option<(u32, Vec<crate::signatur
         _ => None,
     }
 }
+/// `T[,]::Get/Set/Address` and `newobj T[,]::.ctor` (ECMA-335 II.14.2): one int32 index
+/// (or, for constructors, length and optionally lower bound) per dimension.
+fn array_method(
+    types: &mut Types<'_>,
+    stack: &mut Vec<Stack>,
+    m: &crate::assembly::MethodRef,
+    element: usize,
+    rank: u32,
+    construct: bool,
+) -> Result<()> {
+    let rank = rank as usize;
+    let sig = &m.signature;
+    let element_stack = types.stack(element);
+    let int = |t: &crate::signature::Type| *t == crate::signature::Type::primitive("int");
+    let indices = |n: usize| sig.parameters.len() >= n && sig.parameters[..n].iter().all(int);
+    let shape = match (m.name.as_str(), construct) {
+        (".ctor", true) => {
+            (sig.parameters.len() == rank || sig.parameters.len() == 2 * rank)
+                && indices(sig.parameters.len())
+        }
+        ("Get", false) => sig.parameters.len() == rank && indices(rank),
+        ("Set", false) => sig.parameters.len() == rank + 1 && indices(rank),
+        ("Address", false) => sig.parameters.len() == rank && indices(rank),
+        _ => false,
+    };
+    if !shape || !sig.has_this {
+        return Err(invalid(format!(
+            "Invalid array method {} for rank {rank}",
+            m.name
+        )));
+    }
+    if m.name == "Set" {
+        expect(types, stack, element_stack)?;
+    }
+    for _ in 0..if m.name == "Set" {
+        rank
+    } else {
+        sig.parameters.len()
+    } {
+        if !matches!(pop(stack)?, Stack::I4) {
+            return Err(invalid("Array indices and lengths must be int32"));
+        }
+    }
+    let array = types.token(m.owner)?;
+    if construct {
+        stack.push(Stack::Ref(array));
+        return Ok(());
+    }
+    expect(types, stack, Stack::Ref(array))?;
+    match m.name.as_str() {
+        "Get" => stack.push(element_stack),
+        "Address" => stack.push(address(types, element)?),
+        _ => {}
+    }
+    Ok(())
+}
 /// A managed pointer to a location of type `id`; pointers to pointers do not exist.
 fn address(types: &Types<'_>, id: usize) -> Result<Stack> {
     if matches!(types.value(id), Value::Pointer(_)) {
@@ -1161,9 +1217,20 @@ fn call(
             "Members of a generic type are called through a TypeSpec instantiation",
         ));
     }
+    // Multidimensional arrays: the runtime's Get/Set/Address methods and constructors.
+    let constructed = if m.owner >> 24 == 27 {
+        Some(types.token(m.owner)?)
+    } else {
+        None
+    };
+    if let Some(id) = constructed
+        && let Value::MultiArray(element, rank) = types.value(id)
+    {
+        return array_method(types, stack, &m, element, rank, i.opcode == 0x73);
+    }
     if m.owner >> 24 == 27 && generic_instance(types.a, m.owner).is_none() {
         return Err(unsupported(
-            "Calls on array and other constructed types require additional validation",
+            "Calls on vectors and other constructed types require additional validation",
         ));
     }
     let constructor = i.opcode == 0x73;

@@ -645,8 +645,11 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                 None
             };
             // Multidimensional arrays are accessed through runtime Get/Set methods.
-            if let Some(i) = instance
-                && matches!(i.ty, Type::MultiArray(..))
+            if instance.is_some()
+                && (instance
+                    .as_ref()
+                    .is_some_and(|i| matches!(i.ty, Type::MultiArray(..)))
+                    || multi_array(a, *owner).is_some())
                 && let Some(receiver) = &receiver_text
             {
                 match (name.as_str(), rendered.split_last()) {
@@ -775,6 +778,19 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             }
         }
         New { owner, args } => {
+            // `new T[a, b]`: the runtime constructor of a multidimensional array type.
+            if let Some((element, rank)) = multi_array(a, *owner)
+                && args.len() == rank as usize
+            {
+                let lengths = args
+                    .iter()
+                    .map(|e| expr(e).map(|r| r.0))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok((
+                    array_creation(&type_name(a, &element, context), &lengths.join(", ")),
+                    PRIMARY,
+                ));
+            }
             if let [
                 target,
                 Expr {
@@ -1350,6 +1366,20 @@ fn assignment_flow(
         }
     }
     state
+}
+/// The element type and rank of a TypeSpec naming a multidimensional array.
+fn multi_array(a: &Assembly, token: u32) -> Option<(Type, u32)> {
+    if token >> 24 != 27 {
+        return None;
+    }
+    let row = a
+        .metadata()
+        .type_specs
+        .get((token & 0xff_ffff).checked_sub(1)? as usize)?;
+    match crate::signature::type_spec(a.blob(row.signature).ok()?).ok()? {
+        Type::MultiArray(element, rank) => Some((*element, rank)),
+        _ => None,
+    }
 }
 /// `new T[n]`; for an array element type the count precedes its brackets:
 /// `new int[n][]`, as C# writes jagged array creation.
