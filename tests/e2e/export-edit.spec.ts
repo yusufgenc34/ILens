@@ -106,3 +106,31 @@ test('edits IL with undo, rejects invalid types, validates and reopens a real mo
   await page.getByLabel('Open assembly files').setInputFiles(saved); await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1'); await select(page, 'Arithmetic.Twice', /Twice.*Arithmetic.Twice/)
   await expect(page.getByLabel('C# code viewer')).toContainText('return value * 3;')
 })
+// Compile gate: every repository-owned sample exports to a project that builds with
+// 0 errors. The archive is identical in every browser, so one engine builds it.
+for (const [name, files] of [
+  ['patterns', ['ILens.Patterns.dll', 'ILens.Dependency.dll']],
+  ['readability', ['ILens.Readability.dll']],
+  ['workspace', ['ILens.Workspace.dll', 'ILens.WorkspaceDependency.dll']],
+  ['language', ['ILens.Language.dll']],
+] as const) {
+  test(`exported ${name} sample projects compile without errors`, async ({page}, testInfo) => {
+    test.skip(testInfo.project.name !== 'chromium', 'The exported archive does not depend on the browser.')
+    test.setTimeout(180_000)
+    await page.goto('./'); await expect(page.getByLabel('Open assembly files')).toBeEnabled()
+    await page.getByLabel('Open assembly files').setInputFiles(files.map(f => path.resolve('samples/fixtures', f)))
+    await expect(page.getByLabel('Loaded assemblies')).toHaveText(String(files.length))
+    await expect(page.getByRole('button', {name: 'Stop analysis'})).toHaveCount(0)
+    await page.getByRole('menuitem', {name: 'File', exact: true}).click(); await page.getByRole('menuitem', {name: 'Export to Project…', exact: true}).click()
+    for (const box of await page.getByRole('checkbox', {name: /ILens\./}).all()) await box.check()
+    const download = page.waitForEvent('download'); await page.getByRole('button', {name: 'Export', exact: true}).click()
+    const data = await fs.readFile((await (await download).path())!)
+    const directory = testInfo.outputPath(name); await fs.mkdir(directory, {recursive: true})
+    execFileSync('python3', ['-c', 'import sys,io,zipfile; zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())).extractall(sys.argv[1])', directory], {input: data})
+    const solution = (await fs.readdir(directory)).find(f => /\.slnx?$/.test(f))
+    expect(solution).toBeTruthy()
+    // Build only; the samples are never run.
+    const build = execFileSync('dotnet', ['build', path.join(directory, solution!), '--nologo', '-p:UseSharedCompilation=false', '-p:DebugType=none', '-p:DebugSymbols=false'], {encoding: 'utf8', timeout: 120_000, env: {...process.env, DOTNET_CLI_UI_LANGUAGE: 'en'}})
+    expect(build).toContain(' 0 Error(s)')
+  })
+}
