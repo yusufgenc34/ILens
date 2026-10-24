@@ -182,9 +182,9 @@ pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
     types.context = (token, method.owner);
     if method.signature.has_this {
         let owner = types.token(method.owner)?;
-        if !types.value(owner).reference() {
+        if !types.value(owner).reference() && !matches!(types.value(owner), Value::Struct(_)) {
             return Err(unsupported(
-                "Value-type instance methods require managed-address validation",
+                "Instance methods of enums and generic structs are not editable yet",
             ));
         }
     }
@@ -573,7 +573,13 @@ pub fn verify_with(
         ".cctor" => Some(true),
         _ => None,
     };
-    let constructing = types.initializer == Some(false);
+    let owner_id = types.token(method.owner)?;
+    let constructing =
+        types.initializer == Some(false) && !matches!(types.value(owner_id), Value::Struct(_));
+    if !constructing && types.initializer == Some(false) {
+        // A struct constructor receives an initialized `this` pointer.
+        types.initializer = None;
+    }
     if constructing && !body.exceptions.is_empty() {
         return Err(unsupported(
             "Exception regions in instance constructors are not editable yet",
@@ -582,16 +588,28 @@ pub fn verify_with(
     let mut args = Vec::new();
     if sig.has_this {
         let id = types.token(method.owner)?;
-        args.push(types.stack(id));
+        // A struct's instance methods receive `this` as a managed pointer.
+        args.push(if matches!(types.value(id), Value::Struct(_)) {
+            Stack::Pointer(id)
+        } else {
+            types.stack(id)
+        });
+        types.arg_types.push(id);
     }
     for ty in &sig.parameters {
         let id = types.signature(ty)?;
         args.push(types.stack(id));
+        types.arg_types.push(id);
     }
     let result = if sig.return_type.is_void() {
         None
     } else {
         let id = types.signature(&sig.return_type)?;
+        if matches!(types.stack(id), Stack::Pointer(_)) {
+            return Err(unsupported(
+                "Methods returning managed pointers are not verified",
+            ));
+        }
         Some(types.stack(id))
     };
     let declared = match locals {
@@ -602,6 +620,7 @@ pub fn verify_with(
     for ty in &declared {
         let id = types.signature(ty)?;
         locals.push(types.stack(id));
+        types.local_types.push(id);
     }
     let cfg = ControlFlowGraph::build(body)?;
     let mut entries: Vec<Option<Vec<Stack>>> = vec![None; cfg.blocks.len()];
@@ -837,6 +856,57 @@ fn transfer(
                     .ok_or_else(|| invalid("Argument index out of bounds"))?,
             )?;
         }
+        // Addresses of arguments and locals.
+        0x0f | 0xfe0a => {
+            if has_this && var == 0 {
+                return Err(unsupported("Taking the address of this is not supported"));
+            }
+            let id = *types
+                .arg_types
+                .get(var)
+                .ok_or_else(|| invalid("Argument index out of bounds"))?;
+            stack.push(address(types, id)?);
+        }
+        0x12 | 0xfe0d => {
+            let id = *types
+                .local_types
+                .get(var)
+                .ok_or_else(|| invalid("Local index out of bounds"))?;
+            stack.push(address(types, id)?);
+        }
+        0x46..=0x50 => {
+            let Stack::Pointer(target) = pop(stack)? else {
+                return Err(invalid("ldind requires a managed pointer"));
+            };
+            indirect(types, i.opcode, target)?;
+            stack.push(types.stack(target));
+        }
+        0x51..=0x57 | 0xdf => {
+            let value = pop(stack)?;
+            let Stack::Pointer(target) = pop(stack)? else {
+                return Err(invalid("stind requires a managed pointer"));
+            };
+            indirect(types, i.opcode, target)?;
+            if !types.compatible(value, types.stack(target))? {
+                return Err(invalid("stind value does not match the pointer's type"));
+            }
+        }
+        0x71 | 0x81 | 0xfe15 => {
+            let id = types.token(operand(i)?)?;
+            if i.opcode == 0x81 {
+                expect(types, stack, types.stack(id))?;
+            }
+            if pop(stack)? != Stack::Pointer(id) {
+                return Err(invalid(format!(
+                    "{} requires a managed pointer to {}",
+                    i.name,
+                    types.describe(types.stack(id))
+                )));
+            }
+            if i.opcode == 0x71 {
+                stack.push(types.stack(id));
+            }
+        }
         0x14 => stack.push(Stack::Null),
         0x15..=0x20 => stack.push(Stack::I4),
         0x21 => stack.push(Stack::I8),
@@ -959,7 +1029,7 @@ fn transfer(
             object(stack)?;
             stack.clear();
         }
-        0x7b | 0x7d | 0x7e | 0x80 => field(types, owner, stack, i)?,
+        0x7b..=0x80 => field(types, owner, stack, i)?,
         0x8c => {
             let id = types.token(operand(i)?)?;
             let generic = matches!(types.value(id), Value::Generic(..));
@@ -1012,6 +1082,41 @@ fn generic_instance(a: &Assembly, spec: u32) -> Option<(u32, Vec<crate::signatur
         },
         _ => None,
     }
+}
+/// A managed pointer to a location of type `id`; pointers to pointers do not exist.
+fn address(types: &Types<'_>, id: usize) -> Result<Stack> {
+    if matches!(types.value(id), Value::Pointer(_)) {
+        return Err(invalid("A managed pointer has no address"));
+    }
+    Ok(Stack::Pointer(id))
+}
+/// ldind/stind access widths must match the pointed-to storage type.
+fn indirect(types: &Types<'_>, opcode: u16, target: usize) -> Result<()> {
+    let value = match types.value(target) {
+        Value::Enum(_, underlying) => types.value(underlying),
+        v => v,
+    };
+    let fits = match opcode {
+        0x46 | 0x52 => matches!(value, Value::I1 | Value::U1 | Value::Bool),
+        0x47 => matches!(value, Value::U1 | Value::Bool),
+        0x48 | 0x53 => matches!(value, Value::I2 | Value::U2 | Value::Char),
+        0x49 => matches!(value, Value::U2 | Value::Char),
+        0x4a | 0x54 => matches!(value, Value::I4 | Value::U4),
+        0x4b => value == Value::U4,
+        0x4c | 0x55 => matches!(value, Value::I8 | Value::U8),
+        0x4d | 0xdf => matches!(value, Value::I | Value::U),
+        0x4e | 0x56 => value == Value::R4,
+        0x4f | 0x57 => value == Value::R8,
+        0x50 | 0x51 => value.reference(),
+        _ => false,
+    };
+    if !fits {
+        return Err(invalid(format!(
+            "Indirect access width does not match {}",
+            types.describe(types.stack(target))
+        )));
+    }
+    Ok(())
 }
 fn operand(i: &cil::Instruction) -> Result<u32> {
     i.token()
@@ -1091,7 +1196,12 @@ fn call(
         // Only fully local ordinary class chains ending at System.Object qualify.
         let mut parent = crate::assembly::coded(row.extends);
         let mut seen = std::collections::HashSet::from([m.owner]);
-        while types.core_name(parent)?.as_deref() != Some("Object") {
+        // Local structs derive directly from System.ValueType.
+        let created = types.token(m.owner)?;
+        let structure = matches!(types.value(created), Value::Struct(_));
+        while !(types.core_name(parent)?.as_deref() == Some("Object")
+            || structure && types.core_name(parent)?.as_deref() == Some("ValueType"))
+        {
             if parent >> 24 != 2 {
                 return Err(unsupported(
                     "Constructor base types require resolved ordinary classes; delegate and external-base construction is not supported",
@@ -1110,6 +1220,34 @@ fn call(
     } else if m.name == ".ctor" && i.opcode == 0x28 && stack.len() > sig.parameters.len() {
         // `base(...)` or `this(...)` on the uninitialized `this` of this constructor.
         let receiver = stack[stack.len() - 1 - sig.parameters.len()];
+        // `new S(...)` into a location: a struct constructor called on its address.
+        let target = types.token(m.owner)?;
+        if matches!(types.value(target), Value::Struct(_)) && receiver == Stack::Pointer(target) {
+            if !sig.has_this || !sig.return_type.is_void() {
+                return Err(invalid(
+                    "A constructor call must be an instance call returning void",
+                ));
+            }
+            if definition >> 24 == 6 {
+                access(
+                    types,
+                    m.owner,
+                    caller,
+                    types.a.method_row(definition)?.flags,
+                    None,
+                )?;
+            }
+            let mut parameters = Vec::new();
+            for p in &sig.parameters {
+                let id = types.signature(p)?;
+                parameters.push(types.stack(id));
+            }
+            for p in parameters.into_iter().rev() {
+                expect(types, stack, p)?;
+            }
+            pop(stack)?;
+            return Ok(());
+        }
         let declaring = &types.a.metadata().type_defs[(caller & 0xffffff) as usize - 1];
         let base = crate::assembly::coded(declaring.extends);
         if receiver != Stack::This || m.owner != base && m.owner != caller {
@@ -1189,13 +1327,22 @@ fn call(
     }
     if sig.has_this {
         let target = types.token(m.owner)?;
-        if !types.value(target).reference() {
+        let structure = matches!(types.value(target), Value::Struct(_));
+        if !types.value(target).reference() && !structure {
             return Err(unsupported(
-                "Value-type instance calls require managed-address validation",
+                "Instance calls on enums and generic structs require managed-address validation",
             ));
         }
         if constructor {
             stack.push(types.stack(target))
+        } else if structure {
+            // A struct's instance methods take `this` by managed pointer.
+            if pop(stack)? != Stack::Pointer(target) {
+                return Err(invalid(format!(
+                    "Expected a managed pointer to {}",
+                    types.describe(Stack::Value(target))
+                )));
+            }
         } else {
             expect(types, stack, types.stack(target))?;
         }
@@ -1256,8 +1403,9 @@ fn field(
             "Explicit-layout fields require overlap and accessibility analysis",
         ));
     }
-    let is_static = matches!(i.opcode, 0x7e | 0x80);
+    let is_static = matches!(i.opcode, 0x7e..=0x80);
     let store = matches!(i.opcode, 0x7d | 0x80);
+    let address_of = matches!(i.opcode, 0x7c | 0x7f);
     if (row.flags & 16 != 0) != is_static {
         return Err(invalid(
             "Field opcode disagrees with the field's static flag",
@@ -1291,14 +1439,32 @@ fn field(
     }
     if !is_static {
         let target = types.token(instance)?;
-        if !types.value(target).reference() {
-            return Err(unsupported(
-                "Value-type fields require managed-address validation",
-            ));
+        match types.value(target) {
+            // A struct's fields are reached through a pointer to it; loads also accept
+            // the struct value itself.
+            Value::Struct(_) => {
+                let receiver = pop(stack)?;
+                if receiver != Stack::Pointer(target)
+                    && (store || address_of || receiver != Stack::Value(target))
+                {
+                    return Err(invalid(format!(
+                        "Expected a managed pointer to {}, found {}",
+                        types.describe(Stack::Value(target)),
+                        types.describe(receiver)
+                    )));
+                }
+            }
+            v if v.reference() => expect(types, stack, types.stack(target))?,
+            _ => {
+                return Err(unsupported(
+                    "Fields of generic structs require managed-address validation",
+                ));
+            }
         }
-        expect(types, stack, types.stack(target))?;
     }
-    if !store {
+    if address_of {
+        stack.push(address(types, value)?);
+    } else if !store {
         stack.push(types.stack(value));
     }
     Ok(())

@@ -38,6 +38,10 @@ pub enum Value {
     Generic(bool, u32, bool),
     /// A constructed generic type: (definition, interned argument list, is a class).
     Instance(u32, usize, bool),
+    /// A local struct (sequential or auto layout, nongeneric).
+    Struct(u32),
+    /// A managed pointer (`ref T`) in a signature.
+    Pointer(TypeId),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stack {
@@ -46,9 +50,11 @@ pub enum Stack {
     I,
     F,
     Ref(TypeId),
-    /// A value whose type is known only by identity: a generic parameter that may be a
-    /// value type, or a constructed generic struct.
+    /// A value whose type is known only by identity: a struct, a generic parameter that
+    /// may be a value type, or a constructed generic struct.
     Value(TypeId),
+    /// A managed pointer to a location of this type.
+    Pointer(TypeId),
     Null,
     /// `this` in an instance constructor before its base or chained constructor call.
     This,
@@ -92,6 +98,9 @@ pub struct Types<'a> {
     pub context: (u32, u32),
     lists: Vec<Vec<TypeId>>,
     interned_lists: HashMap<Vec<TypeId>, usize>,
+    /// Argument and local types, for `ldarga`/`ldloca`.
+    pub arg_types: Vec<TypeId>,
+    pub local_types: Vec<TypeId>,
 }
 impl<'a> Types<'a> {
     pub fn new(a: &'a Assembly) -> Self {
@@ -107,6 +116,8 @@ impl<'a> Types<'a> {
             context: (0, 0),
             lists: vec![],
             interned_lists: HashMap::new(),
+            arg_types: vec![],
+            local_types: vec![],
         }
     }
     fn spend(&self) -> Result<()> {
@@ -146,7 +157,10 @@ impl<'a> Types<'a> {
             Value::I8 | Value::U8 => Stack::I8,
             Value::I | Value::U => Stack::I,
             Value::R4 | Value::R8 => Stack::F,
-            Value::Generic(_, _, false) | Value::Instance(_, _, false) => Stack::Value(id),
+            Value::Generic(_, _, false) | Value::Instance(_, _, false) | Value::Struct(_) => {
+                Stack::Value(id)
+            }
+            Value::Pointer(target) => Stack::Pointer(target),
             _ => Stack::Ref(id),
         }
     }
@@ -289,8 +303,12 @@ impl<'a> Types<'a> {
                     matches!(base.as_ref(), Type::Named(_)),
                 ))
             }
-            Type::ByRef(_) | Type::Pointer(_) | Type::FunctionPointer(_) => Err(unsupported(
-                "Byref, pointer and function-pointer signatures require address/lifetime validation",
+            Type::ByRef(inner) => {
+                let target = self.signature_depth(inner, depth + 1)?;
+                self.intern(Value::Pointer(target))
+            }
+            Type::Pointer(_) | Type::FunctionPointer(_) => Err(unsupported(
+                "Unmanaged and function pointers are not verifiable",
             )),
             Type::Modified { .. } | Type::Pinned(_) => Err(unsupported(
                 "Modified or pinned signatures are not editable yet",
@@ -416,9 +434,14 @@ impl<'a> Types<'a> {
                         return Ok(id);
                     }
                     Some("ValueType") => {
-                        return Err(unsupported(
-                            "Custom structs require value-type IL validation",
-                        ));
+                        if row.flags & 0x18 == 0x10 {
+                            return Err(unsupported(
+                                "Explicit-layout structs require overlap analysis",
+                            ));
+                        }
+                        let id = self.intern(Value::Struct(token))?;
+                        self.tokens.insert(token, id);
+                        return Ok(id);
                     }
                     _ => {}
                 }
@@ -543,12 +566,14 @@ impl<'a> Types<'a> {
             Stack::Ref(id) => self.describe_value(id),
             Stack::This => "uninitialized this".to_owned(),
             Stack::Value(id) => self.describe_value(id),
+            Stack::Pointer(id) => format!("ref {}", self.describe_value(id)),
             _ => format!("{ty:?}"),
         }
     }
     fn describe_value(&self, id: TypeId) -> String {
         match self.value(id) {
-            Value::Class(t) | Value::Enum(t, _) => self.a.resolve(t),
+            Value::Class(t) | Value::Enum(t, _) | Value::Struct(t) => self.a.resolve(t),
+            Value::Pointer(target) => format!("ref {}", self.describe_value(target)),
             Value::Array(e) => format!("{}[]", self.describe_value(e)),
             Value::Boxed(e) => format!("boxed {}", self.describe_value(e)),
             Value::Generic(method, index, _) => {

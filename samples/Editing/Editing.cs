@@ -90,3 +90,22 @@ public static class Generics
     public static int UseBox(Box<int> box) => box.Get();
     public static int CallFirst(int[] items) => First(items);
 }
+// Structs and managed pointers: struct construction, fields through addresses,
+// instance methods on struct pointers, and ref/out parameters.
+public struct Point2
+{
+    public int X;
+    public int Y;
+    public Point2(int x, int y) { X = x; Y = y; }
+    public int Sum() => X + Y;
+    public void Scale(int factor) { X *= factor; Y *= factor; }
+}
+public static class Structs
+{
+    public static int Make(int x) { var p = new Point2(x, 2); return p.Sum(); }
+    public static int ReadX(Point2 p) => p.X;
+    public static void Increment(ref int value) { value++; }
+    public static void Output(out int value) { value = 42; }
+    public static int SwapPoint(ref Point2 p) { int t = p.X; p.X = p.Y; p.Y = t; return t; }
+    public static int Defaulted() { Point2 p = default; p.X = 3; p.Scale(2); return p.X; }
+}

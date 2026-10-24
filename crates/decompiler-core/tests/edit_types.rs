@@ -287,17 +287,14 @@ fn reference_merges_widen_and_revisit_successors() {
 #[test]
 fn unsupported_signatures_have_specific_diagnostics() {
     let a = Assembly::load(EDIT.to_vec()).unwrap();
-    for (name, detail) in [
-        ("Matrix", "Multidimensional"),
-        ("ByRef", "Byref"),
-        ("Struct", "structs"),
-    ] {
-        let error = edit::preview(&a, token(&a, name), 0, None)
-            .err()
-            .expect("unsupported method");
-        assert_eq!(error.code, ErrorCode::UnsupportedEdit);
-        assert!(error.detail.contains(detail), "{name}: {error}");
-    }
+    let error = edit::preview(&a, token(&a, "Matrix"), 0, None)
+        .err()
+        .expect("unsupported method");
+    assert_eq!(error.code, ErrorCode::UnsupportedEdit);
+    assert!(error.detail.contains("Multidimensional"), "{error}");
+    // Byref parameters and struct values open as managed pointers and opaque values.
+    edit::preview(&a, token(&a, "ByRef"), 0, None).unwrap();
+    edit::preview(&a, token(&a, "Struct"), 0, None).unwrap();
     // Generic methods open; their type parameter is an opaque value.
     edit::preview(&a, token(&a, "Generic"), 0, None).unwrap();
     // try/catch methods open with their clause.

@@ -643,3 +643,58 @@ fn generic_methods_and_types_are_editable() {
     let output = pe_write::write(&a, &BTreeMap::from([(pick, edit)])).unwrap();
     Assembly::load(output).unwrap();
 }
+#[test]
+fn structs_and_managed_pointers_are_editable() {
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let rows = |token: u32| cil_encode::from_body(&a.body(token).unwrap().unwrap());
+    let point_ctor = a
+        .nodes
+        .iter()
+        .find(|n| n.token >> 24 == 6 && n.full_name.contains("Point2..ctor"))
+        .unwrap()
+        .token;
+    edit::validate(&a, point_ctor, &rows(point_ctor)).unwrap();
+    for name in [
+        "Make",
+        "ReadX",
+        "Increment",
+        "Output",
+        "SwapPoint",
+        "Defaulted",
+        "Sum",
+        "Scale",
+        "ByRef",
+        "Struct",
+    ] {
+        let token = method(&a, name);
+        edit::validate(&a, token, &rows(token)).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+    }
+    // An int pointer cannot be read with a 64-bit indirection.
+    let increment = method(&a, "Increment");
+    let mut wide = rows(increment);
+    wide.iter_mut()
+        .find(|r| r.opcode == "ldind.i4")
+        .unwrap()
+        .opcode = "ldind.i8".into();
+    let error = edit::validate(&a, increment, &wide).unwrap_err();
+    assert!(error.detail.contains("width"), "{}", error.detail);
+    // A struct field store needs the struct's address, not its value.
+    let defaulted = method(&a, "Defaulted");
+    let mut by_value = rows(defaulted);
+    let address = by_value
+        .iter()
+        .position(|r| r.opcode == "ldloca.s")
+        .unwrap();
+    by_value[address].opcode = "ldloc.0".into();
+    by_value[address].operand = String::new();
+    assert!(edit::validate(&a, defaulted, &by_value).is_err());
+    // Changing a constant stored through a pointer writes and reloads.
+    let output = method(&a, "Output");
+    let mut changed = rows(output);
+    let constant = changed.iter_mut().find(|r| r.opcode == "ldc.i4.s").unwrap();
+    constant.operand = "43".into();
+    let edit = edit::validate(&a, output, &changed).unwrap();
+    let written = pe_write::write(&a, &BTreeMap::from([(output, edit)])).unwrap();
+    Assembly::load(written).unwrap();
+}
