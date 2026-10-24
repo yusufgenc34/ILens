@@ -376,23 +376,23 @@ pub fn compound_assignments(lines: &mut [String]) {
             continue;
         };
         // Locals and member chains such as `Type.field` (with navigation markers);
-        // their receivers are names, so evaluating them once changes nothing.
-        if target.is_empty()
-            || !target
-                .chars()
-                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '\0' | '\u{1}' | '\u{2}'))
-        {
+        // their receivers are names, so evaluating them once changes nothing. A
+        // property's getter and setter carry different markers, so compare plain text.
+        let shown = plain(target);
+        if shown.is_empty() || !simple(&shown) {
             continue;
         }
-        let Some(rest) = value.strip_prefix(&format!("{target} ")) else {
+        let Some((op, operand)) = ["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"]
+            .iter()
+            .find_map(|op| {
+                let separator = format!(" {op} ");
+                let at = value.find(&separator)?;
+                (plain(&value[..at]) == shown).then(|| (*op, &value[at + separator.len()..]))
+            })
+        else {
             continue;
         };
-        let Some((op, operand)) = rest.split_once(' ') else {
-            continue;
-        };
-        if !["+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>"].contains(&op)
-            || operand.contains(' ') && !operand.starts_with('(')
-        {
+        if operand.contains(' ') && !operand.starts_with('(') {
             continue;
         }
         *line = if operand == "1" && (op == "+" || op == "-") {

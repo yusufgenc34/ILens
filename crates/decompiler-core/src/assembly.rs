@@ -1182,6 +1182,14 @@ impl Assembly {
                         gs
                     )
                 };
+                // Abstract interface members are declared without modifiers.
+                let interface = self
+                    .nodes
+                    .iter()
+                    .any(|n| n.token == mr.owner && n.kind == "interface");
+                if interface && r.flags & 0x400 != 0 && r.flags & 16 == 0 {
+                    return Ok(format!("{n}({params})"));
+                }
                 format!(
                     "{}{}{} {}({})",
                     visibility(r.flags as u32),

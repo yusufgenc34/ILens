@@ -112,6 +112,11 @@ fn common_csharp_patterns() {
             "this.Changed?.Invoke(this, System.EventArgs.Empty);",
         ),
         ("MakeAdder", "return value => value + amount;"),
+        // Integer orderings invert exactly under negation.
+        ("BothPositive", "return a > 0 && b > 0;"),
+        ("WithFinally", "this.Value++;"),
+        // Assigned in the try and in every catch: no initializer, as C# requires none.
+        ("SafeDivide", "    int num;\n"),
     ] {
         let n = a
             .nodes

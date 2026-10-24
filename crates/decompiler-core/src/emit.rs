@@ -369,6 +369,12 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             // Operands already typed unsigned need no reinterpreting cast.
             let already = |e: &Expr, ty: &str| e.ty == Type::primitive(ty);
             let mut reinterpreted = false;
+            // CIL `cgt.un` of a reference and null is the non-null test `!=`.
+            let reference_test =
+                *unsigned && op == ">" && left.ty.is_reference() && matches!(right.kind, Null);
+            if reference_test {
+                return Ok((format!("{l} != {r}"), binary_precedence("!=")));
+            }
             if *unsigned {
                 if op == "!=" && left.ty.is_reference() && right.ty.is_reference() {
                 } else {
@@ -443,6 +449,38 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                 && inner == "!"
             {
                 return expr(inner_value);
+            }
+            // Integer orderings invert exactly (no NaN): !(a <= b) is a > b.
+            let integral = |t: &Type| matches!(t, Type::Primitive(n) if ["sbyte", "byte", "short", "ushort", "int", "uint", "long", "ulong", "char", "nint", "nuint"].contains(&n.as_str()));
+            if op == "!"
+                && let Binary {
+                    op: inner,
+                    left,
+                    right,
+                    checked: false,
+                    unsigned,
+                } = &value.kind
+                && let Some(inverse) = match inner.as_str() {
+                    "<" => Some(">="),
+                    "<=" => Some(">"),
+                    ">" => Some("<="),
+                    ">=" => Some("<"),
+                    _ => None,
+                }
+                && integral(&left.ty)
+                && integral(&right.ty)
+            {
+                let flipped = Expr {
+                    kind: Binary {
+                        op: inverse.to_owned(),
+                        left: left.clone(),
+                        right: right.clone(),
+                        checked: false,
+                        unsigned: *unsigned,
+                    },
+                    ty: value.ty.clone(),
+                };
+                return render(a, context, &flipped);
             }
             let operand = expr(value)?;
             let operand = if operand.0.starts_with(['-', '+']) {
@@ -1138,6 +1176,160 @@ fn drop_dead_stack_copies(nodes: &mut Vec<Ast>, read: &HashSet<std::string::Stri
             _ => {}
         }
     }
+}
+/// Variables that C# definite assignment accepts without an initializer: on every
+/// path, each read follows a write. Conservative: `ref`/`out` uses count as reads,
+/// loops may run zero times, and bodies with labels are not analyzed.
+fn definitely_assigned(nodes: &[Ast]) -> HashSet<std::string::String> {
+    let mut jumps = HashSet::new();
+    gotos(nodes, &mut jumps);
+    let mut labels = HashMap::new();
+    labeled(nodes, &mut labels);
+    if !jumps.is_empty() || !labels.is_empty() {
+        return HashSet::new();
+    }
+    let mut written = HashSet::new();
+    let mut early = HashSet::new();
+    assignment_flow(nodes, Some(HashSet::new()), &mut written, &mut early);
+    written.retain(|v| !early.contains(v));
+    written
+}
+type Assigned = Option<HashSet<std::string::String>>;
+// Reads in `e` of variables not yet assigned on this path.
+fn check_reads(
+    e: &Expr,
+    state: &HashSet<std::string::String>,
+    early: &mut HashSet<std::string::String>,
+) {
+    let mut read = HashSet::new();
+    note(e, &mut read);
+    early.extend(read.into_iter().filter(|v| !state.contains(v)));
+}
+/// Flows the set of assigned variables through `nodes`; None once control has left.
+fn assignment_flow(
+    nodes: &[Ast],
+    mut state: Assigned,
+    written: &mut HashSet<std::string::String>,
+    early: &mut HashSet<std::string::String>,
+) -> Assigned {
+    let join = |x: Assigned, y: Assigned| match (x, y) {
+        (Some(x), Some(y)) => Some(x.intersection(&y).cloned().collect()),
+        (x, None) => x,
+        (None, y) => y,
+    };
+    for n in nodes {
+        let current = state.as_mut()?;
+        match n {
+            Ast::Statement(Statement::Assign { target, value }) => {
+                check_reads(value, current, early);
+                match &target.kind {
+                    ExprKind::Variable(v) => {
+                        written.insert(v.clone());
+                        current.insert(v.clone());
+                    }
+                    _ => check_reads(target, current, early),
+                }
+            }
+            Ast::Statement(Statement::Let { name, value, .. }) => {
+                check_reads(value, current, early);
+                written.insert(name.clone());
+                current.insert(name.clone());
+            }
+            Ast::Statement(Statement::Evaluate(e) | Statement::Yield(e)) => {
+                check_reads(e, current, early)
+            }
+            Ast::ParallelAssign { targets, values } => {
+                for v in values {
+                    check_reads(v, current, early);
+                }
+                for t in targets {
+                    if let ExprKind::Variable(v) = &t.kind {
+                        written.insert(v.clone());
+                        current.insert(v.clone());
+                    }
+                }
+            }
+            Ast::Return(e) | Ast::Throw(e) => {
+                if let Some(e) = e {
+                    check_reads(e, current, early);
+                }
+                return None;
+            }
+            // `break` reaches the end of its switch or loop with what holds here.
+            Ast::Break => return state,
+            Ast::If { condition, yes, no } => {
+                check_reads(condition, current, early);
+                let before = current.clone();
+                let y = assignment_flow(yes, Some(before.clone()), written, early);
+                let o = assignment_flow(no, Some(before), written, early);
+                state = join(y, o);
+            }
+            Ast::While { condition, body } => {
+                check_reads(condition, current, early);
+                // The body may not run; afterwards only what held before is known.
+                let before = current.clone();
+                assignment_flow(body, Some(before), written, early);
+            }
+            Ast::For {
+                initializer,
+                condition,
+                increment,
+                body,
+            } => {
+                let after = assignment_flow(
+                    &[Ast::Statement((**initializer).clone())],
+                    Some(current.clone()),
+                    written,
+                    early,
+                )
+                .unwrap_or_default();
+                check_reads(condition, &after, early);
+                let end = assignment_flow(body, Some(after.clone()), written, early);
+                assignment_flow(
+                    &[Ast::Statement((**increment).clone())],
+                    Some(end.unwrap_or_else(|| after.clone())),
+                    written,
+                    early,
+                );
+                *current = after;
+            }
+            Ast::Switch {
+                value,
+                arms,
+                default,
+                ..
+            } => {
+                check_reads(value, current, early);
+                let before = current.clone();
+                let mut result = assignment_flow(default, Some(before.clone()), written, early);
+                for arm in arms {
+                    let end = assignment_flow(arm, Some(before.clone()), written, early);
+                    result = join(result, end);
+                }
+                state = result;
+            }
+            Ast::Try { body, handlers } => {
+                let before = current.clone();
+                let mut result = assignment_flow(body, Some(before.clone()), written, early);
+                let mut finally = None;
+                for h in handlers {
+                    // A handler may start before any statement of the body ran.
+                    let end = assignment_flow(&h.body, Some(before.clone()), written, early);
+                    if h.kind == "finally" {
+                        finally = end;
+                    } else {
+                        result = join(result, end);
+                    }
+                }
+                state = match (result, finally) {
+                    (Some(r), Some(f)) => Some(r.union(&f).cloned().collect()),
+                    (r, _) => r,
+                };
+            }
+            Ast::Label(_) | Ast::Goto(_) => return Some(HashSet::new()),
+        }
+    }
+    state
 }
 /// Roslyn lowers `switch` on a string into length, character or hash tests that end
 /// in one `s == "literal"` comparison per case. When every path ends either in such a
@@ -2860,6 +3052,12 @@ pub fn csharp_body(
     let ast = owned.as_slice();
     let enclosing = LOCAL_FUNCTIONS.with(|f| std::mem::take(&mut *f.borrow_mut()));
     line(&mut out, 0, "{");
+    // C# definite assignment: a local written before every read needs no initializer.
+    let assigned = if structured {
+        definitely_assigned(ast)
+    } else {
+        HashSet::new()
+    };
     for (i, t) in ir.locals.iter().enumerate() {
         line(
             &mut out,
@@ -2868,7 +3066,7 @@ pub fn csharp_body(
                 "{} {}{};",
                 type_name(a, t, token),
                 local(i),
-                if body.init_locals {
+                if body.init_locals && !assigned.contains(&format!("local{i}")) {
                     format!(" = default({})", type_name(a, t, token))
                 } else {
                     String::new()

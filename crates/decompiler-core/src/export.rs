@@ -126,7 +126,7 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
         // Record classes: the synthesized IEquatable<T> implementation is implied.
         let record = crate::records::record(a, n.token);
         for i in &a.metadata().interface_impls { if i.class == n.token & 0xffffff && !(record.is_some() && a.resolve_full(coded(i.interface)).starts_with("System.IEquatable")) { bases.push(a.resolve(coded(i.interface))); } }
-        if n.kind == "enum" && let Some(field) = children.get(&n.token).into_iter().flatten().find(|f| f.name == "value__") { bases = vec![a.format_type(&a.field_ref(field.token)?.2, n.token)]; }
+        if n.kind == "enum" && let Some(field) = children.get(&n.token).into_iter().flatten().find(|f| f.name == "value__") { let underlying = a.format_type(&a.field_ref(field.token)?.2, n.token); bases = if underlying == "int" { vec![] } else { vec![underlying] }; }
         let kind = if record.is_some() { "record" } else { n.kind.as_str() };
         let parameters = record.as_ref().map_or("", |r| r.parameters.as_str());
         let mut declaration = format!("{access}{modifier} {kind} {name}{generics}{parameters}{}{}", if bases.is_empty() { String::new() } else { format!(" : {}", bases.join(", ")) }, constraints(a, n.token)?);

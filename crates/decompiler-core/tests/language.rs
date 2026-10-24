@@ -164,3 +164,21 @@ fn conditionals_patterns_and_statement_idioms() {
     );
     assert!(!constructs.contains("key.Length"), "{constructs}");
 }
+#[test]
+fn declarations_read_like_source() {
+    let patterns =
+        Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Patterns.dll").to_vec())
+            .unwrap();
+    // Interface members carry no modifiers; an int enum names no underlying type.
+    assert_contains(
+        &view(&patterns, "ICalculator"),
+        &["        int Add(int left, int right);"],
+    );
+    let mode = view(&patterns, "Mode");
+    assert_contains(&mode, &["public enum Mode\n"]);
+    let editing =
+        Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+            .unwrap();
+    // `cgt.un` of a reference and null is the non-null test.
+    assert_contains(&view(&editing, "Operations"), &["return value != null;"]);
+}
