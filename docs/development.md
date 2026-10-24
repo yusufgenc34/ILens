@@ -53,6 +53,8 @@ A remote installation should use HTTPS, normally through a reverse proxy. Map th
 
 GitHub Actions runs on pushes, pull requests, and manual dispatch. Actions are pinned to reviewed commit SHAs; the workflow token has read-only repository access. Overlapping runs for the same ref are cancelled. Native checks use the pinned toolchain and lockfiles, and browser checks exercise actual DLL parsing through WASM.
 
+Firefox cannot launch on some macOS versions. `npm run test:e2e:firefox` runs the Firefox project in Docker instead, matching CI: it builds `docker/e2e.Dockerfile` (the Playwright image plus the .NET 10 SDK and Python for export/ILVerify checks), forwards the host's dev servers (Vite on 5173, rari's RSC server on 3000) into the container with socat, and keeps NuGet packages in the `ilens-e2e-nuget` volume. Start `npm run dev` first; extra arguments go to Playwright, for example `npm run test:e2e:firefox -- -g "hex editor"`. Results are written to `test-results/docker`.
+
 Development and production Playwright results are kept separately in `test-results/dev` and `test-results/production`. HTML reports live in `playwright-report`. CI retains browser diagnostics on failure for seven days. These directories are ignored by Git and Docker.
 
 The production browser config accepts `PLAYWRIGHT_BASE_URL` to test an already running Docker or production server without launching another server:

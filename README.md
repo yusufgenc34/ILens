@@ -11,7 +11,9 @@ This is an early decompiler release. Reconstructed code is not the original sour
 ## Features
 
 - Assembly → module → namespace → type → member explorer with direct member lists, signature labels, property/event accessors, virtualized rows, and keyboard navigation.
+- dnSpy-style C# type views with usings, token comments, records, async/iterator methods, lambdas, local functions, pattern matching, string switches and other C# idioms; every sample's exported project compiles.
 - Independent C#, IL, metadata, and raw-byte views with resolved metadata tokens.
+- A whole-file hex editor linked to PE header offsets, a decoded metadata table viewer, and a docked Search window with kind filters.
 - Local search across declarations, resource names and strings.
 - All loaded assemblies in one Explorer, with reference navigation and exact assembly identity matching.
 - Automatic dependency resolution when opening EXE/DLL files, using a selected folder and supported Microsoft .NET reference packs from NuGet.
@@ -24,7 +26,7 @@ This is an early decompiler release. Reconstructed code is not the original sour
 - Bounds-checked parsing, structured diagnostics, cancellation, and explicit workspace cleanup.
 - Project export with a Visual Studio solution, per-assembly C# projects, namespace folders, resources and project references.
 - Separate method/type source downloads and inspection archives with IL and completeness reports.
-- A scoped IL editor with undo/redo, write validation, and modified DLL/EXE downloads for supported unsigned assemblies.
+- An IL editor with undo/redo and write verification for static/instance methods, constructors, generics, structs and managed pointers, exception regions, new string literals and locals, and external types from loaded dependencies; Add Field/Add Method with token renumbering; verified modified DLL/EXE downloads for supported unsigned assemblies.
 
 ## Quick start
 
@@ -162,6 +164,7 @@ The warning panel separates metadata evidence from heuristic findings. This capt
 | `npm run lint` | Run frontend lint and Rust Clippy |
 | `npm run format:check` | Check Rust formatting |
 | `npm run test:e2e` | Test the development application in Chromium, Firefox, WebKit and phone emulation |
+| `npm run test:e2e:firefox` | Run the Firefox project in a Linux Docker container against the running dev server |
 | `npm run test:production` | Test the production application in the same browsers |
 | `npm run fixtures` | Regenerate test DLLs using the .NET 10 SDK |
 
@@ -226,14 +229,16 @@ WebCIL, PDB loading, type forwarding, and multi-module resolution are not implem
 
 Obfuscation detection recognizes selected metadata markers and naming heuristics. It is not a universal detector or deobfuscator; missing markers do not prove a file is unobfuscated. See [inspection rules](docs/assembly-inspection.md).
 
-Source exports can be partial; generated solutions and projects are not guaranteed to compile. IL editing supports nongeneric static/instance reference-class methods, vectors and jagged arrays, primitive and verified local enum boxing/casts, local fields and supported calls. Generics, constructor bodies, other custom value types, external enums and exception handlers remain read-only. Binary output is restricted to supported unsigned x86/x64 managed PE layouts. See [export and editing support](docs/export-edit.md) for exact limits.
+Source exports can be partial; generated solutions and projects are not guaranteed to compile, although every repository sample's export does. Unsupported constructs such as `fixed` statements stay in IL with a stated reason. IL editing covers static and instance methods, constructors and type initializers, generic methods and members of generic types, local structs, ref/out parameters and managed pointers, multidimensional arrays, try/catch/finally/fault regions, new `ldstr` literals and locals, and external classes, structs and enums when their assembly is loaded. Filter clauses, methods returning managed pointers, explicit-layout and generic structs remain read-only; new types and references cannot be added yet. Raw hex patches are checked for parseability but bypass IL verification. Binary output is restricted to supported unsigned x86/x64 managed PE layouts. See [export and editing support](docs/export-edit.md) for exact limits.
 
-Browser tests run in desktop Chromium, Firefox and WebKit (Safari's engine), and a phone layout runs in Pixel 7 and iPhone 14 emulation. Select one engine with `npm run test:e2e -- --project=webkit`. On narrow screens the Assembly Explorer and Inspector become drawers, and a long press opens the declaration menu. Optional NuGet extraction also requires `DecompressionStream('deflate-raw')`; if unavailable, add dependencies locally. Use localhost HTTP or HTTPS; opening files through `file://` is unsupported. No browser extension, managed runtime, or shared-memory configuration is required.
+Browser tests run in desktop Chromium, Firefox and WebKit (Safari's engine), and a phone layout runs in Pixel 7 and iPhone 14 emulation. Select one engine with `npm run test:e2e -- --project=webkit`. Where Firefox cannot launch locally, `npm run test:e2e:firefox` runs it in Docker. On narrow screens the Assembly Explorer and Inspector become drawers, and a long press opens the declaration menu. Optional NuGet extraction also requires `DecompressionStream('deflate-raw')`; if unavailable, add dependencies locally. Use localhost HTTP or HTTPS; opening files through `file://` is unsupported. No browser extension, managed runtime, or shared-memory configuration is required.
 
 ## Documentation
 
 - [Changelog](CHANGELOG.md)
 - [Source export and IL editing](docs/export-edit.md)
+- [IL write verification](docs/il-verification.md)
+- [Design note: editing methods in C#](docs/csharp-editing.md)
 - [Source export and assembly editing roadmap](docs/roadmap.md)
 - [Architecture and worker API](docs/architecture.md)
 - [Dependency folders, navigation, Analyze and resources](docs/workspace-inspection.md)

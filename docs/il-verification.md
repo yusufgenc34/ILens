@@ -14,20 +14,22 @@ Reference assignment accepts exact identities, reference-to-object, reference-ar
 
 ## Supported expansion
 
-- Nongeneric static methods and initialized instance methods on reference classes, with `this` at argument zero.
-- Primitive, string, object and supported named-reference parameters/results/initialized locals.
-- Zero-based vectors and jagged arrays: `newarr`, `ldlen`, supported `ldelem`/`stelem` forms, typed indices and element checks.
-- Primitive and verified local enum boxing, `unbox.any`, and supported `castclass`/`isinst` targets.
-- Nongeneric `call` and `callvirt`, with signature/static-flag checks and typed receivers/arguments/results.
-- `newobj` for concrete, non-interface local reference classes with accessible CIL constructor definitions and a fully local base chain ending at System.Object. Delegate/runtime constructors require separate function-pointer validation and remain blocked.
-- Local `ldfld`, `stfld`, `ldsfld` and `stsfld`, with receiver/static/accessibility/read-only checks. Properties work through methods and backing fields.
-- Numeric operations, strings, branches, switches and returns; `throw` checks an object reference and empties the stack. `ldlen` produces a native integer, which must be converted or used appropriately.
+- Static and instance methods on classes and local structs; struct instance methods receive `this` as a managed pointer.
+- Instance constructors track an uninitialized `this` until their `base(...)`/`this(...)` call: only stores into the type's own fields may precede it, every path must make it before `ret`, and paths reaching a block must agree. Struct constructors and type initializers are ordinary bodies. Init-only fields may be assigned by their own type's constructor or initializer.
+- Generic methods and members of generic types: type parameters are opaque values (references under `where T : class`) that must be boxed to become objects; MethodSpec calls and members of instantiated types verify against substituted signatures; fields of local generic types are reached through their instantiation.
+- Primitive, string, object, class, struct, enum, vector, multidimensional array and `ref T` parameters, results and locals. Edits may declare new locals; methods returning managed pointers stay closed.
+- Managed pointers: `ldloca`/`ldarga`/`ldflda` produce them, `ldind`/`stind` widths must match the pointed-to storage, `ldobj`/`stobj`/`initobj` need a pointer to exactly their type, struct fields are reached through a pointer (loads also through the value), and `new S(...)` may construct in place on an address. Pointers merge only with identical pointers and cannot be stored in fields, arrays or boxes.
+- Vectors, jagged and multidimensional arrays (runtime `Get`/`Set`/`Address` and constructors, one int32 index per dimension).
+- Boxing, `unbox.any`, `castclass`/`isinst`; `call`/`callvirt`/`newobj` with signature, static-flag, receiver and accessibility checks; `newobj` for concrete local classes and structs, and for external ones when their assembly is loaded.
+- Exception regions (catch, finally, fault): ranges on instruction boundaries and disjoint or nested; protected ranges entered at their first instruction with an empty stack; `leave` exits enclosing ranges but never a finally/fault handler; `endfinally` only in finally/fault handlers; `rethrow` only in catch handlers; no `ret` inside a range. Catch handlers start with the caught exception, others with an empty stack.
+- New user-string literals (`ldstr "text"`) through placeholder tokens that the writer replaces after appending them to #US.
+- Accessibility (ECMA-335 I.8.5.3): nested types see their enclosing types' private members; family members are visible to derived types, instance members only through a receiver of the accessing type. Members of other assemblies are visible when public, or family from derived types.
 
-Field writes to literal/init-only fields are rejected. Explicit-layout fields and cross-type protected access remain closed pending their additional verification rules. External call signatures may be used, but external constructor/field definitions and unknown type kinds cannot be inferred from method names. Loading a dependency for navigation does not yet extend the write verifier's definition resolver.
+With dependencies loaded, the session resolves the assembly's TypeRefs and MemberRefs against them: external classes, interfaces, structs and enums (with their underlying type), base types and interfaces for assignability, member flags for accessibility and external fields. Without the dependency, nothing about an external type is inferred from its name.
 
 ## Remaining work
 
-Generics and constraints, custom structs and external enums, managed addresses/byrefs, constructor initialization states, prefixes, exception handler/filter/finally regions, array general shapes and external hierarchy resolution require additional work. They remain explicit limitations. New members, signatures, string tokens and metadata heap growth are outside this writer. There is no unchecked or force-save bypass.
+Filter clauses, explicit-layout and generic structs, methods returning managed pointers, unmanaged and function pointers, prefixes (`constrained.`, `volatile.`, `tail.`) and exception regions inside instance constructors remain explicit limitations. New types and references cannot be created; new fields and methods can, with token renumbering. There is no unchecked or force-save bypass for IL edits; raw hex patches are a separate, explicitly unverified path.
 
 This is a bounded verifier for the supported editing domain, not a complete ECMA-335 verifier. It does not prove runtime behavior, array bounds, successful casts, dependency availability or equivalence to the original program. A legal edit can intentionally change behavior.
 
@@ -41,4 +43,4 @@ References: [ECMA-335, partitions I and III](https://ecma-international.org/publ
 
 ### Local enum editing
 
-Local nongeneric enums are admitted only after checking their scoped System.Enum base, sealed value-type flags and single integral `value__` storage field. The verifier retains enum identity for boxing and typed tokens while checking byte/short/int/long array opcodes against the underlying storage width. Other structs and external enum definitions remain unsupported. `samples/Workspace` covers enum parameters, returns, array loads/stores and boxing/unboxing; Rust rejects a mismatched element-width edit, and browser tests statically verify the downloaded assembly using ILVerify and reopen it.
+Local nongeneric enums are admitted only after checking their scoped System.Enum base, sealed value-type flags and single integral `value__` storage field. The verifier retains enum identity for boxing and typed tokens while checking byte/short/int/long array opcodes against the underlying storage width. Local structs and, with their assembly loaded, external enums and structs are supported as described above. `samples/Workspace` covers enum parameters, returns, array loads/stores and boxing/unboxing; Rust rejects a mismatched element-width edit, and browser tests statically verify the downloaded assembly using ILVerify and reopen it.
