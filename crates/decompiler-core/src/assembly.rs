@@ -1640,7 +1640,8 @@ pub fn strip_arity(name: &str) -> String {
     }
     out
 }
-fn substitute(t: &Type, types: &[Type], methods: &[Type]) -> Type {
+/// Replaces `!n`/`!!n` in `t` with type and method generic arguments.
+pub fn substitute(t: &Type, types: &[Type], methods: &[Type]) -> Type {
     match t {
         Type::Generic { method, index } => if *method { methods } else { types }
             .get(*index as usize)

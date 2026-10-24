@@ -33,6 +33,11 @@ pub enum Value {
     Array(TypeId),
     Boxed(TypeId),
     Enum(u32, TypeId),
+    /// A generic parameter of the verified method (true) or its type: (method, index,
+    /// constrained to reference types).
+    Generic(bool, u32, bool),
+    /// A constructed generic type: (definition, interned argument list, is a class).
+    Instance(u32, usize, bool),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stack {
@@ -41,6 +46,9 @@ pub enum Stack {
     I,
     F,
     Ref(TypeId),
+    /// A value whose type is known only by identity: a generic parameter that may be a
+    /// value type, or a constructed generic struct.
+    Value(TypeId),
     Null,
     /// `this` in an instance constructor before its base or chained constructor call.
     This,
@@ -57,7 +65,13 @@ impl Value {
     pub fn reference(self) -> bool {
         matches!(
             self,
-            Self::Object | Self::String | Self::Class(_) | Self::Array(_) | Self::Boxed(_)
+            Self::Object
+                | Self::String
+                | Self::Class(_)
+                | Self::Array(_)
+                | Self::Boxed(_)
+                | Self::Generic(_, _, true)
+                | Self::Instance(_, _, true)
         )
     }
 }
@@ -73,6 +87,11 @@ pub struct Types<'a> {
     pub initializer: Option<bool>,
     /// On the path being verified, whether the constructor already called its base.
     pub this_initialized: bool,
+    /// The verified method and its declaring type, whose generic parameters `!!n`/`!n`
+    /// name.
+    pub context: (u32, u32),
+    lists: Vec<Vec<TypeId>>,
+    interned_lists: HashMap<Vec<TypeId>, usize>,
 }
 impl<'a> Types<'a> {
     pub fn new(a: &'a Assembly) -> Self {
@@ -85,6 +104,9 @@ impl<'a> Types<'a> {
             pending_strings: 0,
             initializer: None,
             this_initialized: true,
+            context: (0, 0),
+            lists: vec![],
+            interned_lists: HashMap::new(),
         }
     }
     fn spend(&self) -> Result<()> {
@@ -124,6 +146,7 @@ impl<'a> Types<'a> {
             Value::I8 | Value::U8 => Stack::I8,
             Value::I | Value::U => Stack::I,
             Value::R4 | Value::R8 => Stack::F,
+            Value::Generic(_, _, false) | Value::Instance(_, _, false) => Stack::Value(id),
             _ => Stack::Ref(id),
         }
     }
@@ -236,9 +259,36 @@ impl<'a> Types<'a> {
             Type::Array(_, _) | Type::MultiArray(_, _) => Err(unsupported(
                 "Multidimensional and non-zero-based arrays are not editable yet; zero-based vectors and jagged arrays are supported",
             )),
-            Type::Generic { .. } | Type::GenericInstance { .. } => Err(unsupported(
-                "Generic methods and constructed generic types require generic-aware IL validation",
-            )),
+            Type::Generic { method, index } => {
+                let owner = if *method {
+                    self.context.0
+                } else {
+                    self.context.1
+                };
+                if owner == 0 {
+                    return Err(unsupported("Generic parameters outside a generic context"));
+                }
+                // `where T : class` makes T a reference; otherwise it may be a value.
+                let reference = self.a.metadata().generic_params.iter().any(|p| {
+                    coded(p.owner) == owner && u32::from(p.number) == *index && p.flags & 4 != 0
+                });
+                self.intern(Value::Generic(*method, *index, reference))
+            }
+            Type::GenericInstance { base, args } => {
+                let (Type::Named(definition) | Type::ValueType(definition)) = base.as_ref() else {
+                    return Err(invalid("Malformed generic instance"));
+                };
+                let mut ids = Vec::with_capacity(args.len());
+                for arg in args {
+                    ids.push(self.signature_depth(arg, depth + 1)?);
+                }
+                let list = self.list(ids)?;
+                self.intern(Value::Instance(
+                    *definition,
+                    list,
+                    matches!(base.as_ref(), Type::Named(_)),
+                ))
+            }
             Type::ByRef(_) | Type::Pointer(_) | Type::FunctionPointer(_) => Err(unsupported(
                 "Byref, pointer and function-pointer signatures require address/lifetime validation",
             )),
@@ -298,10 +348,34 @@ impl<'a> Types<'a> {
             }
             2 => {
                 let row = &self.a.metadata().type_defs[(token & 0xffffff) as usize - 1];
-                if self.a.generics.contains_key(&token) {
-                    return Err(unsupported(
-                        "Methods on generic declaring types are not editable yet",
-                    ));
+                // A generic definition named by itself is its instance over its own
+                // parameters, as `this` in its methods.
+                if let Some(parameters) = self.a.generics.get(&token) {
+                    if token != self.context.1 {
+                        return Err(unsupported(
+                            "Open generic types are only verified as the declaring type",
+                        ));
+                    }
+                    let count = parameters.len() as u32;
+                    let ids = (0..count)
+                        .map(|index| {
+                            self.signature_depth(
+                                &Type::Generic {
+                                    method: false,
+                                    index,
+                                },
+                                depth + 1,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let list = self.list(ids)?;
+                    let class = !matches!(
+                        self.core_name(coded(row.extends))?.as_deref(),
+                        Some("ValueType" | "Enum")
+                    );
+                    let id = self.intern(Value::Instance(token, list, class))?;
+                    self.tokens.insert(token, id);
+                    return Ok(id);
                 }
                 match self.core_name(coded(row.extends))?.as_deref() {
                     Some("Enum") => {
@@ -373,11 +447,22 @@ impl<'a> Types<'a> {
             value => value,
         }
     }
+    fn list(&mut self, ids: Vec<TypeId>) -> Result<usize> {
+        if let Some(index) = self.interned_lists.get(&ids) {
+            return Ok(*index);
+        }
+        if self.lists.len() >= 4096 {
+            return Err(Error::limit("Too many generic instantiations"));
+        }
+        self.lists.push(ids.clone());
+        self.interned_lists.insert(ids, self.lists.len() - 1);
+        Ok(self.lists.len() - 1)
+    }
     pub fn compatible(&self, actual: Stack, expected: Stack) -> Result<bool> {
         self.spend()?;
         Ok(actual == expected
             || match (actual, expected) {
-                (Stack::Null, Stack::Ref(_)) => true,
+                (Stack::Null, Stack::Ref(b)) => self.value(b).reference(),
                 (Stack::Ref(a), Stack::Ref(b)) => self.assignable(a, b, 0)?,
                 _ => false,
             })
@@ -457,6 +542,7 @@ impl<'a> Types<'a> {
         match ty {
             Stack::Ref(id) => self.describe_value(id),
             Stack::This => "uninitialized this".to_owned(),
+            Stack::Value(id) => self.describe_value(id),
             _ => format!("{ty:?}"),
         }
     }
@@ -465,6 +551,18 @@ impl<'a> Types<'a> {
             Value::Class(t) | Value::Enum(t, _) => self.a.resolve(t),
             Value::Array(e) => format!("{}[]", self.describe_value(e)),
             Value::Boxed(e) => format!("boxed {}", self.describe_value(e)),
+            Value::Generic(method, index, _) => {
+                format!("{}{index}", if method { "!!" } else { "!" })
+            }
+            Value::Instance(t, list, _) => format!(
+                "{}<{}>",
+                self.a.resolve(t),
+                self.lists[list]
+                    .iter()
+                    .map(|a| self.describe_value(*a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             v => format!("{v:?}"),
         }
     }

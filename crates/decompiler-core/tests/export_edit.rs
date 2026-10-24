@@ -603,3 +603,43 @@ fn nested_and_derived_types_follow_accessibility_rules() {
     let error = edit::validate(&a, base, &through_base).unwrap_err();
     assert!(error.detail.contains("accessibility"), "{}", error.detail);
 }
+#[test]
+fn generic_methods_and_types_are_editable() {
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let rows = |token: u32| cil_encode::from_body(&a.body(token).unwrap().unwrap());
+    // Unchanged generic bodies verify: parameters, instantiated calls, boxing, fields.
+    for name in [
+        "First",
+        "Boxed",
+        "Pick",
+        "Describe",
+        "UseBox",
+        "CallFirst",
+        "Get",
+        "Set",
+        "Generic",
+    ] {
+        let token = method(&a, name);
+        edit::validate(&a, token, &rows(token)).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+    }
+    // A type parameter value is not an object without boxing.
+    let boxed = method(&a, "Boxed");
+    let mut unboxed = rows(boxed);
+    unboxed.retain(|r| r.opcode != "box");
+    let error = edit::validate(&a, boxed, &unboxed).unwrap_err();
+    assert!(error.detail.contains("Expected"), "{}", error.detail);
+    // Swapping Pick's branches stays well-typed and writes.
+    let pick = method(&a, "Pick");
+    let mut swapped = rows(pick);
+    for r in &mut swapped {
+        r.opcode = match r.opcode.as_str() {
+            "ldarg.1" => "ldarg.2".into(),
+            "ldarg.2" => "ldarg.1".into(),
+            other => other.into(),
+        };
+    }
+    let edit = edit::validate(&a, pick, &swapped).unwrap();
+    let output = pe_write::write(&a, &BTreeMap::from([(pick, edit)])).unwrap();
+    Assembly::load(output).unwrap();
+}

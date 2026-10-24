@@ -73,3 +73,20 @@ public class VaultChild : Vault
     public static int ReadOther(VaultChild other) => other.Hidden;
     public static int ReadBase(Vault other) => 0;
 }
+// Generic methods and types: type parameters, instantiated members and boxing.
+public class Box<T>
+{
+    public T Item;
+    public Box(T item) { Item = item; }
+    public T Get() => Item;
+    public void Set(T item) { Item = item; }
+}
+public static class Generics
+{
+    public static T First<T>(T[] items) => items[0];
+    public static object Boxed<T>(T value) => value!;
+    public static T Pick<T>(bool flag, T a, T b) => flag ? a : b;
+    public static string? Describe<T>(T value) where T : class => value.ToString();
+    public static int UseBox(Box<int> box) => box.Get();
+    public static int CallFirst(int[] items) => First(items);
+}

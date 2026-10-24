@@ -288,7 +288,6 @@ fn reference_merges_widen_and_revisit_successors() {
 fn unsupported_signatures_have_specific_diagnostics() {
     let a = Assembly::load(EDIT.to_vec()).unwrap();
     for (name, detail) in [
-        ("Generic", "Generic methods"),
         ("Matrix", "Multidimensional"),
         ("ByRef", "Byref"),
         ("Struct", "structs"),
@@ -299,6 +298,8 @@ fn unsupported_signatures_have_specific_diagnostics() {
         assert_eq!(error.code, ErrorCode::UnsupportedEdit);
         assert!(error.detail.contains(detail), "{name}: {error}");
     }
+    // Generic methods open; their type parameter is an opaque value.
+    edit::preview(&a, token(&a, "Generic"), 0, None).unwrap();
     // try/catch methods open with their clause.
     let preview = edit::preview(&a, token(&a, "ExceptionRegion"), 0, None).unwrap();
     assert_eq!(preview.regions.len(), 1);

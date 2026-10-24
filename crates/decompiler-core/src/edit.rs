@@ -162,11 +162,6 @@ pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
     }
     let row = a.method_row(token)?;
     let method = a.method_ref(token)?;
-    if method.signature.generic_count != 0 || a.generics.contains_key(&method.owner) {
-        return Err(unsupported(
-            "Generic methods and generic declaring types require generic-aware IL validation",
-        ));
-    }
     if method.signature.explicit_this
         || method.signature.vararg_at.is_some()
         || method.signature.convention != 0
@@ -184,6 +179,7 @@ pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
         return Err(invalid("Method signature disagrees with its static flag"));
     }
     let mut types = Types::new(a);
+    types.context = (token, method.owner);
     if method.signature.has_this {
         let owner = types.token(method.owner)?;
         if !types.value(owner).reference() {
@@ -570,6 +566,7 @@ pub fn verify_with(
     let method = a.method_ref(token)?;
     let sig = &method.signature;
     let mut types = Types::new(a);
+    types.context = (token, method.owner);
     types.pending_strings = pending_strings;
     types.initializer = match method.name.as_str() {
         ".ctor" => Some(false),
@@ -965,11 +962,17 @@ fn transfer(
         0x7b | 0x7d | 0x7e | 0x80 => field(types, owner, stack, i)?,
         0x8c => {
             let id = types.token(operand(i)?)?;
-            if types.value(id).reference() {
+            let generic = matches!(types.value(id), Value::Generic(..));
+            if types.value(id).reference() && !generic {
                 return Err(unsupported("box on reference types is not supported"));
             }
             expect(types, stack, types.stack(id))?;
-            stack.push(Stack::Ref(types.intern(Value::Boxed(id))?));
+            // Boxing a reference-constrained parameter leaves the reference as is.
+            stack.push(Stack::Ref(if types.value(id).reference() {
+                id
+            } else {
+                types.intern(Value::Boxed(id))?
+            }));
         }
         0x8d => {
             index(stack)?;
@@ -995,6 +998,21 @@ fn transfer(
     }
     Ok(())
 }
+/// The (definition, arguments) of a TypeSpec that instantiates a generic type.
+fn generic_instance(a: &Assembly, spec: u32) -> Option<(u32, Vec<crate::signature::Type>)> {
+    use crate::signature::Type;
+    let row = a
+        .metadata()
+        .type_specs
+        .get((spec & 0xff_ffff).checked_sub(1)? as usize)?;
+    match crate::signature::type_spec(a.blob(row.signature).ok()?).ok()? {
+        Type::GenericInstance { base, args } => match *base {
+            Type::Named(definition) | Type::ValueType(definition) => Some((definition, args)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 fn operand(i: &cil::Instruction) -> Result<u32> {
     i.token()
         .ok_or_else(|| invalid("Instruction is missing a metadata token"))
@@ -1006,27 +1024,41 @@ fn call(
     i: &cil::Instruction,
 ) -> Result<()> {
     let token = operand(i)?;
-    if !matches!(token >> 24, 6 | 10) {
+    if !matches!(token >> 24, 6 | 10 | 43) {
         return Err(unsupported(
-            "Only nongeneric MethodDef/MemberRef calls can be edited",
+            "Only MethodDef, MemberRef and MethodSpec calls can be edited",
         ));
     }
     types.a.validate_token(token)?;
+    // The definition or reference a MethodSpec instantiates; its signature arrives
+    // with the type and method arguments substituted.
+    let definition = if token >> 24 == 43 {
+        crate::assembly::coded(
+            types.a.metadata().method_specs[(token & 0xffffff) as usize - 1].method,
+        )
+    } else {
+        token
+    };
     let m = types.a.method_ref(token)?;
     let sig = &m.signature;
-    if sig.generic_count != 0
-        || !m.generic_args.is_empty()
-        || sig.explicit_this
-        || sig.vararg_at.is_some()
-        || sig.convention != 0
-    {
-        return Err(unsupported(
-            "Generic, explicit-this and vararg calls require additional validation",
+    if sig.generic_count as usize != m.generic_args.len() {
+        return Err(invalid(
+            "A generic method is called through a MethodSpec with all of its type arguments",
         ));
     }
-    if types.a.generics.contains_key(&m.owner) || m.owner >> 24 == 27 {
+    if sig.explicit_this || sig.vararg_at.is_some() || sig.convention != 0 {
         return Err(unsupported(
-            "Calls on constructed generic/array types require additional validation",
+            "Explicit-this and vararg calls require additional validation",
+        ));
+    }
+    if m.owner >> 24 == 2 && types.a.generics.contains_key(&m.owner) && m.owner != types.context.1 {
+        return Err(invalid(
+            "Members of a generic type are called through a TypeSpec instantiation",
+        ));
+    }
+    if m.owner >> 24 == 27 && generic_instance(types.a, m.owner).is_none() {
+        return Err(unsupported(
+            "Calls on array and other constructed types require additional validation",
         ));
     }
     let constructor = i.opcode == 0x73;
@@ -1119,8 +1151,8 @@ fn call(
     if i.opcode == 0x6f && !sig.has_this {
         return Err(invalid("callvirt requires an instance method"));
     }
-    if token >> 24 == 6 {
-        let row = types.a.method_row(token)?;
+    if definition >> 24 == 6 {
+        let row = types.a.method_row(definition)?;
         if sig.has_this == (row.flags & 16 != 0) {
             return Err(invalid("Call signature disagrees with static method flags"));
         }
@@ -1180,15 +1212,44 @@ fn field(
     i: &cil::Instruction,
 ) -> Result<()> {
     let token = operand(i)?;
-    if token >> 24 != 4 {
-        return Err(unsupported(
-            "External field edits require resolved field definitions; local fields are supported",
-        ));
-    }
     types.a.validate_token(token)?;
-    let row = &types.a.metadata().fields[(token & 0xffffff) as usize - 1];
-    let (owner, _, ty) = types.a.field_ref(token)?;
-    types.token(owner)?;
+    // A field of a local generic type is referenced through its instantiation; the
+    // definition supplies flags and owner, the instantiation the field's type.
+    let (field_token, owner, instance, ty) = match token >> 24 {
+        4 => {
+            let (owner, _, ty) = types.a.field_ref(token)?;
+            (token, owner, owner, ty)
+        }
+        10 => {
+            let (parent, name, ty) = types.a.field_ref(token)?;
+            let Some((definition, args)) = (parent >> 24 == 27)
+                .then(|| generic_instance(types.a, parent))
+                .flatten()
+            else {
+                return Err(unsupported(
+                    "External field edits require resolved field definitions; local fields are supported",
+                ));
+            };
+            let field = types
+                .a
+                .nodes
+                .iter()
+                .find(|n| n.parent == definition && n.token >> 24 == 4 && n.name == name)
+                .ok_or_else(|| {
+                    unsupported("Fields of external generic types require their definitions")
+                })?
+                .token;
+            (
+                field,
+                definition,
+                parent,
+                crate::assembly::substitute(&ty, &args, &[]),
+            )
+        }
+        _ => return Err(invalid("Field instructions require a field token")),
+    };
+    let row = &types.a.metadata().fields[(field_token & 0xffffff) as usize - 1];
+    types.token(instance)?;
     let declaring = &types.a.metadata().type_defs[(owner & 0xffffff) as usize - 1];
     if declaring.flags & 0x18 == 0x10 {
         return Err(unsupported(
@@ -1229,7 +1290,7 @@ fn field(
         return Ok(());
     }
     if !is_static {
-        let target = types.token(owner)?;
+        let target = types.token(instance)?;
         if !types.value(target).reference() {
             return Err(unsupported(
                 "Value-type fields require managed-address validation",
