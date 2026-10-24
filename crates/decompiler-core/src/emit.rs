@@ -2571,6 +2571,7 @@ pub fn csharp_body(
     crate::tidy::using_statements(&mut lines);
     crate::tidy::lock_statements(&mut lines);
     crate::tidy::interpolated_strings(&mut lines);
+    crate::tidy::type_patterns(&mut lines);
     crate::tidy::inline_temporaries(&mut lines);
     crate::tidy::compound_assignments(&mut lines);
     crate::tidy::while_to_for(&mut lines);

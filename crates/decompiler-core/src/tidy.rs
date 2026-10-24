@@ -329,7 +329,7 @@ pub fn inline_temporaries(lines: &mut Vec<String>) {
             }
             // Operators around the use keep precedence when the value is parenthesized.
             // Navigation markers around identifiers do not affect precedence.
-            let simple = plain(value)
+            let name_like = plain(value)
                 .chars()
                 .all(|c| c.is_alphanumeric() || c == '_' || c == '.');
             let rest = &next[at + name.len()..];
@@ -337,7 +337,20 @@ pub fn inline_temporaries(lines: &mut Vec<String>) {
                 && !before
                     .trim_end()
                     .ends_with(['+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '!']);
-            let value = if simple || tight {
+            // `(T)name` binds tighter than any operator; only a following member
+            // access, indexer, call or postfix operator would apply to `name` instead.
+            let shown = plain(value);
+            let cast = shown.starts_with('(')
+                && shown.find(')').is_some_and(|close| {
+                    let (ty, operand) = (&shown[1..close], &shown[close + 1..]);
+                    !ty.is_empty()
+                        && ty
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || "_.<>, []?".contains(c))
+                        && simple(operand)
+                })
+                && rest.starts_with([' ', ';', ',', ')']);
+            let value = if name_like || tight || cast {
                 value.to_owned()
             } else {
                 format!("({value})")
@@ -957,6 +970,94 @@ pub fn nullable_member_access(lines: &mut Vec<String>) {
     }
 }
 
+/// Type patterns, as ILSpy shows them:
+/// `T x = e as T; if (x != null) { … }` with `x` used only inside becomes
+/// `if (e is T x) { … }`; with `if (x == null) { …exit }` the variable stays usable after
+/// it, `if (!(e is T x))`; and `if (!(e is T)) { …exit } T n = (T)e;` declares `n` in
+/// the test. Each `e` is a plain name, so moving it into the test changes no order.
+pub fn type_patterns(lines: &mut Vec<String>) {
+    let exits = |body: &[String]| {
+        body.last().is_some_and(|l| {
+            let l = l.trim();
+            l.starts_with("return") || l.starts_with("throw") || l == "break;" || l == "continue;"
+        })
+    };
+    let mut i = 0;
+    while i + 2 < lines.len() {
+        let rewritten = (|| {
+            let d = depth(&lines[i]);
+            let pad = " ".repeat(d * 4);
+            if let Some((ty, name, value)) = declaration(&lines[i])
+                && let Some((source, target)) = value.split_once(" as ")
+                && simple(&plain(source))
+                && plain(target) == plain(ty)
+                && !plain(ty).ends_with('?')
+                && lines[i + 2].trim() == "{"
+                && depth(&lines[i + 1]) == d
+            {
+                let end = close(lines, i + 2)?;
+                let body = &lines[i + 3..end];
+                let after = lines.get(end + 1).map(|l| l.trim());
+                let elsewhere = |range: &dyn Fn(usize) -> bool| {
+                    lines
+                        .iter()
+                        .enumerate()
+                        .any(|(k, l)| k != i && k != i + 1 && range(k) && mentions(l, name))
+                };
+                if (i + 3..end).any(|k| writes(&lines[k], name)) {
+                    return None;
+                }
+                let test = lines[i + 1].trim();
+                if test == format!("if ({name} != null)") && after != Some("else") {
+                    if elsewhere(&|k| !(i + 3..end).contains(&k)) {
+                        return None;
+                    }
+                    return Some((i + 1, format!("{pad}if ({source} is {ty} {name})")));
+                }
+                if test == format!("if ({name} == null)") && exits(body) && after != Some("else") {
+                    if (end + 1..lines.len()).any(|k| writes(&lines[k], name))
+                        || (i + 3..end).any(|k| mentions(&lines[k], name))
+                    {
+                        return None;
+                    }
+                    return Some((i + 1, format!("{pad}if (!({source} is {ty} {name}))")));
+                }
+                return None;
+            }
+            // if (!(e is T)) { …exit } T n = (T)e;
+            let test = lines[i].trim().strip_prefix("if (!(")?.strip_suffix("))")?;
+            let (source, ty) = test.split_once(" is ")?;
+            if !simple(&plain(source)) || lines[i + 1].trim() != "{" || depth(&lines[i + 1]) != d {
+                return None;
+            }
+            let end = close(lines, i + 1)?;
+            if !exits(&lines[i + 2..end]) || (i + 2..end).any(|k| writes(&lines[k], source)) {
+                return None;
+            }
+            let (declared, name, value) = declaration(lines.get(end + 1)?)?;
+            if plain(declared) != plain(ty)
+                || plain(value) != format!("({}){}", plain(ty), plain(source))
+                || depth(&lines[end + 1]) != d
+            {
+                return None;
+            }
+            if (end + 2..lines.len()).any(|k| writes(&lines[k], name)) {
+                return None;
+            }
+            let test = format!("{pad}if (!({source} is {ty} {name}))");
+            lines.remove(end + 1);
+            Some((i, test))
+        })();
+        if let Some((at, test)) = rewritten {
+            if at == i + 1 {
+                lines.splice(i..=at, [test]);
+            } else {
+                lines[at] = test;
+            }
+        }
+        i += 1;
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,5 +1241,20 @@ mod tests {
         );
         nullable_member_access(&mut access);
         assert_eq!(access, lines("{\n    return s?.Length;\n}"));
+    }
+    #[test]
+    fn type_patterns_keep_definite_assignment() {
+        let mut used_after = lines(
+            "{\n    string s = o as string;\n    if (s != null)\n    {\n        Use(s);\n    }\n    Use(s);\n}",
+        );
+        let original = used_after.clone();
+        type_patterns(&mut used_after);
+        // `s` would be unassigned after the test.
+        assert_eq!(used_after, original);
+        let mut guard = lines(
+            "{\n    string s = o as string;\n    if (s == null)\n    {\n        return;\n    }\n    Use(s);\n}",
+        );
+        type_patterns(&mut guard);
+        assert_eq!(guard[1], "    if (!(o is string s))");
     }
 }

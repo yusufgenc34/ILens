@@ -28,7 +28,8 @@ fn operators_constructors_and_framework_members() {
             "public static Money operator +(Money left, Money right)",
             "return new Money(left.Amount + right.Amount);",
             "return !(left == right);",
-            "if (!(obj is Money))",
+            "if (!(obj is Money money))",
+            "return money.Amount == this.Amount;",
         ],
     );
     // Synthesized record members are implied by the declaration, as dnSpy shows it.
@@ -132,4 +133,26 @@ fn iterator_finally_async_iterators_and_spilled_awaits() {
         !constructs.contains("State-machine reconstruction"),
         "{constructs}"
     );
+}
+#[test]
+fn conditionals_patterns_and_statement_idioms() {
+    let a = Assembly::load(LANGUAGE.to_vec()).unwrap();
+    let constructs = view(&a, "Constructs");
+    assert_contains(
+        &constructs,
+        &[
+            "return value > 0 ? \"positive\" : \"other\";",
+            "return text ?? \"none\";",
+            "return text?.Length;",
+            "if (value is string text)\n            {\n                return text;\n            }\n            if (!(value is int num))\n            {\n                return \"other\";\n            }\n            return num > 3 ? \"big\" : \"other\";",
+            "return value == 0 ? \"zero\" : value == 1 ? \"one\" : \"many\";",
+            "return $\"{name} has {count} items\";",
+            "return new Point(1, 2) with { Y = 5 };",
+            "return new List<int> { 1, 2, 3 };",
+            "return new StringBuilder { Capacity = 64 };",
+            "lock (Constructs.Gate)\n            {\n                Constructs.counter++;\n            }",
+        ],
+    );
+    // No jump enters a nested block.
+    assert!(!constructs.contains("goto IL_00D5"), "{constructs}");
 }
