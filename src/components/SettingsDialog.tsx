@@ -33,6 +33,9 @@ export default function SettingsDialog({settings, onChange, appearance, onAppear
         <label><input type="checkbox" checked={settings.highlighting} onChange={e => update({highlighting: e.target.checked})} />Syntax highlighting</label>
         <label><input type="checkbox" checked={settings.lineNumbers} onChange={e => update({lineNumbers: e.target.checked})} />Line numbers</label>
         <label><input type="checkbox" checked={settings.wrap} onChange={e => update({wrap: e.target.checked})} />Word wrap</label>
+        <label><input type="checkbox" checked={settings.tokenComments} onChange={e => update({tokenComments: e.target.checked})} />Token comments in code</label>
+        <label><input type="checkbox" checked={settings.explorerTokens} onChange={e => update({explorerTokens: e.target.checked})} />Tokens in Assembly Explorer</label>
+        <label><input type="checkbox" checked={settings.hideGenerated} onChange={e => update({hideGenerated: e.target.checked})} />Hide compiler-generated members</label>
       </div>
       <div className="mb-5 border-t border-border pt-4"><label className="flex items-center gap-2 text-xs font-medium"><input type="checkbox" checked={onlineReferences} onChange={event=>onOnlineReferences(event.target.checked)} className="accent-primary"/>Download .NET references automatically</label><p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">When opening an EXE or DLL, automatically find and download missing Microsoft .NET reference metadata from nuget.org. Assembly contents are never sent. Other dependencies use your selected files or folder.</p></div>
       <div className="settings-preview-label flex justify-between text-muted-foreground text-[11px] mb-2">Preview<span>C#</span></div>

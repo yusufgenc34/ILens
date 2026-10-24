@@ -40,6 +40,10 @@ export interface Operations {
   applyMethodEdit: {input: {assembly: number; token: number; revision: number; instructions: EditableInstruction[]; locals?: string[]; regions?: EditRegion[]}; output: EditPreview}
   discardMethodEdit: {input: {assembly: number; token: number; revision: number}; output: EditPreview}
   getEdits: {input: {assembly: number}; output: EditsInfo}
+  readBytes: {input: {assembly: number; offset: number; length: number}; output: {buffer: ArrayBuffer}}
+  checkPatched: {input: {assembly: number; patches: [number, number][]}; output: string | null}
+  exportPatched: {input: {assembly: number; patches: [number, number][]}; output: {buffer: ArrayBuffer}}
+  getTableRows: {input: {assembly: number; table: number; start: number; count: number}; output: TableRows}
   addMember: {input: {assembly: number; revision: number; owner: number; member: NewMemberRequest}; output: {token: number; info: AssemblyInfo}}
   getOpcodes: {input: Record<string, never>; output: [string, string][]}
   exportModifiedAssembly: {input: {assembly: number; revision: number}; output: {buffer: ArrayBuffer}}
@@ -68,6 +72,8 @@ export interface EditRegion {kind: 'catch' | 'finally' | 'fault'; try_start: str
 export interface EditPreview {token: number; revision: number; instructions: EditableInstruction[]; original: EditableInstruction[]; changed: boolean; il: string; max_stack: number; code_size: number; locals: string[]; original_locals: string[]; regions: EditRegion[]; original_regions: EditRegion[]}
 /** A field or method to add; types use C# keywords, local type names or tokens. */
 export interface NewMemberRequest {kind: 'field' | 'method'; name: string; type: string; access: 'public' | 'internal' | 'protected' | 'private'; static: boolean; parameters: {name: string; type: string}[]}
+/** One page of a metadata table; cells that index a table carry the token. */
+export interface TableRows {table: number; columns: string[]; total: number; start: number; rows: {row: number; token: number; cells: {text: string; token?: number}[]}[]}
 export interface EditsInfo {revision: number; edit_revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null}
 export type Operation = keyof Operations
 export type Request = { [K in Operation]: {id: number; op: K} & Operations[K]['input'] }[Operation]

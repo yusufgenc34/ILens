@@ -260,6 +260,49 @@ impl Decompiler {
             .add_member(id, revision, owner, request)
             .map_err(error)?)
     }
+    pub fn get_table_rows(
+        &self,
+        id: u32,
+        table: u32,
+        start: u32,
+        count: u32,
+    ) -> Result<JsValue, JsValue> {
+        js(&self
+            .session
+            .table_rows(id, table as usize, start, count)
+            .map_err(error)?)
+    }
+    pub fn read_bytes(&self, id: u32, offset: u32, length: u32) -> Result<Vec<u8>, JsValue> {
+        self.session
+            .read_bytes(id, offset as usize, length as usize)
+            .map_err(error)
+    }
+    fn patches(patches: &str) -> Result<Vec<(usize, u8)>, JsValue> {
+        if patches.len() > 32 * 1024 * 1024 {
+            return Err(error(Error::limit("Patch list exceeds 32 MiB")));
+        }
+        serde_json::from_str(patches).map_err(|e| {
+            error(Error::new(
+                decompiler_core::error::ErrorCode::InvalidEdit,
+                e.to_string(),
+            ))
+        })
+    }
+    /// Why the patched file no longer parses, or null when it does.
+    pub fn check_patched(&self, id: u32, patches: &str) -> Result<JsValue, JsValue> {
+        let (_, problem) = self
+            .session
+            .patched_bytes(id, &Self::patches(patches)?)
+            .map_err(error)?;
+        js(&problem)
+    }
+    pub fn export_patched(&self, id: u32, patches: &str) -> Result<Vec<u8>, JsValue> {
+        let (bytes, _) = self
+            .session
+            .patched_bytes(id, &Self::patches(patches)?)
+            .map_err(error)?;
+        Ok(bytes)
+    }
     pub fn get_edits(&self, id: u32) -> Result<JsValue, JsValue> {
         js(&self.session.edits_info(id).map_err(error)?)
     }

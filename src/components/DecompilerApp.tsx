@@ -7,7 +7,7 @@ import { diagnostic, jsonText, tokenHex, type Declaration, type Diagnostic, type
 import {indexDependencyFolder, resolveDependencyFolder, type DependencyFolder} from '../lib/dependency-folder'
 import {companionAssembly} from '../lib/companion-assembly'
 import {resolveAutomaticDependencies} from '../lib/automatic-dependencies'
-import { createWorkspaceTree, isPeToken, peGroups, peTokens, type TreeNode } from '../lib/tree'
+import { createWorkspaceTree, isPeToken, isTableToken, peGroups, peTokens, tableToken, type TreeNode } from '../lib/tree'
 import PeView from './PeView'
 import ProtectionView, {describeReport, verdictLabels} from './ProtectionView'
 import type { MenuAction } from './AppMenuBar'
@@ -24,8 +24,11 @@ import ProjectExportDialog from './ProjectExportDialog'
 import AppMenuBar from './AppMenuBar'
 import ILEditorDialog from './ILEditorDialog'
 import AddMemberDialog from './AddMemberDialog'
+import MetadataTableView from './MetadataTableView'
+import HexEditor from './HexEditor'
+import SearchPane from './SearchPane'
 import AssemblyWarnings, {obfuscationLabels} from './AssemblyWarnings'
-import {defaultEditorSettings, editorSettingsKey, parseEditorSettings} from '../lib/editor-settings'
+import {defaultEditorSettings, editorSettingsKey, parseEditorSettings, stripTokenComments} from '../lib/editor-settings'
 interface WorkspaceAssembly extends Loaded { filename: string; declarations: Declaration[]; overview: Overview; elapsed: number }
 type View = 'C#' | 'IL' | 'Metadata' | 'Hex'
 const views: View[] = ['C#', 'IL', 'Metadata', 'Hex']
@@ -75,7 +78,7 @@ export default function DecompilerApp() {
   const [protection, setProtection] = useState<Record<number, DetectionReport>>({})
   // dnSpy-style tool windows; the document area always stays visible.
   // Like dnSpy, the analyzer opens on demand (context menu Analyze or View > Analyzer).
-  const [panes, setPanes] = useState({explorer: true, analyzer: false, inspector: true})
+  const [panes, setPanes] = useState({explorer: true, analyzer: false, inspector: true, search: false})
   const togglePane = (pane: keyof typeof panes) => setPanes(previous => ({...previous, [pane]: !previous[pane]}))
   // Phones show one pane at a time; the explorer and inspector become slide-over drawers.
   const [mobile, setMobile] = useState(false)
@@ -102,7 +105,7 @@ export default function DecompilerApp() {
   const resourceSelected = selected !== null && selected >>> 24 === 40
   const resourceView = resourceSelected && view !== 'Metadata'
   const activeDeclaration = active?.declarations.find(d => d.token === selected)
-  const tree = useMemo(() => createWorkspaceTree(assemblies), [assemblies])
+  const tree = useMemo(() => createWorkspaceTree(assemblies, {hideGenerated: editorSettings.hideGenerated}), [assemblies, editorSettings.hideGenerated])
   const report = useCallback((error: unknown) => {const d = diagnostic(error); if (d.code !== 'cancelled') setErrors(previous => [...previous.slice(-4), d])}, [])
   const reset = useCallback((message = 'Workspace closed. Assembly memory released.') => {
     navigationIntent.current++; setResolvingReference(false)
@@ -131,6 +134,8 @@ export default function DecompilerApp() {
     const keyboard = (e: KeyboardEvent) => {
       if ((e.target as Element | null)?.closest('dialog[open]')) return
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'o') {e.preventDefault(); filePicker.current?.click()}
+      // Ctrl+K: quick search; Ctrl+Shift+K: the docked Search window.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'k') {e.preventDefault(); setPanes(previous => ({...previous, search: !previous.search})); return}
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {e.preventDefault(); setSearchOpen(open => !open)}
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 's') {e.preventDefault(); setExportOpen(open => open ?? 'binary')}
       if (e.key === 'Escape') {setSearchOpen(false); setHelpOpen(false); setBookmarksOpen(false); setDrawer(null)}
@@ -315,7 +320,7 @@ export default function DecompilerApp() {
   }
   function documentLabel(location: Location) {
     const assembly = assemblies.find(a => a.id === location.assembly)
-    const name = assembly?.declarations.find(d => d.token === location.token)?.name ?? assembly?.overview.resources.find(r => r.token === location.token)?.name ?? assembly?.overview.references.find(r => r.token === location.token)?.identity.name ?? (location.token === 1 ? assembly?.info.module_name ?? 'Module' : location.token === 0 ? 'Overview' : location.token === peTokens.pe ? 'PE' : isPeToken(location.token) ? peGroups.find(g => peTokens[g.id] === location.token)?.name ?? 'PE' : location.token === -1 ? 'References' : location.token === -2 ? 'Resources' : tokenHex(location.token))
+    const name = assembly?.declarations.find(d => d.token === location.token)?.name ?? assembly?.overview.resources.find(r => r.token === location.token)?.name ?? assembly?.overview.references.find(r => r.token === location.token)?.identity.name ?? (location.token === 1 ? assembly?.info.module_name ?? 'Module' : location.token === 0 ? 'Overview' : location.token === peTokens.pe ? 'PE' : isPeToken(location.token) ? peGroups.find(g => peTokens[g.id] === location.token)?.name ?? 'PE' : isTableToken(location.token) ? assembly?.overview.tables.find(t => tableToken(t.id) === location.token)?.name ?? 'Metadata table' : location.token === -1 ? 'References' : location.token === -2 ? 'Resources' : tokenHex(location.token))
     return `${name} · ${assembly?.info.identity.name ?? 'Assembly'}`
   }
   async function resolveReference(source: number, token: number): Promise<number | null> {
@@ -482,7 +487,12 @@ export default function DecompilerApp() {
   async function copy() {try {await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1600)} catch (error) {report(error)}}
   async function openSample() {try {const response = await fetch(`${import.meta.env.BASE_URL}samples/ILens.Patterns.dll`); if (!response.ok) throw new Error('The sample assembly could not be loaded.'); const blob = await response.blob(); await openFiles([new File([blob], 'ILens.Patterns.dll')])} catch (error) {report(error)}}
   const resolvedDefinition = metadata?.resolved_definition as {assembly: number; token: number} | null | undefined
-  const selectedLabel = activeDeclaration?.name ?? (selected === -1 ? 'Assembly references' : selected === -2 ? 'Manifest resources' : selected === 0 ? 'Assembly overview' : selected === peTokens.pe ? 'PE' : isPeToken(selected) ? peGroups.find(g => peTokens[g.id] === selected)?.name ?? 'PE' : metadata?.name ? String(metadata.name) : 'Select a member')
+  const selectedLabel = activeDeclaration?.name ?? (selected === -1 ? 'Assembly references' : selected === -2 ? 'Manifest resources' : selected === 0 ? 'Assembly overview' : selected === peTokens.pe ? 'PE' : isPeToken(selected) ? peGroups.find(g => peTokens[g.id] === selected)?.name ?? 'PE' : isTableToken(selected) ? active?.overview.tables.find(t => tableToken(t.id) === selected)?.name ?? 'Metadata table' : metadata?.name ? String(metadata.name) : 'Select a member')
+  // The Hex tab of the assembly, module and PE nodes is the whole-file hex editor.
+  const hexFile = view === 'Hex' && (selected === 0 || selected === 1 || isPeToken(selected))
+  const codeReferences = !active || resourceView || busy || view !== 'C#' ? undefined : methodAssembly === active.id && method?.token === selected ? method.references : typeReferences?.token === selected ? typeReferences.references : undefined
+  // Token comments are optional, as in dnSpy's decompiler settings.
+  const shown = view === 'C#' && !editorSettings.tokenComments ? stripTokenComments(code, codeReferences) : {text: code, references: codeReferences}
   return <div data-ready={ready} className={cn(`application bg-background text-foreground font-sans text-[13px] font-normal flex flex-col h-dvh min-w-0 md:min-w-165 leading-[1.5] ${theme}`)} onDragOver={e => {e.preventDefault(); if (e.dataTransfer.types.includes('Files')) setDragging(true)}} onDragLeave={e => {if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false)}} onDrop={drop}>
     <input ref={filePicker} type="file" disabled={!ready || loadingFiles} accept=".dll,.exe" multiple hidden aria-label="Open assembly files" onChange={e => onFiles(e, false)} />
     <input ref={dependencyPicker} type="file" disabled={!ready || loadingFiles} accept=".dll,.exe" multiple hidden aria-label="Add dependency files" onChange={e => onFiles(e, true)} />
@@ -517,7 +527,8 @@ export default function DecompilerApp() {
         {label: 'Bookmarks…', disabled: !navigation.bookmarks.length, run: () => setBookmarksOpen(true)}, null,
         {label: 'Assembly Explorer', checked: panes.explorer, run: () => togglePane('explorer')},
         {label: 'Analyzer', checked: panes.analyzer, run: () => togglePane('analyzer')},
-        {label: 'Inspector', checked: panes.inspector, run: () => togglePane('inspector')}, null,
+        {label: 'Inspector', checked: panes.inspector, run: () => togglePane('inspector')},
+        {label: 'Search', shortcut: '⇧⌘K', checked: panes.search, run: () => togglePane('search')}, null,
         ...views.map(item => ({label: item === 'Hex' ? 'Hex / Raw Metadata' : item, checked: view === item, disabled: !active, run: () => setView(item)})), null,
         {label: 'Word Wrap', checked: wrap, run: () => setEditorSettings(previous => ({...previous, wrap: !previous.wrap}))},
         {label: 'Light Appearance', checked: theme === 'light', run: () => setTheme(theme === 'dark' ? 'light' : 'dark')},
@@ -550,7 +561,7 @@ export default function DecompilerApp() {
         <div className="pane-heading h-10.5 min-h-10.5 flex items-center justify-between py-0 px-[17px] border-b border-solid border-b-border font-sans text-[12px] font-[500] leading-normal tracking-[0px] text-foreground"><span>Assembly Explorer</span><span aria-label="Loaded assemblies" className="count-pill tracking-[0px] bg-hover min-w-[19px] text-center text-muted-foreground text-[10px] rounded-[4px] py-px px-[5px]">{assemblies.length}</span>{active && <button className={cn(ui.iconButton)} aria-label="Close workspace" title="Close workspace and release memory" onClick={() => reset()}><X size={14} /></button>}</div>
         {active ? <>
 
-          <Explorer tree={tree} selectedAssembly={primary} selected={selected} onSelect={(assembly,token) => {setPrimary(assembly); select(token); if (mobile && ([4, 6, 20, 23, 35, 40].includes(token >>> 24) || token <= peTokens.dos)) setDrawer(null)}} onReference={(assembly,token)=>void openReference(assembly,token)} onLink={linkTo} contextActions={contextActions} />
+          <Explorer tree={tree} showTokens={editorSettings.explorerTokens} selectedAssembly={primary} selected={selected} onSelect={(assembly,token) => {setPrimary(assembly); select(token); if (mobile && ([4, 6, 20, 23, 35, 40].includes(token >>> 24) || token <= peTokens.dos)) setDrawer(null)}} onReference={(assembly,token)=>void openReference(assembly,token)} onLink={linkTo} contextActions={contextActions} />
           <div className="explorer-foot flex gap-2 items-center py-[11px] px-3.5 border-t border-solid border-t-border text-[9px] text-faint"><HardDrive size={13} /><span>{bytes(assemblies.reduce((sum, a) => sum + a.info.size, 0))} in workspace</span></div>
         </> : <div className="empty-explorer flex items-center flex-col text-faint py-10.5 px-7 text-center [&_p]:mt-4 [&_p]:mr-0 [&_p]:mb-1.5 [&_p]:ml-0 [&_p]:text-[13px] [&_p]:font-medium [&_p]:text-foreground [&>span]:max-w-47.5 [&>span]:text-[12px] [&>span]:leading-[1.7] [&_.text-button]:mt-[21px]"><Layers size={25} /><p>No assemblies loaded</p><span>Open a DLL or EXE to explore its structure.</span><button className="inline-flex gap-1.5 items-center border-0 bg-transparent p-0 text-[12px] text-foreground hover:underline hover:underline-offset-1" onClick={() => filePicker.current?.click()}>Open an assembly <ArrowRight size={13} /></button></div>}
       </aside>
@@ -576,9 +587,10 @@ export default function DecompilerApp() {
           <div className="breadcrumbs flex gap-[7px] items-center h-[33px] min-h-[33px] py-0 px-4 border-b border-solid border-b-border text-faint text-[11px] [&>span]:whitespace-nowrap [&>span]:overflow-hidden [&>span]:text-ellipsis [&_code]:ml-auto [&_code]:whitespace-nowrap [&_code]:text-muted-foreground [&_code]:font-mono [&_code]:text-[9px] [&_code]:font-normal [&_code]:leading-normal"><Box size={12} /><span>{active.info.identity.name}</span><ChevronRight size={11} /><span>{activeDeclaration?.full_name ?? selectedLabel}</span>{selected && selected > 0 ? <code>{tokenHex(selected)}</code> : null}</div>
           {active.info.reference_assembly && <div role="note" className="border-b border-border bg-muted px-4 py-2 text-xs text-muted-foreground">Reference assembly · API metadata only. Method implementations are not included.</div>}
           {method?.quality === 'annotated_il' && view === 'C#' && <div className="limitation-banner flex items-start gap-2 py-[9px] px-3.5 bg-muted border-b border-solid border-b-border text-foreground text-[12px] [&>svg]:shrink-0 [&>svg]:mt-0.5 [&_button]:shrink-0 [&_button]:text-foreground [&_button]:bg-transparent [&_button]:border-0 [&_button]:ml-auto [&_button]:text-[11px]"><BookOpen size={14} /><span>{method.diagnostics[0]?.detail ?? 'This method is shown as annotated IL.'}</span><button onClick={() => setView('IL')}>View IL</button></div>}
-          <div className="viewer-container relative flex-1 min-h-0">{selected === peTokens.protection ? <ProtectionView report={protection[active.id] ?? null} /> : isPeToken(selected) && <PeView headers={peHeaders[active.id] ?? null} token={selected!} />}{resourceView && <ResourceViewer client={getClient()} assembly={active.id} token={selected!} name={active.overview.resources.find(r => r.token === selected)?.name ?? selectedLabel} hex={view === 'Hex'} />}<div className={resourceView || isPeToken(selected) ? 'hidden' : 'h-full'}><CodeViewer documentKey={!resourceView && !busy && (selected === null || selected >>> 24 !== 6 || (methodAssembly === active.id && method?.token === selected)) ? `${active.id}:${selected}:${view}` : undefined} references={resourceView || busy || view !== 'C#' ? undefined : methodAssembly === active.id && method?.token === selected ? method.references : typeReferences?.token === selected ? typeReferences.references : undefined} onReferenceNavigate={token => void followReference(token)} text={code} language={view === 'C#' && method?.quality === 'annotated_il' ? 'IL' : view} settings={editorSettings} theme={theme} onNavigate={select} /></div>{busy && <div className="viewer-loading absolute top-3 right-[17px] flex gap-[9px] items-center py-[9px] px-3 bg-surface-raised border border-solid border-border rounded-[6px] text-foreground shadow-[var(--shadow)] text-[11px]" role="status"><LoaderCircle size={17} className="spin animate-spin motion-reduce:animate-none" />Analyzing method…</div>}</div>
+          <div className="viewer-container relative flex-1 min-h-0">{hexFile ? <HexEditor client={getClient()} assembly={active.id} size={active.overview.info.size} filename={active.filename} /> : selected === peTokens.protection ? <ProtectionView report={protection[active.id] ?? null} /> : isPeToken(selected) && <PeView headers={peHeaders[active.id] ?? null} token={selected!} />}{isTableToken(selected) && <MetadataTableView client={getClient()} assembly={active.id} table={-100 - selected!} name={selectedLabel} onNavigate={token => {if (token >>> 24 === 0 || (token & 0xffffff) === 0) return; select(token); if (![2, 4, 6, 20, 23].includes(token >>> 24)) setView('Metadata')}} />}{resourceView && <ResourceViewer client={getClient()} assembly={active.id} token={selected!} name={active.overview.resources.find(r => r.token === selected)?.name ?? selectedLabel} hex={view === 'Hex'} />}<div className={resourceView || isPeToken(selected) || isTableToken(selected) || hexFile ? 'hidden' : 'h-full'}><CodeViewer documentKey={!resourceView && !busy && (selected === null || selected >>> 24 !== 6 || (methodAssembly === active.id && method?.token === selected)) ? `${active.id}:${selected}:${view}` : undefined} references={shown.references} onReferenceNavigate={token => void followReference(token)} text={shown.text} language={view === 'C#' && method?.quality === 'annotated_il' ? 'IL' : view} settings={editorSettings} theme={theme} onNavigate={select} /></div>{busy && <div className="viewer-loading absolute top-3 right-[17px] flex gap-[9px] items-center py-[9px] px-3 bg-surface-raised border border-solid border-border rounded-[6px] text-foreground shadow-[var(--shadow)] text-[11px]" role="status"><LoaderCircle size={17} className="spin animate-spin motion-reduce:animate-none" />Analyzing method…</div>}</div>
+          {panes.search && <div className="search-window h-[34%] max-md:h-[40%] min-h-0 border-t border-solid border-t-border bg-surface"><SearchPane client={getClient()} assemblies={assemblies.map(a => ({id: a.id, name: a.info.identity.name}))} current={primary} onClose={() => togglePane('search')} onOpen={(assembly, hit) => {setPrimary(assembly); select(hit.token); setView(['method', 'constructor', 'resource', 'class', 'struct', 'interface', 'enum', 'delegate'].includes(hit.kind) ? 'C#' : 'Metadata')}} /></div>}
           {panes.analyzer && selected !== null && selected > 0 && [1,2,4,6,10,20,23,27,43].includes(selected >>> 24) && <div className="analyzer-pane relative max-h-[38%] max-md:max-h-[24%] min-h-0 overflow-auto border-t border-solid border-t-border bg-surface px-4 pb-3 [&>section]:mt-0 [&>section]:border-t-0 [&>section]:pt-3"><button className={cn(ui.iconButton, 'absolute right-2 top-1.5 z-1')} aria-label="Close analyzer" onClick={() => togglePane('analyzer')}><X size={14} /></button><AnalysisPanel getClient={getClient} assemblies={assemblies} assembly={active.id} token={selected} onNavigate={navigate} /></div>}
-          <div className="code-foot h-7 min-h-7 flex justify-between items-center py-0 px-[15px] border-t border-solid border-t-border text-faint gap-2.5 font-mono text-[10px] font-normal leading-normal [&>span:first-child]:overflow-hidden [&>span:first-child]:whitespace-nowrap [&>span:first-child]:text-ellipsis max-[1000px]:text-[8px]"><span>{isPeToken(selected) ? 'PE/CLI header · read-only file view' : resourceView ? 'Embedded resource · read-only' : view === 'C#' ? method?.quality === 'annotated_il' ? 'Annotated CIL · reconstruction limitation' : 'Reconstructed C# · synthetic local names' : view === 'IL' ? 'Original CIL · Ctrl/⌘-click a token to navigate' : 'Read-only metadata'}</span>{!resourceView && !isPeToken(selected) && <span>{code.split('\n').length} lines</span>}</div>
+          <div className="code-foot h-7 min-h-7 flex justify-between items-center py-0 px-[15px] border-t border-solid border-t-border text-faint gap-2.5 font-mono text-[10px] font-normal leading-normal [&>span:first-child]:overflow-hidden [&>span:first-child]:whitespace-nowrap [&>span:first-child]:text-ellipsis max-[1000px]:text-[8px]"><span>{isTableToken(selected) ? 'Metadata table · decoded rows' : isPeToken(selected) ? 'PE/CLI header · read-only file view' : resourceView ? 'Embedded resource · read-only' : view === 'C#' ? method?.quality === 'annotated_il' ? 'Annotated CIL · reconstruction limitation' : 'Reconstructed C# · synthetic local names' : view === 'IL' ? 'Original CIL · Ctrl/⌘-click a token to navigate' : 'Read-only metadata'}</span>{!resourceView && !isPeToken(selected) && !isTableToken(selected) && <span>{code.split('\n').length} lines</span>}</div>
         </>}
       </main>
       {panes.inspector ? <PaneHandle name="inspector" width={rightWidth} onChange={setRightWidth} reverse /> : <span className="pane-handle" />}

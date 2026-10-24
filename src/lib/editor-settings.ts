@@ -13,10 +13,16 @@ export interface EditorSettings {
   fontSize: number
   lineNumbers: boolean
   wrap: boolean
+  /** dnSpy's `@0200000A` token suffixes in the Assembly Explorer. */
+  explorerTokens: boolean
+  /** `// Token: … RID: … RVA: …` comments above members in decompiled code. */
+  tokenComments: boolean
+  /** Hide compiler-generated types and members (`<>c`, `<Main>d__0`, backing fields). */
+  hideGenerated: boolean
 }
 export const editorSettingsKey = 'ilens:editor-settings'
 export const fontSizes = [12, 13, 14, 16, 18] as const
-export const defaultEditorSettings: EditorSettings = {theme: 'dracula', highlighting: true, fontSize: 13, lineNumbers: true, wrap: false}
+export const defaultEditorSettings: EditorSettings = {theme: 'dracula', highlighting: true, fontSize: 13, lineNumbers: true, wrap: false, explorerTokens: true, tokenComments: true, hideGenerated: false}
 
 // Browser storage is optional and untrusted. Never forward arbitrary CSS into
 // the editor from saved preferences.
@@ -31,6 +37,9 @@ export function parseEditorSettings(raw: string | null): EditorSettings {
       fontSize: fontSizes.some(size => size === saved.fontSize) ? saved.fontSize as number : 13,
       lineNumbers: typeof saved.lineNumbers === 'boolean' ? saved.lineNumbers : true,
       wrap: typeof saved.wrap === 'boolean' ? saved.wrap : false,
+      explorerTokens: typeof saved.explorerTokens === 'boolean' ? saved.explorerTokens : true,
+      tokenComments: typeof saved.tokenComments === 'boolean' ? saved.tokenComments : true,
+      hideGenerated: typeof saved.hideGenerated === 'boolean' ? saved.hideGenerated : false,
     }
   } catch {return {...defaultEditorSettings}}
 }
@@ -58,4 +67,18 @@ const palettes: Record<Exclude<EditorTheme, 'neutral'>, EditorPalette> = {
 export function editorPalette(theme: EditorTheme, appearance: string): EditorPalette {
   if (theme !== 'neutral') return palettes[theme]
   return {dark: appearance === 'dark', background: 'var(--editor)', foreground: 'var(--foreground)', gutter: 'var(--muted-foreground)', activeLine: 'var(--active-line)', selection: 'var(--selection)', keyword: 'var(--foreground)', string: 'var(--syntax-string)', number: 'var(--foreground)', comment: 'var(--muted-foreground)', type: 'var(--foreground)', function: 'var(--foreground)'}
+}
+
+const tokenComment = /^[ \t]*\/\/ (\([a-z]+\) )?Token: 0x[0-9A-F]{8}\b.*(\r?\n|$)/gm
+/** Removes dnSpy-style token comment lines, keeping navigation ranges on their text. */
+export function stripTokenComments<R extends {start: number; end: number}>(text: string, references: R[] | undefined): {text: string; references: R[] | undefined} {
+  const removed: [number, number][] = []
+  for (const match of text.matchAll(tokenComment)) removed.push([match.index!, match.index! + match[0].length])
+  if (!removed.length) return {text, references}
+  let out = '', last = 0
+  for (const [start, end] of removed) {out += text.slice(last, start); last = end}
+  out += text.slice(last)
+  // UTF-16 offsets shift by the length removed before them.
+  const shift = (offset: number) => removed.reduce((total, [start, end]) => total + (end <= offset ? end - start : 0), 0)
+  return {text: out, references: references?.filter(r => !removed.some(([start, end]) => r.start >= start && r.end <= end)).map(r => ({...r, start: r.start - shift(r.start), end: r.end - shift(r.start)}))}
 }

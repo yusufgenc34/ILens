@@ -355,6 +355,110 @@ impl Session {
             _ => None,
         }
     }
+    /// One page of a metadata table: ECMA column names and every cell decoded, with
+    /// heap values read and table/coded indexes shown as tokens.
+    pub fn table_rows(&self, id: u32, table: usize, start: u32, count: u32) -> Result<Value> {
+        use crate::metadata::Column;
+        let a = self.assembly(id)?;
+        if table > 44 {
+            return Err(Error::metadata("Unknown metadata table"));
+        }
+        let metadata = &a.bytes[a.image.metadata.clone()];
+        let stream = |name: &str| {
+            a.store
+                .streams
+                .iter()
+                .find(|s| s.name == name)
+                .map_or(&[][..], |s| &metadata[s.offset..s.offset + s.size])
+        };
+        let tables = crate::metadata_write::Tables::decode(stream("#~"))?;
+        let columns = crate::metadata::schema(table);
+        let rows = &tables.rows[table];
+        let start = start.max(1);
+        let end = (start + count.min(1000)).min(rows.len() as u32 + 1);
+        let token_cell = |token: u32| {
+            let table = (token >> 24) as usize;
+            // A list column may point one past the end: an empty range.
+            if (token & 0xff_ffff) as usize > tables.rows.get(table).map_or(0, Vec::len) {
+                return json!({"text": format!("0x{token:08X} (end)")});
+            }
+            let name = match token >> 24 {
+                1 | 2 | 4 | 6 | 10 | 20 | 23 | 26 | 27 | 35 | 43 => a.resolve(token),
+                _ => String::new(),
+            };
+            let name = if name.starts_with("unresolved_") {
+                String::new()
+            } else {
+                name
+            };
+            json!({"text": if name.is_empty() { format!("0x{token:08X}") } else { format!("0x{token:08X} {name}") }, "token": token})
+        };
+        let cells = |row: &Vec<u32>| -> Vec<Value> {
+            columns
+                .iter()
+                .zip(row)
+                .map(|(c, v)| match *c {
+                    Column::U16 => json!({"text": format!("0x{v:04X}")}),
+                    Column::U32 => json!({"text": format!("0x{v:08X}")}),
+                    Column::String => json!({"text": a.string(*v).map(|s| format!("{s:?}")).unwrap_or_else(|_| format!("#Strings[0x{v:X}]"))}),
+                    Column::Blob => {
+                        let bytes = a.blob(*v).unwrap_or(&[]);
+                        let preview: Vec<String> = bytes.iter().take(16).map(|b| format!("{b:02X}")).collect();
+                        json!({"text": format!("#Blob[0x{v:X}] {}{}", preview.join(" "), if bytes.len() > 16 { " …" } else { "" })})
+                    }
+                    Column::Guid => {
+                        let heap = stream("#GUID");
+                        let at = (*v as usize).saturating_sub(1) * 16;
+                        json!({"text": heap.get(at..at + 16).filter(|_| *v != 0).map_or_else(|| "null".to_owned(), |g| g.iter().map(|b| format!("{b:02x}")).collect::<String>())})
+                    }
+                    Column::Table(t) | Column::List(t) => token_cell(((t as u32) << 24) | v),
+                    Column::Coded(k) => {
+                        let bits = k.tag_bits();
+                        match crate::metadata::coded_tables(k).get((v & ((1 << bits) - 1)) as usize) {
+                            Some(Some(t)) if v >> bits != 0 => token_cell(((*t as u32) << 24) | (v >> bits)),
+                            _ => json!({"text": format!("0x{v:X}")}),
+                        }
+                    }
+                })
+                .collect()
+        };
+        let page: Vec<Value> = (start..end)
+            .map(|row| {
+                json!({"row": row, "token": ((table as u32) << 24) | row, "cells": cells(&rows[row as usize - 1])})
+            })
+            .collect();
+        Ok(
+            json!({"table": table, "columns": crate::metadata::column_names(table), "total": rows.len(), "start": start, "rows": page}),
+        )
+    }
+    /// File bytes for the hex editor, at most 64 KiB per request.
+    pub fn read_bytes(&self, id: u32, offset: usize, length: usize) -> Result<Vec<u8>> {
+        let bytes = &self.assembly(id)?.bytes;
+        let start = offset.min(bytes.len());
+        let end = start.saturating_add(length.min(64 * 1024)).min(bytes.len());
+        Ok(bytes[start..end].to_vec())
+    }
+    /// The file with raw byte patches applied, and whether it still parses as a managed
+    /// assembly. Raw patches bypass IL verification; the result says so honestly.
+    pub fn patched_bytes(
+        &self,
+        id: u32,
+        patches: &[(usize, u8)],
+    ) -> Result<(Vec<u8>, Option<String>)> {
+        let mut bytes = self.assembly(id)?.bytes.clone();
+        if patches.len() > 1 << 20 {
+            return Err(Error::limit("At most 1,048,576 patched bytes"));
+        }
+        for (offset, value) in patches {
+            *bytes
+                .get_mut(*offset)
+                .ok_or_else(|| Error::metadata("Patch offset outside the file"))? = *value;
+        }
+        let problem = Assembly::load(bytes.clone())
+            .err()
+            .map(|e| format!("{}: {}", e.message, e.detail));
+        Ok((bytes, problem))
+    }
     pub fn metadata(&self, id: u32, token: u32) -> Result<Value> {
         let mut metadata = self.assembly(id)?.inspect(token)?;
         metadata["resolved_definition"] = json!(

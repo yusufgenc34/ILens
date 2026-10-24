@@ -1,11 +1,11 @@
 'use client'
 import {cn} from '../lib/ui'
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import { Box, ChevronRight, Braces, Code2, Cpu, FileCode2, FileText, Folder, FolderTree, GitFork, Hash, KeyRound, Layers, Link, Lock, Unlink, Package, Shield, ShieldAlert, Variable, Wrench, Zap, ArrowUpFromLine, ArrowDownToLine } from 'lucide-react'
+import {Box, ChevronRight, Braces, Code2, Cpu, FileCode2, FileText, Folder, FolderTree, GitFork, Hash, KeyRound, Layers, Link, Lock, Unlink, Package, Shield, ShieldAlert, Variable, Wrench, Zap, ArrowUpFromLine, ArrowDownToLine, Table2} from 'lucide-react'
 import { accessOf, flattenTree, pathToToken, type TreeNode } from '../lib/tree'
 import ContextMenu from './ContextMenu'
 import type { MenuAction } from './AppMenuBar'
-const icons: Record<string, typeof Box> = {assembly: Package, module: FileCode2, namespace: Braces, class: Box, struct: Layers, interface: GitFork, enum: Hash, delegate: Zap, field: Variable, property: Wrench, event: Zap, method: Code2, constructor: Code2, reference: Link, references: Link, resource: FileText, resources: Folder, pe: Cpu, 'pe-header': FileText, protection: ShieldAlert, 'base-types': ArrowUpFromLine, 'derived-types': ArrowDownToLine, 'base-type': FolderTree, 'derived-type': FolderTree}
+const icons: Record<string, typeof Box> = {assembly: Package, module: FileCode2, namespace: Braces, class: Box, struct: Layers, interface: GitFork, enum: Hash, delegate: Zap, field: Variable, property: Wrench, event: Zap, method: Code2, constructor: Code2, reference: Link, references: Link, resource: FileText, resources: Folder, pe: Cpu, 'pe-header': FileText, protection: ShieldAlert, 'base-types': ArrowUpFromLine, 'derived-types': ArrowDownToLine, 'base-type': FolderTree, 'derived-type': FolderTree, 'metadata-table': Table2}
 const colors: Record<string, string> = {assembly: 'var(--tree-assembly)', module: 'var(--tree-assembly)', namespace: 'var(--tree-namespace)', class: 'var(--tree-type)', struct: 'var(--tree-value-type)', enum: 'var(--tree-value-type)', interface: 'var(--tree-interface)', delegate: 'var(--tree-delegate)', method: 'var(--tree-method)', constructor: 'var(--tree-method)', field: 'var(--tree-field)', property: 'var(--tree-property)', event: 'var(--tree-event)', references: 'var(--tree-folder)', resources: 'var(--tree-folder)', pe: 'var(--tree-folder)', protection: 'var(--warning-icon)', 'base-types': 'var(--tree-folder)', 'derived-types': 'var(--tree-folder)', 'base-type': 'var(--tree-type)', 'derived-type': 'var(--tree-type)'}
 const overlays = {private: Lock, 'private protected': Lock, protected: KeyRound, 'protected internal': KeyRound, internal: Shield} as const
 function KindIcon({node}: {node: TreeNode}) {
@@ -16,14 +16,14 @@ function KindIcon({node}: {node: TreeNode}) {
   return <span className="relative inline-flex shrink-0" aria-hidden="true"><Icon size={14} className={`kind-${node.kind}`} style={{color: color ?? 'var(--muted-foreground)'}} />{Overlay && <Overlay size={8} strokeWidth={3} className="access-overlay absolute -right-[3px] -bottom-[2px] rounded-[2px] bg-surface text-muted-foreground" />}</span>
 }
 // Member labels keep their signature, rendered in a quieter color than the name itself.
-function Label({node}: {node: TreeNode}) {
+function Label({node, showToken}: {node: TreeNode; showToken: boolean}) {
   const text = node.name
   const split = ['method', 'constructor'].includes(node.kind) ? text.indexOf('(') : ['field', 'property', 'event'].includes(node.kind) ? text.indexOf(' : ') : -1
   const access = accessOf(node)
   const color = access?.constant ? 'var(--tree-constant)' : colors[node.kind]
   const name = split > 0 ? text.slice(0, split) : text
   // dnSpy-style metadata token suffix; it is decorative, so names stay the accessible label.
-  const token = node.declaration ? ` @${node.declaration.token.toString(16).toUpperCase().padStart(8, '0')}` : ''
+  const token = showToken && node.declaration ? ` @${node.declaration.token.toString(16).toUpperCase().padStart(8, '0')}` : ''
   return <span className="tree-name overflow-hidden text-ellipsis"><span style={{color}}>{name}</span>{split > 0 && <span style={{color: 'var(--tree-signature)'}}>{text.slice(split)}</span>}{token && <span aria-hidden="true" className="tree-token max-md:hidden" style={{color: 'var(--tree-signature)'}}>{token}</span>}</span>
 }
 function describe(node: TreeNode) {
@@ -34,7 +34,7 @@ function describe(node: TreeNode) {
 // Touch screens get taller rows so each item is a comfortable tap target.
 const rowHeights = {fine: 26, coarse: 36}
 const nodeId = (key:string) => `explorer-${key}`
-export default function Explorer({tree, selected, onSelect, onLink, onReference, selectedAssembly, contextActions}: {selectedAssembly:number | null; onReference:(assembly:number,token:number)=>void; tree: TreeNode[]; selected: number | null; onSelect: (assembly:number, token:number) => void; onLink:(assembly:number,token:number)=>void; contextActions:(node:TreeNode, tree:{expand:(node:TreeNode)=>void; collapse:(node:TreeNode)=>void})=>(MenuAction | null)[]}) {
+export default function Explorer({tree, selected, onSelect, onLink, onReference, selectedAssembly, contextActions, showTokens = true}: {showTokens?: boolean; selectedAssembly:number | null; onReference:(assembly:number,token:number)=>void; tree: TreeNode[]; selected: number | null; onSelect: (assembly:number, token:number) => void; onLink:(assembly:number,token:number)=>void; contextActions:(node:TreeNode, tree:{expand:(node:TreeNode)=>void; collapse:(node:TreeNode)=>void})=>(MenuAction | null)[]}) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [menu, setMenu] = useState<{x:number; y:number; node:TreeNode} | null>(null)
   const [coarse, setCoarse] = useState(false)
@@ -119,7 +119,7 @@ export default function Explorer({tree, selected, onSelect, onLink, onReference,
           onClick={() => {if (press.current?.fired) {press.current = null; return} choose(node); if(node.token===undefined && node.target===undefined) toggle(node.key)}}
           onDoubleClick={() => {if (node.reference) onReference(node.assembly!,node.token!); else if (node.target!==undefined) onLink(node.assembly!,node.target); else if (node.children.length && node.token!==undefined) toggle(node.key)}}>
           <span className={cn('disclosure w-2.5 h-[19px] flex items-center justify-center shrink-0 text-muted-foreground',expanded.has(node.key) && '[&_svg]:rotate-90')} onClick={e => {if (node.children.length) {e.stopPropagation();setFocused(node.key);viewport.current?.focus({preventScroll:true});toggle(node.key)}}}>{node.children.length > 0 && <ChevronRight size={12} />}</span>
-          <KindIcon node={node} /><Label node={node} />{node.reference && <span className="ml-auto shrink-0 text-muted-foreground" aria-label={node.reference.resolved_id !== null ? 'Resolved reference' : 'Unresolved reference'}>{node.reference.resolved_id !== null ? <Link size={11}/> : <Unlink size={11}/>}</span>}
+          <KindIcon node={node} /><Label node={node} showToken={showTokens} />{node.reference && <span className="ml-auto shrink-0 text-muted-foreground" aria-label={node.reference.resolved_id !== null ? 'Resolved reference' : 'Unresolved reference'}>{node.reference.resolved_id !== null ? <Link size={11}/> : <Unlink size={11}/>}</span>}
         </button>
       </div>)}
     </div>

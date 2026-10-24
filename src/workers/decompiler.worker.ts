@@ -45,6 +45,10 @@ async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
     }
     case 'beginProjectExport': exportRequest = request.id; cancelExport(); exportJob = createProjectExportJob(core, ++nextJob, request.options); return exportJob.progress()
     case 'getEdits': return core.get_edits(request.assembly)
+    case 'readBytes': return {buffer: core.read_bytes(request.assembly, request.offset, request.length).buffer}
+    case 'checkPatched': return core.check_patched(request.assembly, JSON.stringify(request.patches))
+    case 'exportPatched': return {buffer: core.export_patched(request.assembly, JSON.stringify(request.patches)).buffer}
+    case 'getTableRows': return core.get_table_rows(request.assembly, request.table, request.start, request.count)
     case 'addMember': return core.add_member(request.assembly, request.revision, request.owner, JSON.stringify(request.member))
     case 'getOpcodes': return core.get_opcodes()
     case 'openMethodEdit': return core.open_method_edit(request.assembly, request.token)

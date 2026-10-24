@@ -9,6 +9,9 @@ export const peGroups: {id: Exclude<keyof typeof peTokens, 'pe'>; name: string}[
   {id: 'sections', name: 'Section Headers'}, {id: 'cor20', name: 'Cor20 Header'}, {id: 'metadata', name: 'Storage Stream Headers'}, {id: 'tables', name: 'Tables Stream'},
 ]
 export const isPeToken = (token: number | null) => token !== null && token <= peTokens.pe && token >= peTokens.protection
+/** Explorer nodes for metadata tables use tokens -100 - table id. */
+export const tableToken = (table: number) => -100 - table
+export const isTableToken = (token: number | null) => token !== null && token <= -100 && token >= -144
 export type Access = 'public' | 'internal' | 'protected' | 'protected internal' | 'private protected' | 'private'
 const typeAccess: Access[] = ['internal', 'public', 'public', 'private', 'protected', 'internal', 'private protected', 'protected internal']
 const memberAccess: Access[] = ['private', 'private', 'private protected', 'internal', 'protected', 'protected internal', 'public', 'private']
@@ -26,7 +29,17 @@ export function accessOf(node: TreeNode): {access: Access; isStatic: boolean; co
 export interface TreeRow { node: TreeNode; depth: number }
 const order: Record<string, number> = {constructor: 0, method: 1, property: 2, event: 3, field: 4}
 const compare = (a: TreeNode, b: TreeNode) => (order[a.kind] ?? 5) - (order[b.kind] ?? 5) || a.name.localeCompare(b.name, 'en', {numeric:true}) || (a.token ?? 0) - (b.token ?? 0)
-export function createTree(declarations: Declaration[], overview: Overview): TreeNode[] {
+/** Compiler-generated names start with `<` (closures, state machines, backing fields). */
+const generated = (d: Declaration) => d.name.startsWith('<') && d.name !== '<Module>'
+export function createTree(declarations: Declaration[], overview: Overview, options: {hideGenerated?: boolean} = {}): TreeNode[] {
+  if (options.hideGenerated) {
+    const hidden = new Set<number>()
+    for (const d of declarations) if (generated(d)) hidden.add(d.token)
+    // Members of hidden types go with them.
+    let changed = true
+    while (changed) {changed = false; for (const d of declarations) if (!hidden.has(d.token) && hidden.has(d.parent)) {hidden.add(d.token); changed = true}}
+    declarations = declarations.filter(d => !hidden.has(d.token))
+  }
   const byToken = new Map<number, TreeNode>()
   const namespaces = new Map<string, TreeNode>()
   for (const d of declarations) byToken.set(d.token, {key: `t:${d.token}`, name: d.display_name || d.name, kind: d.kind, token: d.token, declaration: d, children: []})
@@ -60,7 +73,7 @@ export function createTree(declarations: Declaration[], overview: Overview): Tre
   for (const namespace of namespaces.values()) namespace.children = namespace.children.filter(n => n.declaration?.name !== '<Module>' || n.children.some(c => c.declaration)).sort(compare)
   return [
     {key: 'overview', name: overview.info.identity.name, kind: 'assembly', token: 0, children: []},
-    {key: 'pe', name: 'PE', kind: 'pe', token: peTokens.pe, children: peGroups.map(g => ({key: `pe:${g.id}`, name: g.name, kind: g.id === 'protection' ? 'protection' : 'pe-header', token: peTokens[g.id], children: []}))},
+    {key: 'pe', name: 'PE', kind: 'pe', token: peTokens.pe, children: peGroups.map(g => ({key: `pe:${g.id}`, name: g.name, kind: g.id === 'protection' ? 'protection' : 'pe-header', token: peTokens[g.id], children: g.id === 'tables' ? (overview.tables ?? []).filter(t => t.rows > 0).map(t => ({key: `table:${t.id}`, name: `${t.name} (${t.rows})`, kind: 'metadata-table', token: tableToken(t.id), children: []})) : []}))},
     {key: 'references', name: 'References', kind: 'references', token: -1, children: overview.references.map(r => ({key: `ref:${r.token}`, name: r.identity.name, token: r.token, reference:r, kind: 'reference', children: []})).sort(compare)},
     {key: 'resources', name: 'Resources', kind: 'resources', token: -2, children: overview.resources.map(r => ({key: `res:${r.token}`, name: r.name, token: r.token, kind: 'resource', children: []})).sort(compare)},
     ...[...namespaces.values()].filter(n => n.children.length).sort(compare),
@@ -75,11 +88,11 @@ export function pathToToken(nodes: TreeNode[], token: number, assembly?: number)
   for (const node of nodes) { if (node.token === token && (assembly === undefined || node.assembly === assembly)) return [node.key]; const path = pathToToken(node.children, token, assembly); if (path) return [node.key, ...path] }
   return null
 }
-export function createWorkspaceTree(assemblies: {id:number; declarations:Declaration[]; overview:Overview}[]): TreeNode[] {
+export function createWorkspaceTree(assemblies: {id:number; declarations:Declaration[]; overview:Overview}[], options: {hideGenerated?: boolean} = {}): TreeNode[] {
   const names = new Map<string,number>()
   for (const a of assemblies) names.set(a.overview.info.identity.name,(names.get(a.overview.info.identity.name) ?? 0) + 1)
   return assemblies.map(a => {
-    const [root,...children] = createTree(a.declarations,a.overview)
+    const [root,...children] = createTree(a.declarations,a.overview,options)
     const qualify=(node:TreeNode):TreeNode=>({...node,key:`a:${a.id}:${node.key}`,assembly:a.id,children:node.children.map(qualify)})
     const module:TreeNode={key:'module',name:a.overview.info.module_name || `${root.name}.dll`,kind:'module',token:1,children}
     return qualify({...root,name:root.name+((names.get(root.name) ?? 0) > 1 ? ` (${a.overview.info.identity.version})` : ''),children:[module]})

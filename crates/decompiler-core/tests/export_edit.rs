@@ -938,3 +938,24 @@ fn fields_and_methods_can_be_added_with_renumbered_tokens() {
         .is_err()
     );
 }
+#[test]
+fn metadata_table_rows_decode_heaps_and_indexes() {
+    let mut session = Session::default();
+    let id = session.load(DEP.to_vec()).unwrap().id;
+    let page = session.table_rows(id, 2, 1, 10).unwrap();
+    assert_eq!(page["columns"][1], "TypeName");
+    assert_eq!(page["total"], 2);
+    let row = &page["rows"][1];
+    assert_eq!(row["token"], 0x0200_0002);
+    assert_eq!(row["cells"][1]["text"], "\"Arithmetic\"");
+    // Extends is a coded index shown as a token with its name.
+    assert!(
+        row["cells"][3]["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("System.Object")
+    );
+    // An empty field range points one past the end of the Field table.
+    assert!(row["cells"][4]["text"].as_str().unwrap().ends_with("(end)"));
+    assert!(session.table_rows(id, 99, 1, 10).is_err());
+}
