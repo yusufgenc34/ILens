@@ -164,6 +164,9 @@ export default function DecompilerApp() {
   // Applied IL/C# edits change what the views show; this reloads them.
   const [contentVersion, setContentVersion] = useState(0)
   const [edited, setEdited] = useState<number[]>([])
+  // A short confirmation after an action that closes its dialog.
+  const [notice, setNotice] = useState<string | null>(null)
+  useEffect(() => {if (!notice) return; const timer = setTimeout(() => setNotice(null), 4000); return () => clearTimeout(timer)}, [notice])
   // The tour walks through the example, so it opens it first when nothing is loaded.
   async function startTour() {
     try {localStorage.setItem(tourSeenKey, '1')} catch { /* Storage is optional. */ }
@@ -434,7 +437,7 @@ export default function DecompilerApp() {
     else {setPrimary(assembly); void followReference(token, assembly)}
   }
   // The workspace now holds the rewritten assembly: reload its tree and overview.
-  async function memberAdded(assembly: number, token: number) {
+  async function memberAdded(assembly: number, token: number, message?: string) {
     setAdding(null)
     try {
       const core = getClient()
@@ -442,7 +445,7 @@ export default function DecompilerApp() {
       const overview = await core.call('getInfo', {assembly})
       const references = await core.call('getReferences', {assembly})
       setAssemblies(previous => previous.map(a => a.id === assembly ? {...a, declarations, overview: {...overview, references}, info: overview.info} : a))
-      setStatus(`Added ${tokenHex(token)}. The workspace shows the modified assembly; Save Module downloads it.`)
+      setStatus(message ?? `Added ${tokenHex(token)}. The workspace shows the modified assembly; Save Module downloads it.`)
       navigate({assembly, token, view: 'C#'})
     } catch (error) {report(error)}
   }
@@ -657,7 +660,15 @@ export default function DecompilerApp() {
     {tourOpen && <Tour steps={tourSteps} onClose={() => setTourOpen(false)} />}
     {projectOpen && primary && <ProjectExportDialog client={getClient()} assemblies={assemblies} primary={primary} onClose={() => setProjectOpen(false)} />}
     {exportOpen && active && <ExportDialog key={`${active.id}-${exportOpen}`} mode={exportOpen} client={getClient()} assembly={active.id} info={active.info} filename={active.filename} member={activeDeclaration} method={busy || methodAssembly !== active.id ? null : method} onClose={() => setExportOpen(null)} />}
-    {csharpEdit && <CSharpEditDialog key={`${csharpEdit.assembly}-${csharpEdit.token}`} client={getClient()} assembly={csharpEdit.assembly} token={csharpEdit.token} name={csharpEdit.name} settings={editorSettings} theme={theme} onClose={() => setCsharpEdit(null)} onApplied={reloaded => {if (reloaded) void memberAdded(csharpEdit.assembly, csharpEdit.token); else {setStatus('C# edit applied; Save Module downloads the modified assembly.'); setContentVersion(v => v + 1)}}} />}
+    {csharpEdit && <CSharpEditDialog key={`${csharpEdit.assembly}-${csharpEdit.token}`} client={getClient()} assembly={csharpEdit.assembly} token={csharpEdit.token} name={csharpEdit.name} settings={editorSettings} theme={theme} onClose={() => setCsharpEdit(null)} onApplied={reloaded => {
+      const {assembly, token, name} = csharpEdit
+      setCsharpEdit(null)
+      const message = 'C# edit applied; Save Module downloads the modified assembly.'
+      if (reloaded) void memberAdded(assembly, token, message); else setContentVersion(v => v + 1)
+      setStatus(message)
+      setNotice(`Compiled and applied ${name}. Save Module downloads the modified assembly.`)
+    }} />}
+    {notice && <div role="status" aria-label="Notification" className="fixed bottom-10 right-4 z-90 flex max-w-[min(420px,calc(100vw-32px))] items-start gap-2.5 rounded-[8px] border border-solid border-border bg-popover px-4 py-3 text-[12px] text-foreground shadow-[var(--shadow)]"><Check size={15} className="mt-px shrink-0 text-[var(--tree-method)]" /><span className="flex-1">{notice}</span><button className={cn(ui.iconButton, 'h-5 w-5 shrink-0')} aria-label="Dismiss notification" onClick={() => setNotice(null)}><X size={13} /></button></div>}
     {adding && <AddMemberDialog key={`${adding.assembly}-${adding.owner}-${adding.kind}`} client={getClient()} assembly={adding.assembly} owner={adding.owner} ownerName={adding.name} kind={adding.kind} onClose={() => setAdding(null)} onAdded={token => void memberAdded(adding.assembly, token)} />}
     {editOpen && active && selected && selected > 0 && <ILEditorDialog key={`${active.id}-${selected}`} client={getClient()} assembly={active.id} token={selected} name={selectedLabel} settings={editorSettings} theme={theme} onClose={() => setEditOpen(false)} onExport={() => {setEditOpen(false); setExportOpen('binary')}} onChanged={() => setContentVersion(v => v + 1)} />}
     {settingsOpen && <SettingsDialog onlineReferences={onlineReferences} onOnlineReferences={updateOnlineReferences} settings={editorSettings} onChange={setEditorSettings} appearance={theme} onAppearance={setTheme} onClose={() => setSettingsOpen(false)} />}

@@ -823,8 +823,10 @@ impl Session {
     }
     /// The C# skeleton for editing a method, with the line the method starts on.
     pub fn csharp_source(&self, id: u32, token: u32) -> Result<Value> {
-        let a = self.assembly(id)?;
-        crate::edit::supported_body(a, token)?;
+        crate::edit::supported_body(self.assembly(id)?, token)?;
+        // Start from the method as last edited, not the original body.
+        let edited = self.edited(id)?;
+        let a = edited.as_deref().map_or_else(|| self.assembly(id), Ok)?;
         let source = crate::csharp_edit::source(a, token)?;
         Ok(
             json!({"method": source.method, "before": source.before, "after": source.after, "line": source.before.lines().count() + 1}),

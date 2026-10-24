@@ -39,8 +39,9 @@ export default function CSharpEditDialog({client, assembly, token, name, setting
       setPhase('applying'); setStatus('Merging and verifying the IL…')
       const {edit_revision: revision} = await client.call('getEdits', {assembly})
       const applied = await client.call('csharpApply', {assembly, token, revision, compiled: buffer})
-      setStatus(applied.reloaded ? 'Applied. New references were added, so the workspace now holds the modified assembly.' : 'Applied. The change is included in modified assembly export.')
+      // Success closes the editor; the workspace shows the change and confirms it.
       onApplied(applied.reloaded)
+      return
     } catch (e) {setError(diagnostic(e)); setStatus('')}
     setPhase('ready')
   }

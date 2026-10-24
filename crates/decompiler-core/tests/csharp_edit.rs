@@ -132,6 +132,13 @@ fn the_session_applies_a_compiled_body_and_exports_it() {
             .contains("adding ")
     );
     assert_eq!(session.edited_methods(id), vec![token]);
+    // Editing again starts from the edited body.
+    assert!(
+        session.csharp_source(id, token).unwrap()["method"]
+            .as_str()
+            .unwrap()
+            .contains("\"adding \"")
+    );
     // A stale revision is refused.
     assert!(session.csharp_apply(id, token, 0, COMPILED).is_err());
 }
