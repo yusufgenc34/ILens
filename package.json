@@ -15,6 +15,7 @@
     "test:rust": "cargo test --workspace --locked",
     "test:frontend": "vitest run",
     "test:e2e": "playwright test",
+    "test:e2e:firefox": "node scripts/test-firefox-docker.mjs",
     "test:production": "playwright test --config playwright.production.config.ts",
     "fixtures": "node scripts/build-fixtures.mjs",
     "bcl": "node scripts/build-bcl-summary.mjs",

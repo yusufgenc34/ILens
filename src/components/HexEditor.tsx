@@ -33,18 +33,20 @@ export default function HexEditor({client, assembly, size, filename, initialOffs
     return () => observer.disconnect()
   }, [])
   useEffect(() => {jump(initialOffset)}, [initialOffset]) // eslint-disable-line react-hooks/exhaustive-deps
-  // Fetch the pages the visible rows need.
+  // Fetch the pages the visible rows need. Requests are not cancelled when the view
+  // scrolls on (a cancelled page would stay pending); results for another assembly
+  // are dropped instead.
+  const current = useRef(assembly)
+  current.current = assembly
   useEffect(() => {
-    const abort = new AbortController()
     for (let page = Math.floor(first * rowBytes / pageBytes); page <= Math.floor(Math.max(0, last * rowBytes - 1) / pageBytes); page++) {
       if (pages.current.has(page) || pending.current.has(page)) continue
       pending.current.add(page)
-      client.call('readBytes', {assembly, offset: page * pageBytes, length: pageBytes}, {signal: abort.signal})
-        .then(({buffer}) => {pages.current.set(page, new Uint8Array(buffer)); setLoaded(n => n + 1)})
-        .catch(e => {if (!abort.signal.aborted) setError(diagnostic(e))})
+      client.call('readBytes', {assembly, offset: page * pageBytes, length: pageBytes})
+        .then(({buffer}) => {if (current.current === assembly) {pages.current.set(page, new Uint8Array(buffer)); setLoaded(n => n + 1)}})
+        .catch(e => {if (current.current === assembly) setError(diagnostic(e))})
         .finally(() => pending.current.delete(page))
     }
-    return () => abort.abort()
   }, [client, assembly, first, last])
   const byte = (offset: number) => patches.get(offset) ?? pages.current.get(Math.floor(offset / pageBytes))?.[offset % pageBytes]
   function jump(offset: number) {

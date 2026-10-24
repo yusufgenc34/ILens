@@ -23,6 +23,8 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
   const sourceReferences = useRef(references); sourceReferences.current = references
   const activeDocument = useRef<string | undefined>(undefined)
   const savedPositions = useRef(new Map<string, {anchor:number; head:number; top:number; left:number}>())
+  const live = useRef<{key: string; top: number; left: number} | null>(null)
+  const hidden = useRef(false)
   const referenceAt = (position: number) => sourceReferences.current?.find(r => position >= r.start && position < r.end)
   // Reconfigure the live editor to preserve selection and scroll on theme changes.
   useEffect(() => {
@@ -45,15 +47,31 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
       }}),
     ]})})
     editor.current = view
-    return () => {view.destroy(); editor.current = null}
+    // The last scroll position of the shown document. Reading it later is unreliable:
+    // a hidden (display: none) editor reports 0 in Firefox.
+    const track = () => {if (activeDocument.current && !hidden.current) live.current = {key: activeDocument.current, top: view.scrollDOM.scrollTop, left: view.scrollDOM.scrollLeft}}
+    view.scrollDOM.addEventListener('scroll', track, {passive: true})
+    return () => {view.scrollDOM.removeEventListener('scroll', track); view.destroy(); editor.current = null}
   }, [options])
   useEffect(() => {
     const view = editor.current
-    if (!view || (activeDocument.current && !documentKey)) return
-    if (view.state.doc.toString() === text && activeDocument.current === documentKey) return
+    if (!view) return
+    // Another view (PE, resources) covers the editor; its document stays loaded.
+    if (activeDocument.current && !documentKey) {hidden.current = true; return}
+    const position = () => {const last = live.current; return last && last.key === activeDocument.current ? last : {top: view.scrollDOM.scrollTop, left: view.scrollDOM.scrollLeft}}
+    if (view.state.doc.toString() === text && activeDocument.current === documentKey) {
+      if (!hidden.current) return
+      // Shown again: put the document back where it was.
+      hidden.current = false
+      const {top, left} = position()
+      const frame = requestAnimationFrame(() => {view.scrollDOM.scrollTop = top; view.scrollDOM.scrollLeft = left})
+      return () => cancelAnimationFrame(frame)
+    }
+    hidden.current = false
     if (activeDocument.current) {
       const selection = view.state.selection.main
-      savedPositions.current.set(activeDocument.current, {anchor:selection.anchor, head:selection.head, top:view.scrollDOM.scrollTop, left:view.scrollDOM.scrollLeft})
+      const {top, left} = position()
+      savedPositions.current.set(activeDocument.current, {anchor:selection.anchor, head:selection.head, top, left})
       if (savedPositions.current.size > 128) savedPositions.current.delete(savedPositions.current.keys().next().value!)
     }
     const saved = documentKey && savedPositions.current.get(documentKey)
