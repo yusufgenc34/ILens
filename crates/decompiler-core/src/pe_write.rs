@@ -256,6 +256,7 @@ fn body_bytes(
     code: &[u8],
     max_stack: u16,
     locals: Option<u32>,
+    exceptions: &[cil::ExceptionRegion],
 ) -> Result<Vec<u8>> {
     let original = a
         .body(token)?
@@ -264,15 +265,42 @@ fn body_bytes(
     // Compilers zero-initialize declared locals; new ones are declared the same way.
     let init = original.init_locals || locals.is_some_and(|s| s != 0);
     let mut out = Vec::new();
-    if code.len() < 64 && max_stack <= 8 && signature == 0 && !init {
+    let sections = !exceptions.is_empty();
+    if code.len() < 64 && max_stack <= 8 && signature == 0 && !init && !sections {
         out.push(((code.len() as u8) << 2) | 2);
     } else {
-        out.extend_from_slice(&(0x3003u16 | if init { 0x10 } else { 0 }).to_le_bytes());
+        let flags = 0x3003u16 | if init { 0x10 } else { 0 } | if sections { 0x08 } else { 0 };
+        out.extend_from_slice(&flags.to_le_bytes());
         out.extend_from_slice(&max_stack.to_le_bytes());
         out.extend_from_slice(&(code.len() as u32).to_le_bytes());
         out.extend_from_slice(&signature.to_le_bytes());
     }
     out.extend_from_slice(code);
+    if sections {
+        // One fat EH table (ECMA-335 II.25.4.5), 4-byte aligned after the code.
+        out.resize(out.len().next_multiple_of(4), 0);
+        let size = 4 + 24 * exceptions.len();
+        out.push(0x41);
+        out.extend_from_slice(&(size as u32).to_le_bytes()[..3]);
+        for e in exceptions {
+            let flags: u32 = match e.kind.as_str() {
+                "catch" => 0,
+                "finally" => 2,
+                "fault" => 4,
+                _ => return Err(unsupported("Unsupported exception clause kind")),
+            };
+            for value in [
+                flags,
+                e.try_start,
+                e.try_end - e.try_start,
+                e.handler_start,
+                e.handler_end - e.handler_start,
+                e.catch_type.unwrap_or(0),
+            ] {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
     Ok(out)
 }
 /// Where appended data goes: a new `.ilens` section, or the end of the last section.
@@ -527,11 +555,19 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
         }
     }
     for (&token, edit) in edits {
-        let validated = edit::validate_types(a, token, &edit.instructions, edit.locals.clone())?;
+        let validated = edit::validate_types(
+            a,
+            token,
+            &edit.instructions,
+            edit.locals.clone(),
+            Some(&edit.regions),
+        )?;
         if validated.code != edit.code
             || validated.max_stack != edit.max_stack
             || validated.strings != edit.strings
             || validated.locals != edit.locals
+            || serde_json::to_vec(&validated.exceptions).ok()
+                != serde_json::to_vec(&edit.exceptions).ok()
         {
             return Err(unsupported("Edit validation is stale"));
         }
@@ -548,6 +584,7 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             &code,
             edit.max_stack,
             signatures.get(&token).copied(),
+            &edit.exceptions,
         )?;
         codes.insert(token, code);
         if bytes.len() <= range.len()
@@ -714,7 +751,8 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
                 .ok_or_else(|| unsupported("Written method has no body"))?;
             edit::verify(&parsed, token, &body)?;
             let bytes = cil_encode_bytes(&body)?;
-            if bytes != *code {
+            let clauses = |exceptions: &[cil::ExceptionRegion]| serde_json::to_vec(exceptions).ok();
+            if bytes != *code || clauses(&body.exceptions) != clauses(&edits[&token].exceptions) {
                 return Err(unsupported("Written method differs from validated IL"));
             }
         } else {

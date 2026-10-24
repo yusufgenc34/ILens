@@ -243,6 +243,27 @@ impl<'a> Types<'a> {
     pub fn token(&mut self, token: u32) -> Result<TypeId> {
         self.token_depth(token, 0)
     }
+    /// A catch clause's type. Only objects are thrown, so an external TypeRef named
+    /// there is a class even when no signature establishes its kind.
+    pub fn exception_type(&mut self, token: u32) -> Result<TypeId> {
+        if token >> 24 == 1 && !self.tokens.contains_key(&token) {
+            self.a.validate_token(token)?;
+            if self
+                .core_name(token)?
+                .as_deref()
+                .and_then(Self::primitive)
+                .is_none()
+            {
+                let id = self.intern(Value::Class(token))?;
+                self.tokens.insert(token, id);
+                return Ok(id);
+            }
+        }
+        if token >> 24 == 27 {
+            return Err(unsupported("Generic catch types are not editable yet"));
+        }
+        self.token(token)
+    }
     fn token_depth(&mut self, token: u32, depth: usize) -> Result<TypeId> {
         self.spend()?;
         if depth > 48 {

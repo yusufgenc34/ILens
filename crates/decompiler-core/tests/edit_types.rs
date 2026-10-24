@@ -292,7 +292,6 @@ fn unsupported_signatures_have_specific_diagnostics() {
         ("Matrix", "Multidimensional"),
         ("ByRef", "Byref"),
         ("Struct", "structs"),
-        ("ExceptionRegion", "exception handlers"),
     ] {
         let error = edit::preview(&a, token(&a, name), 0, None)
             .err()
@@ -300,6 +299,9 @@ fn unsupported_signatures_have_specific_diagnostics() {
         assert_eq!(error.code, ErrorCode::UnsupportedEdit);
         assert!(error.detail.contains(detail), "{name}: {error}");
     }
+    // try/catch methods open with their clause.
+    let preview = edit::preview(&a, token(&a, "ExceptionRegion"), 0, None).unwrap();
+    assert_eq!(preview.regions.len(), 1);
 }
 
 #[test]

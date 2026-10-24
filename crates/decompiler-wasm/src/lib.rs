@@ -206,6 +206,7 @@ impl Decompiler {
             Edit {
                 instructions: Vec<decompiler_core::cil_encode::EditableInstruction>,
                 locals: Option<Vec<String>>,
+                regions: Option<Vec<decompiler_core::edit::EditRegion>>,
             },
         }
         let request: Request = serde_json::from_str(instructions).map_err(|e| {
@@ -214,16 +215,17 @@ impl Decompiler {
                 e.to_string(),
             ))
         })?;
-        let (rows, locals) = match request {
-            Request::Rows(rows) => (rows, None),
+        let (rows, locals, regions) = match request {
+            Request::Rows(rows) => (rows, None, None),
             Request::Edit {
                 instructions,
                 locals,
-            } => (instructions, locals),
+                regions,
+            } => (instructions, locals, regions),
         };
         js(&self
             .session
-            .apply_edit(id, token, revision, rows, locals)
+            .apply_edit(id, token, revision, rows, locals, regions)
             .map_err(error)?)
     }
     pub fn discard_method_edit(

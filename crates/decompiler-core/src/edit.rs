@@ -8,7 +8,7 @@ use crate::{
     cil_encode::{self, EditableInstruction},
     error::{Error, ErrorCode, Result},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 #[derive(Debug, Clone)]
 pub struct ValidatedEdit {
@@ -19,6 +19,22 @@ pub struct ValidatedEdit {
     pub strings: Vec<String>,
     /// Replacement local variable types, or None to keep the method's signature.
     pub locals: Option<Vec<crate::signature::Type>>,
+    /// Exception regions by instruction label, as validated.
+    pub regions: Vec<EditRegion>,
+    /// The same regions as code offsets, for the method's EH section.
+    pub exceptions: Vec<cil::ExceptionRegion>,
+}
+/// An exception clause in the editor: labels name the first instruction of a range and
+/// the first one after it ("" for the end of the method).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditRegion {
+    pub kind: String,
+    pub try_start: String,
+    pub try_end: String,
+    pub handler_start: String,
+    pub handler_end: String,
+    #[serde(default)]
+    pub catch_type: Option<String>,
 }
 #[derive(Serialize)]
 pub struct EditPreview {
@@ -33,6 +49,8 @@ pub struct EditPreview {
     /// Local variable types, as the editor shows and accepts them.
     pub locals: Vec<String>,
     pub original_locals: Vec<String>,
+    pub regions: Vec<EditRegion>,
+    pub original_regions: Vec<EditRegion>,
 }
 mod types;
 use types::{Stack, Types, Value};
@@ -141,9 +159,9 @@ pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
     let body = a
         .body(token)?
         .ok_or_else(|| unsupported("This member has no CIL body"))?;
-    if !body.exceptions.is_empty() {
+    if body.exceptions.iter().any(|e| e.kind == "filter") {
         return Err(unsupported(
-            "Methods with exception handlers are read-only in this release",
+            "Methods with filter clauses are read-only: filters run user code during the first exception pass",
         ));
     }
     let locals = a.locals(&body)?;
@@ -166,6 +184,16 @@ pub fn validate_with_locals(
     token: u32,
     rows: &[EditableInstruction],
     locals: Option<&[String]>,
+) -> Result<ValidatedEdit> {
+    validate_request(a, token, rows, locals, None)
+}
+/// Validates instructions with optional new local types and exception regions.
+pub fn validate_request(
+    a: &Assembly,
+    token: u32,
+    rows: &[EditableInstruction],
+    locals: Option<&[String]>,
+    regions: Option<&[EditRegion]>,
 ) -> Result<ValidatedEdit> {
     if a.image.ready_to_run {
         return Err(unsupported(
@@ -193,7 +221,7 @@ pub fn validate_with_locals(
         }
         None => None,
     };
-    validate_types(a, token, rows, locals)
+    validate_types(a, token, rows, locals, regions)
 }
 /// Validation with already parsed local types (the writer revalidates this way).
 pub fn validate_types(
@@ -201,12 +229,19 @@ pub fn validate_types(
     token: u32,
     rows: &[EditableInstruction],
     locals: Option<Vec<crate::signature::Type>>,
+    regions: Option<&[EditRegion]>,
 ) -> Result<ValidatedEdit> {
     let mut body = supported_body(a, token)?;
+    // Without explicit regions, the method's own clauses keep their labels.
+    let regions = match regions {
+        Some(regions) => regions.to_vec(),
+        None => editable_regions(&body),
+    };
     let (rows, strings) = string_literals(a, rows)?;
     let code = cil_encode::encode(&rows)?;
     body.instructions = cil::decode(&code)?;
     body.code_size = code.len() as u32;
+    body.exceptions = resolve_regions(&rows, &body, &regions)?;
     let original_locals = a.locals(&body)?;
     let locals = locals.filter(|l| *l != original_locals);
     let max_stack = verify_with(a, token, &body, strings.len(), locals.as_deref())?;
@@ -218,7 +253,156 @@ pub fn validate_types(
         max_stack,
         strings,
         locals,
+        regions,
+        exceptions: body.exceptions,
     })
+}
+/// A method's clauses with `IL_XXXX` labels, as `cil_encode::from_body` names rows.
+fn editable_regions(body: &MethodBody) -> Vec<EditRegion> {
+    let label = |offset: u32| {
+        if offset >= body.code_size {
+            String::new()
+        } else {
+            format!("IL_{offset:04X}")
+        }
+    };
+    body.exceptions
+        .iter()
+        .map(|e| EditRegion {
+            kind: e.kind.clone(),
+            try_start: label(e.try_start),
+            try_end: label(e.try_end),
+            handler_start: label(e.handler_start),
+            handler_end: label(e.handler_end),
+            catch_type: e.catch_type.map(|t| format!("0x{t:08X}")),
+        })
+        .collect()
+}
+/// Region labels as offsets in the encoded body.
+fn resolve_regions(
+    rows: &[EditableInstruction],
+    body: &MethodBody,
+    regions: &[EditRegion],
+) -> Result<Vec<cil::ExceptionRegion>> {
+    if regions.len() > 256 {
+        return Err(Error::limit(
+            "A method can have at most 256 exception clauses",
+        ));
+    }
+    let offsets: std::collections::HashMap<&str, u32> = rows
+        .iter()
+        .zip(&body.instructions)
+        .map(|(row, i)| (row.id.as_str(), i.offset))
+        .collect();
+    let at = |label: &str| -> Result<u32> {
+        if label.trim().is_empty() {
+            return Ok(body.code_size);
+        }
+        offsets.get(label.trim()).copied().ok_or_else(|| {
+            invalid(format!(
+                "Exception region label {label} names no instruction; keep region boundaries when deleting instructions"
+            ))
+        })
+    };
+    regions
+        .iter()
+        .map(|r| {
+            let catch_type = match r.kind.as_str() {
+                "catch" => {
+                    let text = r.catch_type.as_deref().unwrap_or("").trim();
+                    let token = text
+                        .strip_prefix("0x")
+                        .and_then(|h| u32::from_str_radix(h, 16).ok())
+                        .ok_or_else(|| invalid("A catch clause needs a type token such as 0x01000005"))?;
+                    Some(token)
+                }
+                "finally" | "fault" => None,
+                "filter" => {
+                    return Err(unsupported(
+                        "Filter clauses run user code during the first exception pass; they remain read-only",
+                    ));
+                }
+                other => return Err(invalid(format!("Unknown exception clause kind: {other}"))),
+            };
+            Ok(cil::ExceptionRegion {
+                kind: r.kind.clone(),
+                try_start: at(&r.try_start)?,
+                try_end: at(&r.try_end)?,
+                handler_start: at(&r.handler_start)?,
+                handler_end: at(&r.handler_end)?,
+                catch_type,
+                filter_start: None,
+            })
+        })
+        .collect()
+}
+/// A protected range or handler that contains an instruction, by its offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Try(u32, u32),
+    Handler(u32, u32, usize),
+}
+impl Part {
+    fn range(self) -> (u32, u32) {
+        match self {
+            Part::Try(s, e) | Part::Handler(s, e, _) => (s, e),
+        }
+    }
+}
+/// The ranges containing `offset`, outermost first. Clauses sharing a try range share
+/// its part.
+fn region_path(exceptions: &[cil::ExceptionRegion], offset: u32) -> Vec<Part> {
+    let mut parts: Vec<Part> = vec![];
+    for (i, e) in exceptions.iter().enumerate() {
+        if (e.try_start..e.try_end).contains(&offset)
+            && !parts.contains(&Part::Try(e.try_start, e.try_end))
+        {
+            parts.push(Part::Try(e.try_start, e.try_end));
+        }
+        if (e.handler_start..e.handler_end).contains(&offset) {
+            parts.push(Part::Handler(e.handler_start, e.handler_end, i));
+        }
+    }
+    parts.sort_by_key(|p| {
+        let (s, e) = p.range();
+        (std::cmp::Reverse(e - s), s)
+    });
+    parts
+}
+/// ECMA-335 II.19 layout: ranges on instruction boundaries, handlers outside their try,
+/// and any two ranges disjoint or nested.
+fn check_region_layout(body: &MethodBody) -> Result<()> {
+    let starts: std::collections::HashSet<u32> = body
+        .instructions
+        .iter()
+        .map(|i| i.offset)
+        .chain([body.code_size])
+        .collect();
+    let mut ranges = vec![];
+    for e in &body.exceptions {
+        for (s, end) in [(e.try_start, e.try_end), (e.handler_start, e.handler_end)] {
+            if s >= end || !starts.contains(&s) || !starts.contains(&end) {
+                return Err(invalid(
+                    "Exception ranges must be non-empty and start and end on instructions",
+                ));
+            }
+        }
+        if e.handler_start < e.try_end && e.try_start < e.handler_end {
+            return Err(invalid("A handler cannot overlap its protected range"));
+        }
+        ranges.push((e.try_start, e.try_end));
+        ranges.push((e.handler_start, e.handler_end));
+    }
+    for (i, a) in ranges.iter().enumerate() {
+        for b in &ranges[i + 1..] {
+            let disjoint = a.1 <= b.0 || b.1 <= a.0;
+            let nested = a.0 <= b.0 && b.1 <= a.1 || b.0 <= a.0 && a.1 <= b.1;
+            if !disjoint && !nested {
+                return Err(invalid("Exception ranges must be disjoint or nested"));
+            }
+        }
+    }
+    Ok(())
 }
 /// A local variable type as written in the editor: a C# keyword (`int`, `string`), a
 /// TypeDef/TypeRef token (`0x02000003`) or a local type's full name, with `[]` for
@@ -340,11 +524,7 @@ pub fn verify_with(
     pending_strings: usize,
     locals: Option<&[crate::signature::Type]>,
 ) -> Result<u16> {
-    if !body.exceptions.is_empty() {
-        return Err(unsupported(
-            "Exception-region edits require handler boundary and stack validation",
-        ));
-    }
+    check_region_layout(body)?;
     let method = a.method_ref(token)?;
     let sig = &method.signature;
     let mut types = Types::new(a);
@@ -379,6 +559,39 @@ pub fn verify_with(
     let mut queue = VecDeque::from([0]);
     let mut queued = vec![false; cfg.blocks.len()];
     queued[0] = true;
+    // Handlers start with the caught exception (catch) or an empty stack.
+    for e in &body.exceptions {
+        let block = *cfg
+            .by_offset
+            .get(&e.handler_start)
+            .ok_or_else(|| invalid("Handler does not start a block"))?;
+        let entry = match e.catch_type {
+            Some(t) => {
+                let id = types.exception_type(t)?;
+                if !types.value(id).reference() {
+                    return Err(invalid("A catch clause must name a reference type"));
+                }
+                vec![types.stack(id)]
+            }
+            None => vec![],
+        };
+        if entries[block].as_ref().is_some_and(|old| *old != entry) {
+            return Err(invalid(
+                "Handlers sharing a start need the same entry stack",
+            ));
+        }
+        entries[block] = Some(entry);
+        if !queued[block] {
+            queue.push_back(block);
+            queued[block] = true;
+        }
+    }
+    let try_starts: std::collections::HashSet<u32> =
+        body.exceptions.iter().map(|e| e.try_start).collect();
+    let handler_kind = |part: Part| match part {
+        Part::Handler(_, _, i) => Some(body.exceptions[i].kind.as_str()),
+        Part::Try(..) => None,
+    };
     let mut maximum = 0;
     let mut work = 0;
     let mut cells = 0;
@@ -413,6 +626,64 @@ pub fn verify_with(
             maximum = maximum.max(stack.len());
             if maximum > 1024 {
                 return Err(invalid("Evaluation stack exceeds 1024 values"));
+            }
+        }
+        // Control may cross region boundaries only as ECMA-335 III.1.7.5 allows.
+        if let Some(last) = body.instructions[block.first..block.last].last() {
+            let from = region_path(&body.exceptions, block.start);
+            let innermost = from.last().copied().and_then(handler_kind);
+            let context = |e: &str| invalid(format!("IL_{:04X} ({}): {e}", last.offset, last.name));
+            match last.opcode {
+                0x2a if !from.is_empty() => {
+                    return Err(context(
+                        "ret cannot appear inside a protected range or handler; use leave",
+                    ));
+                }
+                0xdc if !matches!(innermost, Some("finally" | "fault")) => {
+                    return Err(context(
+                        "endfinally is only valid in a finally or fault handler",
+                    ));
+                }
+                0xfe1a => {
+                    let catch = from.iter().rposition(|p| handler_kind(*p) == Some("catch"));
+                    let finally = from
+                        .iter()
+                        .rposition(|p| matches!(handler_kind(*p), Some("finally" | "fault")));
+                    if catch.is_none() || finally > catch {
+                        return Err(context("rethrow is only valid inside a catch handler"));
+                    }
+                }
+                _ => {}
+            }
+            for next in &block.successors {
+                let target = cfg.blocks[*next].start;
+                let to = region_path(&body.exceptions, target);
+                let allowed = if matches!(last.opcode, 0xdd | 0xde) {
+                    // leave exits enclosing ranges, never out of a finally or fault.
+                    to.len() <= from.len()
+                        && from[..to.len()] == to[..]
+                        && !from[to.len()..]
+                            .iter()
+                            .any(|p| matches!(handler_kind(*p), Some("finally" | "fault")))
+                } else {
+                    to == from
+                        || to.len() == from.len() + 1
+                            && to[..from.len()] == from[..]
+                            && matches!(to[from.len()], Part::Try(s, _) if s == target)
+                };
+                if !allowed {
+                    return Err(context(&format!(
+                        "control cannot transfer to IL_{target:04X} across an exception range; enter a try at its first instruction and exit with leave"
+                    )));
+                }
+                if try_starts.contains(&target)
+                    && !matches!(last.opcode, 0xdd | 0xde)
+                    && !stack.is_empty()
+                {
+                    return Err(context(
+                        "a protected range must be entered with an empty stack",
+                    ));
+                }
             }
         }
         for next in &block.successors {
@@ -519,6 +790,9 @@ fn transfer(
             }
         }
         0x2b | 0x38 => {}
+        // leave and endfinally empty the evaluation stack; rethrow ends the handler.
+        0xdc..=0xde => stack.clear(),
+        0xfe1a => {}
         0x2c | 0x2d | 0x39 | 0x3a => {
             if pop(stack)? == Stack::F {
                 return Err(invalid(
@@ -887,6 +1161,7 @@ pub fn preview(
 ) -> Result<EditPreview> {
     let mut body = supported_body(a, token)?;
     let original = cil_encode::from_body(&body);
+    let original_regions = editable_regions(&body);
     if edit.is_none() {
         verify(a, token, &body)?;
     }
@@ -944,5 +1219,7 @@ pub fn preview(
         code_size: body.code_size as usize,
         locals: shown(&types),
         original_locals: shown(&original_types),
+        regions: edit.map_or_else(|| original_regions.clone(), |e| e.regions.clone()),
+        original_regions,
     })
 }

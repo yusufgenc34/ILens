@@ -99,7 +99,7 @@ fn rejects_bad_stack_types_tokens_and_stale_edits() {
         .opcode = "ldnull".into();
     assert!(
         session
-            .apply_edit(loaded.id, token, original.revision, rows, None)
+            .apply_edit(loaded.id, token, original.revision, rows, None, None)
             .is_err()
     );
     let mut rows = original.instructions.clone();
@@ -108,7 +108,7 @@ fn rejects_bad_stack_types_tokens_and_stale_edits() {
         .unwrap()
         .opcode = "ldc.i4.3".into();
     let current = session
-        .apply_edit(loaded.id, token, original.revision, rows, None)
+        .apply_edit(loaded.id, token, original.revision, rows, None, None)
         .unwrap();
     assert!(current.changed);
     assert!(
@@ -134,12 +134,17 @@ fn rejects_bad_stack_types_tokens_and_stale_edits() {
     );
 }
 #[test]
-fn verifies_loops_and_blocks_exception_methods() {
+fn verifies_loops_and_exception_methods() {
     let a = Assembly::load(PAT.to_vec()).unwrap();
     let t = method(&a, "Sum");
     let rows = cil_encode::from_body(&a.body(t).unwrap().unwrap());
     assert!(edit::validate(&a, t, &rows).is_ok());
-    assert!(edit::supported_body(&a, method(&a, "SafeDivide")).is_err());
+    // try/catch methods are editable; their clauses keep their labels.
+    let safe = method(&a, "SafeDivide");
+    let rows = cil_encode::from_body(&a.body(safe).unwrap().unwrap());
+    let edit = edit::validate(&a, safe, &rows).unwrap();
+    assert_eq!(edit.regions.len(), 1);
+    assert_eq!(edit.regions[0].kind, "catch");
     let t = method(&a, "Multiply");
     let rows = vec![
         EditableInstruction {
@@ -314,7 +319,7 @@ fn loading_dependencies_keeps_open_edits_current() {
         .unwrap()
         .opcode = "ldc.i4.3".into();
     let current = session
-        .apply_edit(loaded.id, token, original.revision, rows, None)
+        .apply_edit(loaded.id, token, original.revision, rows, None, None)
         .unwrap();
     session.load(PAT.to_vec()).unwrap();
     assert!(
@@ -465,4 +470,42 @@ fn new_locals_add_a_local_signature() {
     // A second edit with the same locals reuses the new signature row on rewrite.
     let again = edit::validate_with_locals(&b, token, &rows, Some(&locals)).unwrap();
     assert!(again.locals.is_none());
+}
+#[test]
+fn exception_regions_are_verified_and_written() {
+    let a = Assembly::load(PAT.to_vec()).unwrap();
+    let token = method(&a, "SafeDivide");
+    let body = a.body(token).unwrap().unwrap();
+    let rows = cil_encode::from_body(&body);
+    let original = edit::validate(&a, token, &rows).unwrap();
+    let mut regions = original.regions.clone();
+    // A handler overlapping its try range is rejected.
+    let mut overlapping = regions.clone();
+    overlapping[0].handler_start = overlapping[0].try_start.clone();
+    assert!(edit::validate_request(&a, token, &rows, None, Some(&overlapping)).is_err());
+    // A finally handler starts with an empty stack, so the catch's `pop` underflows.
+    regions[0].kind = "finally".into();
+    regions[0].catch_type = None;
+    let error = edit::validate_request(&a, token, &rows, None, Some(&regions)).unwrap_err();
+    assert!(error.detail.contains("underflow"), "{}", error.detail);
+    // Rewriting with an unchanged catch clause reproduces it exactly.
+    let mut changed = rows.clone();
+    let constant = changed.iter_mut().find(|r| r.opcode == "ldc.i4.0").unwrap();
+    constant.opcode = "ldc.i4.m1".into();
+    let edit = edit::validate(&a, token, &changed).unwrap();
+    let output = pe_write::write(&a, &BTreeMap::from([(token, edit)])).unwrap();
+    let b = Assembly::load(output).unwrap();
+    let written = b.body(token).unwrap().unwrap();
+    assert_eq!(written.exceptions.len(), 1);
+    assert_eq!(written.exceptions[0].kind, "catch");
+    assert_eq!(
+        written.exceptions[0].catch_type,
+        body.exceptions[0].catch_type
+    );
+    assert!(
+        decompiler_core::decompile::decompile(&b, token)
+            .unwrap()
+            .csharp
+            .contains("num = -1;")
+    );
 }
