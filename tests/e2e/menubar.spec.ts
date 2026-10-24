@@ -20,7 +20,7 @@ test('top menus support keyboard navigation, disabled actions and view settings'
   await expect(page.locator('.application')).toHaveClass(/(?:^|\s)light(?:\s|$)/)
   await page.getByRole('menuitem', {name: 'File', exact: true}).click()
   await expect(page.getByRole('menu', {name: 'File', exact: true})).toBeVisible()
-  await expect(page.locator('.drop-zone')).toHaveCSS('background-color', 'rgb(255, 255, 255)')
+  await expect(page.locator('.drop-zone')).toHaveCSS('border-top-style', 'dashed')
   await page.screenshot({path: testInfo.outputPath('top-menu.png'), animations: 'disabled'})
   await page.locator('h1').click(); await expect(page.getByRole('menu', {name: 'File', exact: true})).toHaveCount(0)
   await file.click()

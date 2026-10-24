@@ -5,7 +5,11 @@ const result = spawnSync('dotnet', ['build', 'samples/Patterns', '-c', 'Release'
 if (result.status !== 0) process.exit(result.status ?? 1)
 mkdirSync('samples/fixtures', {recursive: true})
 for (const file of ['ILens.Patterns.dll', 'ILens.Dependency.dll']) copyFileSync(`samples/bin/${file}`, `samples/fixtures/${file}`)
-copyFileSync('samples/fixtures/ILens.Patterns.dll', 'public/samples/ILens.Patterns.dll')
+// The start page's example: small and readable, compiled for inspection only.
+const example = spawnSync('dotnet', ['build', 'samples/Example', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
+if (example.status !== 0) process.exit(example.status ?? 1)
+copyFileSync('samples/bin/ILens.Example.dll', 'samples/fixtures/ILens.Example.dll')
+copyFileSync('samples/fixtures/ILens.Example.dll', 'public/samples/ILens.Example.dll')
 
 // Additional write-verification fixtures; compiled for inspection, never executed.
 const editing = spawnSync('dotnet', ['build', 'samples/Editing', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})

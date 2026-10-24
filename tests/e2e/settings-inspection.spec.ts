@@ -3,7 +3,7 @@ import path from 'node:path'
 
 const fixture = (name: string) => path.resolve(`samples/fixtures/ILens.${name}.dll`)
 
-test('editor settings change real highlighting, persist, and leave the workspace neutral', async ({page}, testInfo) => {
+test('editor settings change real highlighting, persist, and dark code themes color the workspace', async ({page}, testInfo) => {
   const failures: string[] = []
   page.on('pageerror', error => failures.push(error.message))
   await page.goto('./')
@@ -22,7 +22,9 @@ test('editor settings change real highlighting, persist, and leave the workspace
     await dialog.getByLabel('Code theme').selectOption(theme)
     await expect(dialog.locator('.cm-editor')).toHaveCSS('background-color', background)
     await expect(preview.getByText('public', {exact: true})).toHaveCSS('color', keyword)
-    await expect(page.locator('.application')).toHaveCSS('background-color', 'rgb(10, 10, 10)')
+    // Dark code themes carry their colors into the panels; neutral and light keep the neutral chrome.
+    if (theme === 'neutral' || theme === 'light') await expect(page.locator('.application')).toHaveCSS('background-color', 'rgb(10, 10, 10)')
+    else await expect(page.locator('.application')).not.toHaveCSS('background-color', 'rgb(10, 10, 10)')
   }
   await dialog.getByLabel('Syntax highlighting', {exact: true}).uncheck()
   await expect(preview.locator('.cm-line').nth(1).locator('span')).toHaveCount(0)

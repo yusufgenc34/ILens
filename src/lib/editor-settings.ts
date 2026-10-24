@@ -82,3 +82,48 @@ export function stripTokenComments<R extends {start: number; end: number}>(text:
   const shift = (offset: number) => removed.reduce((total, [start, end]) => total + (end <= offset ? end - start : 0), 0)
   return {text: out, references: references?.filter(r => !removed.some(([start, end]) => r.start >= start && r.end <= end)).map(r => ({...r, start: r.start - shift(r.start), end: r.end - shift(r.start)}))}
 }
+/** The workspace chrome in the code theme's colors, so panels, menus and dialogs match
+ * the code view (Dracula's sidebar, borders and accent rather than neutral black).
+ * Only dark code themes in the dark appearance; otherwise the neutral tokens apply. */
+export function chromeStyle(theme: EditorTheme, appearance: string): Record<string, string> | undefined {
+  if (theme === 'neutral' || appearance !== 'dark') return undefined
+  const p = palettes[theme]
+  if (!p.dark) return undefined
+  const mix = (color: string, other: string, amount: number) => `color-mix(in srgb, ${color}, ${other} ${amount}%)`
+  return {
+    '--editor': p.background,
+    '--background': mix(p.background, '#000', 28),
+    '--surface': mix(p.background, '#000', 16),
+    '--card': mix(p.background, '#fff', 3),
+    '--popover': mix(p.background, '#fff', 3),
+    '--border': mix(p.background, '#000', 42),
+    '--muted': p.activeLine,
+    '--accent': p.activeLine,
+    '--accent-dim': p.activeLine,
+    '--hover': p.activeLine,
+    '--secondary': p.activeLine,
+    '--input': p.selection,
+    '--selection': p.selection,
+    '--active-line': p.activeLine,
+    '--foreground': p.foreground,
+    '--text': p.foreground,
+    '--card-foreground': p.foreground,
+    '--accent-foreground': p.foreground,
+    '--secondary-foreground': p.foreground,
+    '--muted-foreground': p.gutter,
+    '--faint': mix(p.gutter, p.background, 25),
+    '--ring': p.number,
+    '--primary': p.number,
+    '--primary-hover': mix(p.number, '#fff', 15),
+    '--primary-foreground': p.background,
+    '--syntax-string': p.string,
+    '--tree-type': p.type,
+    '--tree-interface': p.type,
+    '--tree-value-type': p.type,
+    '--tree-delegate': p.type,
+    '--tree-method': p.function,
+    '--tree-namespace': p.foreground,
+    '--tree-assembly': p.foreground,
+    '--shadow': '0 12px 32px #0006',
+  }
+}

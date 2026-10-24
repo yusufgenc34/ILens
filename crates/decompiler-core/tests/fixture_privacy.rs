@@ -27,11 +27,15 @@ const FIXTURES: &[(&str, &[u8])] = &[
     ),
     (
         "public sample",
-        include_bytes!("../../../public/samples/ILens.Patterns.dll"),
+        include_bytes!("../../../public/samples/ILens.Example.dll"),
     ),
     (
         "Editing",
         include_bytes!("../../../samples/fixtures/ILens.Editing.dll"),
+    ),
+    (
+        "Example",
+        include_bytes!("../../../samples/fixtures/ILens.Example.dll"),
     ),
     (
         "Readability",
@@ -92,7 +96,7 @@ fn public_sample_matches_the_checked_fixture() {
     assert_eq!(
         FIXTURES
             .iter()
-            .find(|(name, _)| *name == "Patterns")
+            .find(|(name, _)| *name == "Example")
             .unwrap()
             .1,
         FIXTURES

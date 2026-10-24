@@ -91,6 +91,62 @@ fn strip_final_returns(nodes: &mut Vec<Ast>) {
         _ => {}
     }
 }
+/// `if (c) { ...; return x; } throw e;` reads as the guard clause it was written as:
+/// `if (!c) { throw e; } ...; return x;`. Both orders run the same statements.
+fn guard_clauses(nodes: &mut Vec<Ast>) {
+    for n in nodes.iter_mut() {
+        match n {
+            Ast::If { yes, no, .. } => {
+                guard_clauses(yes);
+                guard_clauses(no);
+            }
+            Ast::While { body, .. } | Ast::For { body, .. } => guard_clauses(body),
+            Ast::Try { body, handlers } => {
+                guard_clauses(body);
+                for h in handlers {
+                    guard_clauses(&mut h.body);
+                }
+            }
+            _ => {}
+        }
+    }
+    let exits = |n: Option<&Ast>| matches!(n, Some(Ast::Return(_) | Ast::Throw(_)));
+    let movable = |yes: &Vec<Ast>| {
+        yes.len() > 1 && exits(yes.last()) && !yes.iter().any(|n| matches!(n, Ast::Label(_)))
+    };
+    // The throw is either the else branch or the statement after the if.
+    let mut i = 0;
+    while i < nodes.len() {
+        let inline = matches!(&nodes[i], Ast::If { yes, no, .. } if movable(yes) && matches!(no.as_slice(), [Ast::Throw(Some(_))]));
+        let after = i + 2 == nodes.len()
+            && matches!(&nodes[i + 1], Ast::Throw(Some(_)))
+            && matches!(&nodes[i], Ast::If { yes, no, .. } if no.is_empty() && movable(yes));
+        if inline || after {
+            let throw = if after {
+                nodes.pop()
+            } else {
+                match &mut nodes[i] {
+                    Ast::If { no, .. } => no.pop(),
+                    _ => None,
+                }
+            };
+            if let (Some(throw), Ast::If { condition, yes, .. }) = (throw, nodes.remove(i)) {
+                nodes.insert(
+                    i,
+                    Ast::If {
+                        condition: negate(&condition),
+                        yes: vec![throw],
+                        no: vec![],
+                    },
+                );
+                let count = yes.len();
+                nodes.splice(i + 1..i + 1, yes);
+                i += count;
+            }
+        }
+        i += 1;
+    }
+}
 fn catch_variables(ast: &[Ast]) -> Vec<String> {
     let mut found = vec![];
     for n in ast {
@@ -352,6 +408,25 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                 } else if matches!(left.kind, Null) && declares_equality(a, &right.ty) {
                     r = format!("(object){}", cast_operand(expr(right)?));
                 }
+            }
+            // An enum compared with an integer constant reads as its member
+            // (`shape == Shape.Circle`), as stores into enums do.
+            if matches!(op.as_str(), "==" | "!=" | "<" | ">" | "<=" | ">=")
+                && !*unsigned
+                && let Some(text) = enum_constant(a, right, &left.ty)
+            {
+                r = text;
+            }
+            // `array.Length` compared with a small constant is the same comparison on the
+            // native length CIL reads: C# lengths are never negative or above int.MaxValue.
+            if matches!(op.as_str(), "==" | "!=" | ">" | "<" | ">=" | "<=")
+                && let Length(array) = &left.kind
+                && let Constant(c) = &right.kind
+                && c.parse::<i32>().is_ok_and(|n| n >= 0)
+            {
+                l = format!("{}.Length", receiver(array)?);
+                r = c.clone();
+                return Ok((format!("{l} {op} {r}"), precedence));
             }
             // A character compared with an integer constant reads as a character literal.
             if is_char(&left.ty)
@@ -955,6 +1030,15 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                         PRIMARY,
                     )
                 }
+                // Integer to floating point never overflows; `unchecked` adds nothing.
+                "unchecked"
+                    if matches!(
+                        t.as_str(),
+                        "double" | "float" | "System.Double" | "System.Single"
+                    ) && matches!(&value.ty, Type::Primitive(n) if ["sbyte", "byte", "short", "ushort", "int", "uint", "long", "ulong", "char", "float", "double"].contains(&n.as_str())) =>
+                {
+                    (format!("({t}){}", cast_operand(v)), UNARY)
+                }
                 "checked" | "unchecked" => (format!("{mode}(({t}){})", cast_operand(v)), PRIMARY),
                 _ => (format!("({t}){}", cast_operand(v)), UNARY),
             }
@@ -994,6 +1078,17 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                     && matches!((&left.kind, &yes.kind), (Variable(a), Variable(b)) if a == b)) =>
         {
             (format!("{} ?? {}", at(yes, 4)?, at(no, 3)?), 3)
+        }
+        // `!c ? x : y` reads better as `c ? y : x`.
+        Conditional { condition, yes, no } if matches!(&condition.kind, Unary { op, value } if op == "!" && !matches!(value.kind, Binary { .. } | Unary { .. })) =>
+        {
+            let Unary { value, .. } = &condition.kind else {
+                unreachable!()
+            };
+            (
+                format!("{} ? {} : {}", at(value, 3)?, at(no, 3)?, at(yes, 2)?),
+                2,
+            )
         }
         Conditional { condition, yes, no } => (
             format!("{} ? {} : {}", at(condition, 3)?, at(yes, 3)?, at(no, 2)?),
@@ -3117,6 +3212,7 @@ pub fn csharp_body(
         drop_dead_stack_copies(&mut owned, &read);
         string_switches(a, &mut owned);
         conditionals(a, &returns, &mut owned);
+        guard_clauses(&mut owned);
     }
     let ast = owned.as_slice();
     let enclosing = LOCAL_FUNCTIONS.with(|f| std::mem::take(&mut *f.borrow_mut()));
