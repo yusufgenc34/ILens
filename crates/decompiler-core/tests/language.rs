@@ -87,3 +87,19 @@ fn indexers_parameters_extensions_and_tuples() {
     assert!(!extensions.contains("[Extension]"), "{extensions}");
     assert!(!view(&a, "Bag").contains("[DefaultMember"));
 }
+#[test]
+fn cached_lambdas_and_local_functions_read_as_source() {
+    let a = Assembly::load(LANGUAGE.to_vec()).unwrap();
+    let constructs = view(&a, "Constructs");
+    assert_contains(
+        &constructs,
+        &[
+            "return x => x * 3;",
+            "return values.Where<int>(v => v > 2).Select<int, int>(v => v * 2).Sum();",
+            "return Twice(value) + 1;\n\n            static int Twice(int x)\n            {\n                return x * 2;\n            }",
+        ],
+    );
+    // The caching field and the generated method are not shown.
+    assert!(!constructs.contains("<>9__"), "{constructs}");
+    assert!(!constructs.contains("g__Twice"), "{constructs}");
+}

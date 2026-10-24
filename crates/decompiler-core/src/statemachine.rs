@@ -467,7 +467,7 @@ pub fn lower(
             continue;
         }
         if let Some(i) = index.get(&id) {
-            pending.extend(targets(&ir.blocks[*i].terminator));
+            pending.extend(crate::ir::targets(&ir.blocks[*i].terminator));
         }
     }
     for h in &body.exceptions {
@@ -483,7 +483,7 @@ pub fn lower(
                 if reachable.insert(id)
                     && let Some(i) = index.get(&id)
                 {
-                    stack.extend(targets(&ir.blocks[*i].terminator));
+                    stack.extend(crate::ir::targets(&ir.blocks[*i].terminator));
                 }
             }
         }
@@ -550,24 +550,7 @@ pub fn lower(
         return Err(unsupported("machine state remains after rebuilding"));
     }
     // Control-flow edges follow the rewritten terminators.
-    for block in &mut cfg.blocks {
-        block.successors.clear();
-        block.predecessors.clear();
-    }
-    let positions: HashMap<usize, usize> = cfg
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.id, i))
-        .collect();
-    for b in &ir.blocks {
-        for t in targets(&b.terminator) {
-            if let (Some(from), Some(to)) = (positions.get(&b.id), positions.get(&t)) {
-                cfg.blocks[*from].successors.push(t);
-                cfg.blocks[*to].predecessors.push(b.id);
-            }
-        }
-    }
+    crate::ir::rebuild_edges(&mut cfg, &ir);
     body.init_locals = true;
     Ok(Lowered {
         kind,
@@ -576,14 +559,4 @@ pub fn lower(
         ir,
         entry,
     })
-}
-fn targets(t: &Terminator) -> Vec<usize> {
-    match t {
-        Terminator::Jump(e) => vec![e.target],
-        Terminator::Condition { yes, no, .. } => vec![yes.target, no.target],
-        Terminator::Switch { arms, default, .. } => {
-            arms.iter().chain([default]).map(|e| e.target).collect()
-        }
-        _ => vec![],
-    }
 }

@@ -483,3 +483,172 @@ pub fn simplify(ir: &mut TypedIr) {
         terminator_exprs(&mut b.terminator, &mut canonical);
     }
 }
+
+/// `C.<>9__N ?? (C.<>9__N = new D(C.<>9.<M>b__N))`: the compiler caches non-capturing
+/// lambdas in a static field of its `<>c` class. The cache is an optimization, so the
+/// join receives the delegate creation itself and the caching branch disappears.
+/// Returns whether any terminator changed.
+pub fn cached_delegates(a: &crate::assembly::Assembly, ir: &mut TypedIr, exceptions: bool) -> bool {
+    let cache = |token: u32| {
+        a.nodes.iter().any(|n| {
+            n.token == token
+                && n.name.starts_with("<>9__")
+                && a.nodes
+                    .iter()
+                    .any(|t| t.token == n.parent && t.name == "<>c")
+        })
+    };
+    let mut dropped = vec![];
+    let mut joins = vec![];
+    for i in 0..ir.blocks.len() {
+        let Terminator::Condition { condition, yes, no } = ir.blocks[i].terminator.clone() else {
+            continue;
+        };
+        // brtrue v, v != null or v == null on the loaded cache value.
+        let (variable, present, missing) = match &condition.kind {
+            ExprKind::Variable(v) => (v.clone(), yes, no),
+            ExprKind::Binary {
+                op, left, right, ..
+            } if matches!(right.kind, ExprKind::Null) => {
+                let ExprKind::Variable(v) = &left.kind else {
+                    continue;
+                };
+                match op.as_str() {
+                    "!=" => (v.clone(), yes, no),
+                    "==" => (v.clone(), no, yes),
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+        let Some(load) = ir.blocks[i].statements.iter().position(|s| {
+            matches!(s, Statement::Let { name, value: Expr { kind: ExprKind::Field { token, instance: None, .. }, .. }, .. }
+                if *name == variable && cache(*token))
+        }) else {
+            continue;
+        };
+        let Statement::Let {
+            value:
+                Expr {
+                    kind: ExprKind::Field { token: field, .. },
+                    ..
+                },
+            ..
+        } = ir.blocks[i].statements[load].clone()
+        else {
+            continue;
+        };
+        let Some(fill) = ir.blocks.iter().position(|b| b.id == missing.target) else {
+            continue;
+        };
+        let block = &ir.blocks[fill];
+        let creation = block.statements.iter().find_map(|s| match s {
+            Statement::Let { value, .. } | Statement::Assign { value, .. }
+                if matches!(&value.kind, ExprKind::New { args, .. }
+                    if matches!(args.last().map(|a| &a.kind), Some(ExprKind::FunctionPointer { .. }))) =>
+            {
+                Some(value.clone())
+            }
+            _ => None,
+        });
+        let stores = block.statements.iter().any(|s| {
+            matches!(s, Statement::Assign { target: Expr { kind: ExprKind::Field { token, instance: None, .. }, .. }, .. } if *token == field)
+        });
+        let rejoins =
+            matches!(&block.terminator, Terminator::Jump(e) if e.target == present.target);
+        let (Some(creation), true, true) = (creation, stores, rejoins) else {
+            continue;
+        };
+        // The cached value is used only by the test and the join's incoming values.
+        let used_elsewhere = ir.blocks[i].statements[load + 1..].iter().any(|s| {
+            let mut found = false;
+            let mut s = s.clone();
+            statement_exprs(&mut s, &mut |e| {
+                if matches!(&e.kind, ExprKind::Variable(n) if *n == variable) {
+                    found = true;
+                }
+            });
+            found
+        });
+        if used_elsewhere {
+            continue;
+        }
+        let values = present
+            .values
+            .iter()
+            .map(|v| match &v.kind {
+                ExprKind::Variable(n) if *n == variable => creation.clone(),
+                _ => v.clone(),
+            })
+            .collect();
+        ir.blocks[i].statements.remove(load);
+        ir.blocks[i].terminator = Terminator::Jump(Edge {
+            target: present.target,
+            values,
+        });
+        dropped.push(missing.target);
+        joins.push(present.target);
+    }
+    if !dropped.is_empty() {
+        // Caching branches no other edge enters are gone with their test.
+        let targeted: HashSet<usize> = ir
+            .blocks
+            .iter()
+            .flat_map(|b| crate::ir::targets(&b.terminator))
+            .collect();
+        ir.blocks
+            .retain(|b| !dropped.contains(&b.id) || targeted.contains(&b.id));
+    }
+    // A join now entered only from the test continues it, so its stack slots become
+    // ordinary single-use values instead of merge variables.
+    if !exceptions {
+        while let Some((from, into)) = joins.iter().find_map(|j| {
+            let entering: Vec<usize> = ir
+                .blocks
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| crate::ir::targets(&b.terminator).contains(j))
+                .map(|(i, _)| i)
+                .collect();
+            let into = ir.blocks.iter().position(|b| b.id == *j)?;
+            match entering.as_slice() {
+                [from]
+                    if matches!(ir.blocks[*from].terminator, Terminator::Jump(_))
+                        && *from != into =>
+                {
+                    Some((*from, into))
+                }
+                _ => None,
+            }
+        }) {
+            let join = ir.blocks.remove(into);
+            let from = if into < from { from - 1 } else { from };
+            joins.retain(|j| *j != join.id);
+            let Terminator::Jump(edge) =
+                std::mem::replace(&mut ir.blocks[from].terminator, join.terminator)
+            else {
+                unreachable!()
+            };
+            let entry = ir
+                .stack
+                .entry_stacks
+                .get_mut(join.id)
+                .and_then(Option::take)
+                .unwrap_or_default();
+            let block = &mut ir.blocks[from];
+            for (n, value) in edge.values.into_iter().enumerate() {
+                let ty = match entry.get(n) {
+                    Some(t) if !matches!(t, crate::signature::Type::Unknown) => t.clone(),
+                    _ => value.ty.clone(),
+                };
+                block.statements.push(Statement::Let {
+                    name: format!("stack_{:04X}_{n}", join.offset),
+                    ty,
+                    value,
+                });
+            }
+            block.statements.extend(join.statements);
+        }
+    }
+    !dropped.is_empty()
+}

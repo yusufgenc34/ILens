@@ -658,6 +658,27 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                     } else {
                         crate::bcl::is_extension(a, definition)
                     };
+                // A local function of this method is called by its own name.
+                if receiver_text.is_none()
+                    && let Some((outer, local)) = local_function(a, definition)
+                    && a.method_ref(context)
+                        .is_ok_and(|m| m.name == outer && m.owner == *owner)
+                {
+                    LOCAL_FUNCTIONS.with(|f| {
+                        let mut f = f.borrow_mut();
+                        if !f.contains(&definition) {
+                            f.push(definition);
+                        }
+                    });
+                    return Ok((
+                        format!(
+                            "{}({})",
+                            source_reference(*token, &identifier(&local)),
+                            rendered.join(", ")
+                        ),
+                        PRIMARY,
+                    ));
+                }
                 let (receiver, rest) = if extension {
                     (at(&args[0], PRIMARY)?, &rendered[1..])
                 } else {
@@ -946,8 +967,66 @@ pub fn state_machine_source(
             .collect(),
     })
 }
+/// A non-capturing local function `<Outer>g__Name|N_M`: (outer method name, name).
+/// Capturing ones take a closure struct by reference and keep their IL name.
+pub fn local_function(
+    a: &Assembly,
+    token: u32,
+) -> Option<(std::string::String, std::string::String)> {
+    if token >> 24 != 6 {
+        return None;
+    }
+    let node = a.nodes.iter().find(|n| n.token == token)?;
+    let (outer, rest) = node.name.strip_prefix('<')?.split_once(">g__")?;
+    let (name, _) = rest.split_once('|')?;
+    let m = a.method_ref(token).ok()?;
+    let capturing = m.signature.parameters.iter().any(|p| match p {
+        Type::ByRef(inner) => matches!(inner.as_ref(), Type::ValueType(t) | Type::Named(t)
+            if a.resolve_full(*t).contains("DisplayClass")),
+        _ => false,
+    });
+    let declared = a
+        .nodes
+        .iter()
+        .any(|n| n.parent == node.parent && n.token >> 24 == 6 && n.name == outer);
+    (!capturing
+        && declared
+        && !m.signature.has_this
+        && !a.generics.contains_key(&token)
+        && crate::attributes::compiler_generated(a, token))
+    .then(|| (outer.to_owned(), name.to_owned()))
+}
+thread_local! {
+    // Local functions called by the method body being rendered, in call order.
+    static LOCAL_FUNCTIONS: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
 thread_local! {
     static LAMBDA_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// `static R Name(parameters) { body }` for a local function.
+fn local_function_source(a: &Assembly, token: u32) -> Result<std::string::String> {
+    let (_, name) =
+        local_function(a, token).ok_or_else(|| Error::limitation("Not a local function"))?;
+    if LAMBDA_DEPTH.with(|d| d.get()) >= 8 {
+        return Err(Error::limitation("Local function nesting exceeds 8 levels"));
+    }
+    let saved = LOCAL_NAMES.with(|names| names.borrow().clone());
+    LAMBDA_DEPTH.with(|d| d.set(d.get() + 1));
+    let inner =
+        crate::decompile::decompile_with(a, token, &|t| crate::resolution::local_accessor(a, t));
+    LAMBDA_DEPTH.with(|d| d.set(d.get() - 1));
+    LOCAL_NAMES.with(|names| *names.borrow_mut() = saved);
+    let body = inner?
+        .source_body
+        .ok_or_else(|| Error::limitation("The local function body remains in IL"))?;
+    let m = a.method_ref(token)?;
+    let parameters = a.parameter_list(token, &m.signature);
+    Ok(format!(
+        "static {} {}({parameters})\n{}",
+        type_name(a, &m.signature.return_type, token),
+        identifier(&name),
+        body.trim_end()
+    ))
 }
 /// A compiler-generated lambda (`<Outer>b__N`) becomes a C# lambda with its body
 /// inlined; any other target is written as a method group.
@@ -2082,6 +2161,7 @@ pub fn csharp_body(
         strip_final_returns(&mut owned);
     }
     let ast = owned.as_slice();
+    let enclosing = LOCAL_FUNCTIONS.with(|f| std::mem::take(&mut *f.borrow_mut()));
     line(&mut out, 0, "{");
     for (i, t) in ir.locals.iter().enumerate() {
         line(
@@ -2140,6 +2220,22 @@ pub fn csharp_body(
     crate::tidy::while_to_for(&mut lines);
     crate::tidy::foreach_arrays(&mut lines);
     crate::tidy::unused_declarations(&mut lines);
+    // Local functions follow the statements, inside the method's closing brace.
+    let functions = LOCAL_FUNCTIONS.with(|f| std::mem::replace(&mut *f.borrow_mut(), enclosing));
+    if !functions.is_empty() && lines.last().is_some_and(|l| l == "}") {
+        lines.pop();
+        for function in functions {
+            lines.push(std::string::String::new());
+            for text in local_function_source(a, function)?.lines() {
+                lines.push(if text.is_empty() {
+                    std::string::String::new()
+                } else {
+                    format!("    {text}")
+                });
+            }
+        }
+        lines.push("}".to_owned());
+    }
     let out = lines.join("\n") + "\n";
     if out.len() > 4 * 1024 * 1024 {
         return Err(Error::limit("Reconstructed method exceeds 4 MiB"));

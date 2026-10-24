@@ -122,7 +122,9 @@ pub fn decompile_with(
             let source = emit::state_machine_source(a, token, &lowered, &ast)?;
             return finish(a, token, &mut result, source);
         }
-        let ir = lift_with(a, token, &body, &cfg, stack, accessor)?;
+        let mut ir = lift_with(a, token, &body, &cfg, stack, accessor)?;
+        let mut cfg = cfg;
+        restructure(a, &mut cfg, &mut ir, !body.exceptions.is_empty());
         let ast = ast::structure(&ir, &cfg, &body.exceptions);
         let source = emit::method_source(a, token, &body, &ir, &cfg, &ast)?;
         finish(a, token, &mut result, source)
@@ -182,6 +184,18 @@ pub fn lift_with(
     }
     transform::simplify(&mut ir);
     Ok(ir)
+}
+/// Source-level rewrites that change control flow; CFG edges follow the IR afterwards.
+pub fn restructure(
+    a: &Assembly,
+    cfg: &mut ControlFlowGraph,
+    ir: &mut ir::TypedIr,
+    exceptions: bool,
+) {
+    if transform::cached_delegates(a, ir, exceptions) {
+        transform::simplify(ir);
+        ir::rebuild_edges(cfg, ir);
+    }
 }
 // Header comment, attributes and navigation ranges for the code viewer.
 fn finish(

@@ -138,7 +138,7 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
             let mapped = identifier(&child.name);
             if let Some(previous) = symbol_names.insert(mapped,child.name.as_str()) && previous != child.name {diagnostics.push("Distinct metadata names collide after C# identifier mapping; manual renaming is required.".to_owned());}
         }
-        let members: Vec<u32> = children.get(&n.token).into_iter().flatten().filter(|m| m.token >> 24 != 2).map(|m| m.token).collect();
+        let members: Vec<u32> = children.get(&n.token).into_iter().flatten().filter(|m| m.token >> 24 != 2 && crate::emit::local_function(a, m.token).is_none()).map(|m| m.token).collect();
         if a.generics.contains_key(&n.token) { diagnostics.push("Generic declarations require review of nested arity, variance and reference binding.".to_owned()); }
         if n.namespace.split('.').any(|part| !part.is_empty() && !part.chars().enumerate().all(|(i,c)| c == '_' || c.is_ascii_alphabetic() || i > 0 && c.is_ascii_digit())) { diagnostics.push("Namespace names require manual C# identifier mapping.".to_owned()); }
         if n.name == "<Module>" { declaration = "// CLI module metadata; global members are preserved in IL.".to_owned(); if !members.is_empty() { diagnostics.push("Global module members cannot be emitted inside a normal C# type.".to_owned()); } }

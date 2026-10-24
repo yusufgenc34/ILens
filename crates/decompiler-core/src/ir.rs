@@ -838,3 +838,36 @@ pub fn lift(
         local_names: Default::default(),
     })
 }
+
+/// Successor block ids named by a terminator.
+pub fn targets(t: &Terminator) -> Vec<usize> {
+    match t {
+        Terminator::Jump(e) => vec![e.target],
+        Terminator::Condition { yes, no, .. } => vec![yes.target, no.target],
+        Terminator::Switch { arms, default, .. } => {
+            arms.iter().chain([default]).map(|e| e.target).collect()
+        }
+        _ => vec![],
+    }
+}
+/// Recomputes CFG successor/predecessor edges after IR terminators were rewritten.
+pub fn rebuild_edges(cfg: &mut ControlFlowGraph, ir: &TypedIr) {
+    for block in &mut cfg.blocks {
+        block.successors.clear();
+        block.predecessors.clear();
+    }
+    let positions: std::collections::HashMap<usize, usize> = cfg
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+    for b in &ir.blocks {
+        for t in targets(&b.terminator) {
+            if let (Some(from), Some(to)) = (positions.get(&b.id), positions.get(&t)) {
+                cfg.blocks[*from].successors.push(t);
+                cfg.blocks[*to].predecessors.push(b.id);
+            }
+        }
+    }
+}
