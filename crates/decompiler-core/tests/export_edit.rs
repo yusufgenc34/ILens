@@ -324,3 +324,60 @@ fn loading_dependencies_keeps_open_edits_current() {
             .is_empty()
     );
 }
+#[test]
+fn new_string_literals_grow_the_user_string_heap() {
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let edited = |name: &str, literal: &str| {
+        let token = method(&a, name);
+        let mut rows = cil_encode::from_body(&a.body(token).unwrap().unwrap());
+        let first = rows
+            .iter_mut()
+            .find(|r| r.opcode.starts_with("ldarg"))
+            .unwrap();
+        first.opcode = "ldstr".into();
+        first.operand = serde_json::to_string(literal).unwrap();
+        (token, edit::validate(&a, token, &rows).unwrap())
+    };
+    let (length, edit) = edited("StringLength", "yeni metin ✓ 'quoted'");
+    // New literals are shown as text and kept for the writer.
+    assert_eq!(edit.strings, ["yeni metin ✓ 'quoted'"]);
+    assert!(
+        edit.instructions
+            .iter()
+            .any(|i| i.operand == "\"yeni metin ✓ 'quoted'\"")
+    );
+    // An existing #US entry keeps its token.
+    let (_, reused) = edited("StringLength", "fixture");
+    assert!(reused.strings.is_empty());
+    let output = pe_write::write(&a, &BTreeMap::from([(length, edit)])).unwrap();
+    let b = Assembly::load(output.clone()).unwrap();
+    let body = b.body(length).unwrap().unwrap();
+    let ldstr = body
+        .instructions
+        .iter()
+        .find(|i| i.name == "ldstr")
+        .unwrap();
+    let decompiler_core::cil::Operand::Token(token) = ldstr.operand else {
+        panic!("ldstr without token")
+    };
+    assert_eq!(b.user_string(token).unwrap(), "yeni metin ✓ 'quoted'");
+    // Every original user string still resolves to the same text.
+    for i in a.nodes.iter().filter(|n| n.token >> 24 == 6) {
+        let Ok(Some(before)) = a.body(i.token) else {
+            continue;
+        };
+        for instruction in before.instructions.iter().filter(|x| x.name == "ldstr") {
+            if let decompiler_core::cil::Operand::Token(t) = instruction.operand {
+                assert_eq!(a.user_string(t).unwrap(), b.user_string(t).unwrap());
+            }
+        }
+    }
+    assert!(goblin::pe::PE::parse(&output).is_ok());
+    assert!(
+        decompiler_core::decompile::decompile(&b, length)
+            .unwrap()
+            .csharp
+            .contains("return \"yeni metin ✓ 'quoted'\".Length;")
+    );
+}

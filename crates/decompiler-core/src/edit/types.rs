@@ -65,6 +65,8 @@ pub struct Types<'a> {
     interned: HashMap<Value, TypeId>,
     tokens: HashMap<u32, TypeId>,
     work: Cell<usize>,
+    /// New user strings an edit introduces, addressed by placeholder tokens.
+    pub pending_strings: usize,
 }
 impl<'a> Types<'a> {
     pub fn new(a: &'a Assembly) -> Self {
@@ -74,6 +76,7 @@ impl<'a> Types<'a> {
             interned: HashMap::new(),
             tokens: HashMap::new(),
             work: Cell::new(0),
+            pending_strings: 0,
         }
     }
     fn spend(&self) -> Result<()> {

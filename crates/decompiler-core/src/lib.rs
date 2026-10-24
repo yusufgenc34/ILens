@@ -18,6 +18,7 @@ pub mod headers;
 pub mod inspection;
 pub mod ir;
 pub mod metadata;
+pub mod metadata_write;
 mod opcodes;
 pub mod pe;
 pub mod pe_write;

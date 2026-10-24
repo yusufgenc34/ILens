@@ -249,27 +249,194 @@ fn header_and_code(a: &Assembly, token: u32) -> Result<Range<usize>> {
     };
     a.image.range(&a.bytes, rva, header + size)
 }
-fn body_bytes(a: &Assembly, token: u32, edit: &ValidatedEdit) -> Result<Vec<u8>> {
+fn body_bytes(a: &Assembly, token: u32, code: &[u8], max_stack: u16) -> Result<Vec<u8>> {
     let original = a
         .body(token)?
         .ok_or_else(|| unsupported("Cannot write a bodyless member"))?;
     let mut out = Vec::new();
-    if edit.code.len() < 64
-        && edit.max_stack <= 8
-        && original.local_signature == 0
-        && !original.init_locals
-    {
-        out.push(((edit.code.len() as u8) << 2) | 2);
+    if code.len() < 64 && max_stack <= 8 && original.local_signature == 0 && !original.init_locals {
+        out.push(((code.len() as u8) << 2) | 2);
     } else {
         out.extend_from_slice(
             &(0x3003u16 | if original.init_locals { 0x10 } else { 0 }).to_le_bytes(),
         );
-        out.extend_from_slice(&edit.max_stack.to_le_bytes());
-        out.extend_from_slice(&(edit.code.len() as u32).to_le_bytes());
+        out.extend_from_slice(&max_stack.to_le_bytes());
+        out.extend_from_slice(&(code.len() as u32).to_le_bytes());
         out.extend_from_slice(&original.local_signature.to_le_bytes());
     }
-    out.extend_from_slice(&edit.code);
+    out.extend_from_slice(code);
     Ok(out)
+}
+/// Where appended data goes: a new `.ilens` section, or the end of the last section.
+struct Region {
+    new_section: bool,
+    last: usize,
+    raw: usize,
+    rva: usize,
+}
+fn region(a: &Assembly, layout: &Layout, output: &[u8]) -> Result<Region> {
+    let count = a.image.sections.len();
+    let section = layout.section_headers + count * 40;
+    let first_raw = a
+        .image
+        .sections
+        .iter()
+        .filter(|s| s.size_of_raw_data > 0)
+        .map(|s| s.pointer_to_raw_data as usize)
+        .min()
+        .unwrap_or(0);
+    let new_section = count < 96
+        && section + 40 <= first_raw
+        && section + 40 <= a.image.size_of_headers as usize
+        && slice(output, section, 40)?.iter().all(|b| *b == 0);
+    let (last, last_section) = a
+        .image
+        .sections
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, s)| s.pointer_to_raw_data)
+        .ok_or_else(|| unsupported("Missing file-backed section"))?;
+    // With no spare header, extend only the physically and virtually last,
+    // fully file-backed .text/.rsrc/.reloc section. Existing RVAs stay fixed.
+    if !new_section
+        && (last_section.virtual_size > last_section.size_of_raw_data
+            || a.image
+                .sections
+                .iter()
+                .any(|s| s.virtual_address > last_section.virtual_address)
+            || !matches!(
+                last_section.name().unwrap_or(""),
+                ".text" | ".rsrc" | ".reloc"
+            ))
+    {
+        return Err(unsupported(
+            "No safe section-header slot or extensible final section for growing methods or metadata",
+        ));
+    }
+    let raw = align(output.len(), layout.file_align)?;
+    let rva = if new_section {
+        align(
+            a.image
+                .sections
+                .iter()
+                .map(|s| {
+                    s.virtual_address as usize + s.virtual_size.max(s.size_of_raw_data) as usize
+                })
+                .max()
+                .unwrap_or(0),
+            layout.section_align,
+        )?
+    } else {
+        last_section.virtual_address as usize + last_section.size_of_raw_data as usize
+    };
+    Ok(Region {
+        new_section,
+        last,
+        raw,
+        rva,
+    })
+}
+fn commit_region(
+    a: &Assembly,
+    layout: &Layout,
+    output: &mut Vec<u8>,
+    region: &Region,
+    mut data: Vec<u8>,
+) -> Result<()> {
+    let count = a.image.sections.len();
+    let virtual_size = data.len();
+    data.resize(align(data.len(), layout.file_align)?, 0);
+    if region.raw + data.len() > crate::pe::MAX_FILE {
+        return Err(Error::limit("Modified assembly would exceed 64 MiB"));
+    }
+    output.resize(region.raw, 0);
+    output.extend_from_slice(&data);
+    let last = &a.image.sections[region.last];
+    if region.new_section {
+        let section = layout.section_headers + count * 40;
+        output[section..section + 8].copy_from_slice(b".ilens\0\0");
+        put32(output, section + 8, virtual_size as u32)?;
+        put32(
+            output,
+            section + 12,
+            u32::try_from(region.rva).map_err(|_| unsupported("Section RVA overflow"))?,
+        )?;
+        put32(output, section + 16, data.len() as u32)?;
+        put32(output, section + 20, region.raw as u32)?;
+        put32(output, section + 36, 0x60000020)?;
+        put16(output, layout.pe + 6, (count + 1) as u16)?;
+    } else {
+        let header = layout.section_headers + region.last * 40;
+        put32(
+            output,
+            header + 8,
+            last.size_of_raw_data + virtual_size as u32,
+        )?;
+        put32(
+            output,
+            header + 16,
+            last.size_of_raw_data + data.len() as u32,
+        )?;
+        // Relocation sections are normally discardable; new managed code is not.
+        put32(
+            output,
+            header + 36,
+            (last.characteristics | 0x60000020) & !0x02000000,
+        )?;
+        if last.characteristics & 0x40 != 0 {
+            let size = u32_at(output, layout.optional + 8)?
+                .checked_add(data.len() as u32)
+                .ok_or_else(|| unsupported("Initialized data size overflow"))?;
+            put32(output, layout.optional + 8, size)?;
+        }
+    }
+    put32(
+        output,
+        layout.optional + 56,
+        u32::try_from(align(region.rva + virtual_size, layout.section_align)?)
+            .map_err(|_| unsupported("Image size overflow"))?,
+    )?;
+    let size_code = u32_at(output, layout.optional + 4)?
+        .checked_add(
+            data.len() as u32
+                + if !region.new_section && last.characteristics & 0x20 == 0 {
+                    last.size_of_raw_data
+                } else {
+                    0
+                },
+        )
+        .ok_or_else(|| unsupported("Code section size overflow"))?;
+    put32(output, layout.optional + 4, size_code)?;
+    Ok(())
+}
+/// Replaces placeholder `ldstr` tokens with the tokens of appended #US entries.
+fn patch_strings(
+    code: &[u8],
+    strings: &[String],
+    tokens: &BTreeMap<String, u32>,
+) -> Result<Vec<u8>> {
+    let mut out = code.to_vec();
+    for i in cil::decode(code)? {
+        if let (0x72, cil::Operand::Token(t)) = (i.opcode, &i.operand)
+            && let Some(index) = t.checked_sub(crate::metadata_write::PENDING_STRING)
+        {
+            let text = strings
+                .get(index as usize)
+                .ok_or_else(|| unsupported("Unknown pending string"))?;
+            let token = tokens[text];
+            let at = i.offset as usize + 1;
+            out[at..at + 4].copy_from_slice(&token.to_le_bytes());
+        }
+    }
+    Ok(out)
+}
+fn stream<'a>(a: &'a Assembly, name: &str) -> Option<&'a [u8]> {
+    let metadata = &a.bytes[a.image.metadata.clone()];
+    a.store
+        .streams
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| &metadata[s.offset..s.offset + s.size])
 }
 pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u8>> {
     let layout = preflight(a)?;
@@ -279,8 +446,32 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
     if edits.len() > 256 {
         return Err(Error::limit("At most 256 changed methods can be exported"));
     }
+    // New literals of every edit, deduplicated, appended to the #US heap in order.
+    let us_size = a
+        .store
+        .streams
+        .iter()
+        .find(|s| s.name == "#US")
+        .map_or(0, |s| s.size);
+    let mut appended = Vec::new();
+    let mut string_tokens = BTreeMap::new();
+    for edit in edits.values() {
+        for text in &edit.strings {
+            if !string_tokens.contains_key(text) {
+                let offset = u32::try_from(us_size + appended.len())
+                    .map_err(|_| unsupported("#US heap overflow"))?;
+                string_tokens.insert(text.clone(), 0x7000_0000 | offset);
+                appended.extend(crate::metadata_write::user_string_entry(text)?);
+            }
+        }
+    }
     let mut output = a.bytes.clone();
+    let mut metadata = a.bytes[a.image.metadata.clone()].to_vec();
+    let method_table = &a.store.tables[6];
+    let rva_at =
+        |token: u32| method_table.offset + ((token & 0xffffff) - 1) as usize * method_table.width;
     let mut growing = Vec::new();
+    let mut codes = BTreeMap::new();
     let mut occupied = layout.protected.clone();
     for (index, row) in a.metadata().method_defs.iter().enumerate() {
         if row.rva != 0 {
@@ -296,7 +487,10 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
     }
     for (&token, edit) in edits {
         let validated = edit::validate(a, token, &edit.instructions)?;
-        if validated.code != edit.code || validated.max_stack != edit.max_stack {
+        if validated.code != edit.code
+            || validated.max_stack != edit.max_stack
+            || validated.strings != edit.strings
+        {
             return Err(unsupported("Edit validation is stale"));
         }
         let range = header_and_code(a, token)?;
@@ -305,7 +499,9 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
                 "Method body has ambiguous ownership or overlaps metadata",
             ));
         }
-        let bytes = body_bytes(a, token, edit)?;
+        let code = patch_strings(&edit.code, &edit.strings, &string_tokens)?;
+        let bytes = body_bytes(a, token, &code, edit.max_stack)?;
+        codes.insert(token, code);
         if bytes.len() <= range.len()
             && (bytes[0] & 3 != 3 || a.method_row(token)?.rva.is_multiple_of(4))
         {
@@ -315,135 +511,35 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             growing.push((token, bytes, range));
         }
     }
-    if !growing.is_empty() {
-        let count = a.image.sections.len();
-        let section = layout.section_headers + count * 40;
-        let first_raw = a
-            .image
-            .sections
-            .iter()
-            .filter(|s| s.size_of_raw_data > 0)
-            .map(|s| s.pointer_to_raw_data as usize)
-            .min()
-            .unwrap_or(0);
-        let new_section = count < 96
-            && section + 40 <= first_raw
-            && section + 40 <= a.image.size_of_headers as usize
-            && slice(&output, section, 40)?.iter().all(|b| *b == 0);
-        let last = a
-            .image
-            .sections
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, s)| s.pointer_to_raw_data)
-            .ok_or_else(|| unsupported("Missing file-backed section"))?;
-        // With no spare header, extend only the physically and virtually last,
-        // fully file-backed .text/.rsrc/.reloc section. Existing RVAs stay fixed.
-        if !new_section
-            && (last.1.virtual_size > last.1.size_of_raw_data
-                || a.image
-                    .sections
-                    .iter()
-                    .any(|s| s.virtual_address > last.1.virtual_address)
-                || !matches!(last.1.name().unwrap_or(""), ".text" | ".rsrc" | ".reloc"))
-        {
-            return Err(unsupported(
-                "No safe section-header slot or extensible final section for growing methods",
-            ));
-        }
-        let raw = align(output.len(), layout.file_align)?;
-        let rva = if new_section {
-            align(
-                a.image
-                    .sections
-                    .iter()
-                    .map(|s| {
-                        s.virtual_address as usize + s.virtual_size.max(s.size_of_raw_data) as usize
-                    })
-                    .max()
-                    .unwrap_or(0),
-                layout.section_align,
-            )?
-        } else {
-            last.1.virtual_address as usize + last.1.size_of_raw_data as usize
-        };
+    let moved = !appended.is_empty();
+    if !growing.is_empty() || moved {
+        let region = region(a, &layout, &output)?;
         let mut data = Vec::new();
         for (token, bytes, old) in growing {
             data.resize(align(data.len(), 4)?, 0);
-            let new_rva =
-                u32::try_from(rva + data.len()).map_err(|_| unsupported("Method RVA overflow"))?;
-            let table = &a.store.tables[6];
-            let row = a.image.metadata.start
-                + table.offset
-                + ((token & 0xffffff) - 1) as usize * table.width;
-            put32(&mut output, row, new_rva)?;
+            let new_rva = u32::try_from(region.rva + data.len())
+                .map_err(|_| unsupported("Method RVA overflow"))?;
+            put32(&mut metadata, rva_at(token), new_rva)?;
             data.extend(bytes);
             output[old].fill(0);
         }
-        let virtual_size = data.len();
-        data.resize(align(data.len(), layout.file_align)?, 0);
-        if raw + data.len() > crate::pe::MAX_FILE {
-            return Err(Error::limit("Modified assembly would exceed 64 MiB"));
+        if moved {
+            // The grown metadata follows the bodies; the CLI header points at it.
+            data.resize(align(data.len(), 4)?, 0);
+            let rva = u32::try_from(region.rva + data.len())
+                .map_err(|_| unsupported("Metadata RVA overflow"))?;
+            metadata = crate::metadata_write::with_user_strings(&metadata, &appended)?;
+            put32(&mut output, layout.cli.start + 8, rva)?;
+            put32(&mut output, layout.cli.start + 12, metadata.len() as u32)?;
+            data.extend_from_slice(&metadata);
         }
-        output.resize(raw, 0);
-        output.extend_from_slice(&data);
-        if new_section {
-            output[section..section + 8].copy_from_slice(b".ilens\0\0");
-            put32(&mut output, section + 8, virtual_size as u32)?;
-            put32(
-                &mut output,
-                section + 12,
-                u32::try_from(rva).map_err(|_| unsupported("Section RVA overflow"))?,
-            )?;
-            put32(&mut output, section + 16, data.len() as u32)?;
-            put32(&mut output, section + 20, raw as u32)?;
-            put32(&mut output, section + 36, 0x60000020)?;
-            put16(&mut output, layout.pe + 6, (count + 1) as u16)?;
-        } else {
-            let header = layout.section_headers + last.0 * 40;
-            put32(
-                &mut output,
-                header + 8,
-                last.1.size_of_raw_data + virtual_size as u32,
-            )?;
-            put32(
-                &mut output,
-                header + 16,
-                last.1.size_of_raw_data + data.len() as u32,
-            )?;
-            // Relocation sections are normally discardable; new managed code is not.
-            put32(
-                &mut output,
-                header + 36,
-                (last.1.characteristics | 0x60000020) & !0x02000000,
-            )?;
-            if last.1.characteristics & 0x40 != 0 {
-                let size = u32_at(&output, layout.optional + 8)?
-                    .checked_add(data.len() as u32)
-                    .ok_or_else(|| unsupported("Initialized data size overflow"))?;
-                put32(&mut output, layout.optional + 8, size)?;
-            }
-        }
-        put32(
-            &mut output,
-            layout.optional + 56,
-            u32::try_from(align(rva + virtual_size, layout.section_align)?)
-                .map_err(|_| unsupported("Image size overflow"))?,
-        )?;
-        let size_code = u32_at(&output, layout.optional + 4)?
-            .checked_add(
-                data.len() as u32
-                    + if !new_section && last.1.characteristics & 0x20 == 0 {
-                        last.1.size_of_raw_data
-                    } else {
-                        0
-                    },
-            )
-            .ok_or_else(|| unsupported("Code section size overflow"))?;
-        put32(&mut output, layout.optional + 4, size_code)?;
+        commit_region(a, &layout, &mut output, &region, data)?;
+    }
+    if !moved {
+        output[a.image.metadata.clone()].copy_from_slice(&metadata);
     }
     // Clear both records and payload bytes; no orphaned PDB paths remain in edited output.
-    for range in layout.debug {
+    for range in layout.debug.clone() {
         output[range].fill(0);
     }
     output[layout.directories + 6 * 8..layout.directories + 7 * 8].fill(0);
@@ -458,14 +554,47 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             "Output identity/entry point changed unexpectedly",
         ));
     }
-    let mut expected = a.bytes[a.image.metadata.clone()].to_vec();
+    // Independently of how it was written: every stream except the grown #US equals
+    // the input, with only the edited MethodDef RVAs changed in #~.
+    let mut tables = stream(a, "#~")
+        .ok_or_else(|| unsupported("Missing tables stream"))?
+        .to_vec();
+    let tables_start = a
+        .store
+        .streams
+        .iter()
+        .find(|s| s.name == "#~")
+        .map_or(0, |s| s.offset);
     for token in edits.keys() {
-        let table = &a.store.tables[6];
-        let row = table.offset + ((token & 0xffffff) - 1) as usize * table.width;
-        put32(&mut expected, row, parsed.method_row(*token)?.rva)?;
+        put32(
+            &mut tables,
+            rva_at(*token) - tables_start,
+            parsed.method_row(*token)?.rva,
+        )?;
     }
-    if parsed.bytes[parsed.image.metadata.clone()] != expected {
-        return Err(unsupported("Unrelated metadata changed during writing"));
+    for s in &a.store.streams {
+        let before = if s.name == "#~" {
+            tables.clone()
+        } else {
+            stream(a, &s.name).unwrap_or_default().to_vec()
+        };
+        let after = stream(&parsed, &s.name).unwrap_or_default();
+        let same = if s.name == "#US" {
+            after.starts_with(&before)
+        } else {
+            after == before.as_slice()
+        };
+        if !same {
+            return Err(unsupported(format!(
+                "Metadata stream {} changed unexpectedly",
+                s.name
+            )));
+        }
+    }
+    for (text, token) in &string_tokens {
+        if parsed.user_string(*token)? != *text {
+            return Err(unsupported("An appended user string did not round-trip"));
+        }
     }
     if a.image.resources_size > 0 {
         let before = a.image.range(
@@ -487,13 +616,13 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             continue;
         }
         let token = 0x06000001 + index as u32;
-        if let Some(edit) = edits.get(&token) {
+        if let Some(code) = codes.get(&token) {
             let body = parsed
                 .body(token)?
                 .ok_or_else(|| unsupported("Written method has no body"))?;
             edit::verify(&parsed, token, &body)?;
             let bytes = cil_encode_bytes(&body)?;
-            if bytes != edit.code {
+            if bytes != *code {
                 return Err(unsupported("Written method differs from validated IL"));
             }
         } else {
@@ -516,11 +645,12 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
             "Native PE imports/entry point were not preserved",
         ));
     }
-    if output[layout.cli]
-        != a.bytes[a
-            .image
-            .range(&a.bytes, u32_at(&a.bytes, layout.directories + 14 * 8)?, 72)?]
-    {
+    // The CLI header changes only in its metadata directory, and only when it moved.
+    let mut cli = a.bytes[layout.cli.clone()].to_vec();
+    if moved {
+        cli[8..16].copy_from_slice(&output[layout.cli.start + 8..layout.cli.start + 16]);
+    }
+    if output[layout.cli] != cli[..] {
         return Err(unsupported("CLI header was modified unexpectedly"));
     }
     Ok(output)

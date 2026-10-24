@@ -15,6 +15,8 @@ pub struct ValidatedEdit {
     pub instructions: Vec<EditableInstruction>,
     pub code: Vec<u8>,
     pub max_stack: u16,
+    /// New `ldstr` literals; `code` addresses them with placeholder tokens.
+    pub strings: Vec<String>,
 }
 #[derive(Serialize)]
 pub struct EditPreview {
@@ -162,17 +164,90 @@ pub fn validate(a: &Assembly, token: u32, rows: &[EditableInstruction]) -> Resul
         ));
     }
     let mut body = supported_body(a, token)?;
-    let code = cil_encode::encode(rows)?;
+    let (rows, strings) = string_literals(a, rows)?;
+    let code = cil_encode::encode(&rows)?;
     body.instructions = cil::decode(&code)?;
     body.code_size = code.len() as u32;
-    let max_stack = verify(a, token, &body)?;
+    let max_stack = verify_with(a, token, &body, strings.len())?;
+    let mut instructions = cil_encode::from_body(&body);
+    show_literals(&mut instructions, &strings);
     Ok(ValidatedEdit {
-        instructions: cil_encode::from_body(&body),
+        instructions,
         code,
         max_stack,
+        strings,
     })
 }
+/// `ldstr "text"` operands: an existing #US entry keeps its token, a new literal gets a
+/// placeholder the writer replaces after appending it to the heap.
+fn string_literals(
+    a: &Assembly,
+    rows: &[EditableInstruction],
+) -> Result<(Vec<EditableInstruction>, Vec<String>)> {
+    let heap = a.metadata().user_strings.data();
+    let mut strings: Vec<String> = vec![];
+    let mut total = 0;
+    let rows = rows
+        .iter()
+        .map(|row| {
+            let literal = row.operand.trim();
+            if row.opcode != "ldstr" || !literal.starts_with('"') {
+                return Ok(row.clone());
+            }
+            let text: String = serde_json::from_str(literal)
+                .map_err(|_| invalid("ldstr expects a token or a JSON string literal"))?;
+            let token = match crate::metadata_write::find_user_string(heap, &text) {
+                Some(token) => token,
+                None => {
+                    let index = match strings.iter().position(|s| *s == text) {
+                        Some(index) => index,
+                        None => {
+                            total += text.len();
+                            if strings.len() >= 4096 || total > 1024 * 1024 {
+                                return Err(Error::limit(
+                                    "An edit can add at most 4,096 strings and 1 MiB of text",
+                                ));
+                            }
+                            strings.push(text);
+                            strings.len() - 1
+                        }
+                    };
+                    crate::metadata_write::PENDING_STRING + index as u32
+                }
+            };
+            Ok(EditableInstruction {
+                operand: format!("0x{token:08X}"),
+                ..row.clone()
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((rows, strings))
+}
+/// New literals read as their text in the editor, not as placeholder tokens.
+fn show_literals(instructions: &mut [EditableInstruction], strings: &[String]) {
+    for i in instructions {
+        if let Some(text) = pending_literal(&i.operand, strings) {
+            i.operand = text;
+        }
+    }
+}
+fn pending_literal(operand: &str, strings: &[String]) -> Option<String> {
+    let token = u32::from_str_radix(operand.strip_prefix("0x")?, 16).ok()?;
+    let index = token.checked_sub(crate::metadata_write::PENDING_STRING)? as usize;
+    strings
+        .get(index)
+        .and_then(|s| serde_json::to_string(s).ok())
+}
 pub fn verify(a: &Assembly, token: u32, body: &MethodBody) -> Result<u16> {
+    verify_with(a, token, body, 0)
+}
+/// Verifies a body that may address `pending_strings` new literals by placeholder.
+pub fn verify_with(
+    a: &Assembly,
+    token: u32,
+    body: &MethodBody,
+    pending_strings: usize,
+) -> Result<u16> {
     if !body.exceptions.is_empty() {
         return Err(unsupported(
             "Exception-region edits require handler boundary and stack validation",
@@ -181,6 +256,7 @@ pub fn verify(a: &Assembly, token: u32, body: &MethodBody) -> Result<u16> {
     let method = a.method_ref(token)?;
     let sig = &method.signature;
     let mut types = Types::new(a);
+    types.pending_strings = pending_strings;
     let mut args = Vec::new();
     if sig.has_this {
         let id = types.token(method.owner)?;
@@ -418,7 +494,12 @@ fn transfer(
             if token >> 24 != 0x70 {
                 return Err(invalid("ldstr requires a user-string token"));
             }
-            types.a.user_string(token)?;
+            let pending = token
+                .checked_sub(crate::metadata_write::PENDING_STRING)
+                .is_some_and(|i| (i as usize) < types.pending_strings);
+            if !pending {
+                types.a.user_string(token)?;
+            }
             stack.push(Stack::Ref(types.intern(Value::String)?));
         }
         0x74 | 0x75 => {
@@ -718,15 +799,20 @@ pub fn preview(
         body.code_size = edit.code.len() as u32;
         body.max_stack = edit.max_stack;
     }
+    let strings = edit.map_or(&[][..], |e| e.strings.as_slice());
     for i in &mut body.instructions {
         if let Operand::Token(t) = i.operand {
-            i.resolved = Some(a.resolve(t));
+            i.resolved = Some(
+                pending_literal(&format!("0x{t:08X}"), strings).unwrap_or_else(|| a.resolve(t)),
+            );
         }
     }
+    let mut instructions = cil_encode::from_body(&body);
+    show_literals(&mut instructions, strings);
     Ok(EditPreview {
         token,
         revision,
-        instructions: cil_encode::from_body(&body),
+        instructions,
         original,
         changed: edit.is_some(),
         il: crate::emit::il(a, token, &body),
