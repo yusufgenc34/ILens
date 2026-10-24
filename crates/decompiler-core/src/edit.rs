@@ -481,9 +481,11 @@ fn check_region_layout(body: &MethodBody) -> Result<()> {
     }
     Ok(())
 }
-/// A local variable type as written in the editor: a C# keyword (`int`, `string`), a
-/// TypeDef/TypeRef token (`0x02000003`) or a local type's full name, with `[]` for
-/// vectors.
+/// A type as written in the editor: a C# keyword (`int`, `string`), a TypeDef/TypeRef
+/// token (`0x02000003`) or a local type's full name, with `[]` for vectors.
+pub fn parse_type(a: &Assembly, text: &str) -> Result<crate::signature::Type> {
+    local_type(a, text)
+}
 fn local_type(a: &Assembly, text: &str) -> Result<crate::signature::Type> {
     use crate::signature::Type;
     let text = text.trim();

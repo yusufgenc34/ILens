@@ -230,6 +230,186 @@ impl Tables {
     }
 }
 
+/// Old → new row numbers after member rows were inserted: per table, rows from `at`
+/// on move down by `count`; re-sorted tables carry a full permutation.
+#[derive(Debug, Default, Clone)]
+pub struct Remap {
+    shifts: std::collections::HashMap<usize, (u32, u32)>,
+    permutations: std::collections::HashMap<usize, Vec<u32>>,
+}
+impl Remap {
+    pub fn row(&self, table: usize, row: u32) -> u32 {
+        if row == 0 {
+            return 0;
+        }
+        if let Some(order) = self.permutations.get(&table) {
+            return order.get(row as usize - 1).copied().unwrap_or(row);
+        }
+        match self.shifts.get(&table) {
+            Some((at, count)) if row >= *at => row + count,
+            _ => row,
+        }
+    }
+    /// A metadata token after the insertion.
+    pub fn token(&self, token: u32) -> u32 {
+        (token & 0xff00_0000) | self.row((token >> 24) as usize, token & 0xff_ffff)
+    }
+    pub fn moves(&self, table: usize) -> bool {
+        self.shifts.contains_key(&table) || self.permutations.contains_key(&table)
+    }
+}
+/// Sorted tables and the column each is ordered by (ECMA-335 II.22).
+const SORTED: &[(usize, usize)] = &[
+    (9, 0),
+    (11, 1),
+    (12, 0),
+    (13, 0),
+    (14, 1),
+    (15, 2),
+    (16, 1),
+    (24, 2),
+    (25, 0),
+    (28, 1),
+    (29, 1),
+    (41, 0),
+    (42, 2),
+    (44, 0),
+];
+impl Tables {
+    /// Rewrites every Table/Coded reference to a moved table; owner list columns are
+    /// handled by the caller, which knows whose range grew.
+    fn apply(&mut self, remap: &Remap) {
+        use crate::metadata::Column;
+        for table in 0..45 {
+            let columns = crate::metadata::schema(table);
+            for row in &mut self.rows[table] {
+                for (c, value) in columns.iter().zip(row.iter_mut()) {
+                    match *c {
+                        Column::Table(t) if remap.moves(t as usize) => {
+                            *value = remap.row(t as usize, *value);
+                        }
+                        Column::Coded(k) if *value != 0 => {
+                            let bits = k.tag_bits();
+                            let tag = *value & ((1 << bits) - 1);
+                            if let Some(Some(t)) =
+                                crate::metadata::coded_tables(k).get(tag as usize)
+                                && remap.moves(*t as usize)
+                            {
+                                *value = (remap.row(*t as usize, *value >> bits) << bits) | tag;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    /// Restores the order of sorted tables. GenericParam and DeclSecurity rows are
+    /// referenced by other tables, so their permutation is applied as well.
+    fn resort(&mut self) {
+        for &(table, key) in SORTED {
+            let mut order: Vec<usize> = (0..self.rows[table].len()).collect();
+            let rows = &self.rows[table];
+            // GenericParam is ordered by owner, then number.
+            order.sort_by_key(|i| (rows[*i][key], if table == 42 { rows[*i][0] } else { 0 }));
+            if order.iter().enumerate().all(|(new, old)| new == *old) {
+                continue;
+            }
+            self.rows[table] = order.iter().map(|i| rows[*i].clone()).collect();
+            if matches!(table, 14 | 42) {
+                let mut permutation = vec![0u32; order.len()];
+                for (new, old) in order.iter().enumerate() {
+                    permutation[*old] = new as u32 + 1;
+                }
+                let mut remap = Remap::default();
+                remap.permutations.insert(table, permutation);
+                self.apply(&remap);
+            }
+        }
+    }
+    /// The end of `owner`'s range in a list column: the next owner's start.
+    fn range_end(&self, owner_table: usize, column: usize, owner: u32, listed: usize) -> u32 {
+        self.rows[owner_table]
+            .get(owner as usize)
+            .map_or(self.rows[listed].len() as u32 + 1, |next| next[column])
+    }
+    /// Inserts a field row at the end of TypeDef `owner`'s field list.
+    pub fn add_field(&mut self, owner: u32, row: Vec<u32>) -> Result<(u32, Remap)> {
+        let at = self.range_end(2, 4, owner, 4);
+        self.rows[4].insert(at as usize - 1, row);
+        self.counts[4] += 1;
+        self.valid |= 1 << 4;
+        let mut remap = Remap::default();
+        remap.shifts.insert(4, (at, 1));
+        for (i, t) in self.rows[2].iter_mut().enumerate() {
+            if i as u32 + 1 > owner && t[4] >= at {
+                t[4] += 1;
+            }
+        }
+        self.apply(&remap);
+        self.resort();
+        Ok((at, remap))
+    }
+    /// Inserts a method row with its parameter rows at the end of TypeDef `owner`'s
+    /// method list; `row`'s ParamList is filled in.
+    pub fn add_method(
+        &mut self,
+        owner: u32,
+        mut row: Vec<u32>,
+        params: Vec<Vec<u32>>,
+    ) -> Result<(u32, Remap)> {
+        let at = self.range_end(2, 5, owner, 6);
+        // The new method's parameters go where the next method's begin.
+        let param_at = self.rows[6]
+            .get(at as usize - 1)
+            .map_or(self.rows[8].len() as u32 + 1, |next| next[5]);
+        let count = params.len() as u32;
+        for (i, p) in params.into_iter().enumerate() {
+            self.rows[8].insert(param_at as usize - 1 + i, p);
+        }
+        row[5] = param_at;
+        self.rows[6].insert(at as usize - 1, row);
+        self.counts[6] += 1;
+        self.counts[8] += count;
+        self.valid |= 1 << 6;
+        if count > 0 {
+            self.valid |= 1 << 8;
+        }
+        let mut remap = Remap::default();
+        remap.shifts.insert(6, (at, 1));
+        if count > 0 {
+            remap.shifts.insert(8, (param_at, count));
+        }
+        for (i, t) in self.rows[2].iter_mut().enumerate() {
+            if i as u32 + 1 > owner && t[5] >= at {
+                t[5] += 1;
+            }
+        }
+        // Methods after the new one start their parameters later.
+        for m in self.rows[6].iter_mut().skip(at as usize) {
+            m[5] += count;
+        }
+        self.apply(&remap);
+        self.resort();
+        Ok((at, remap))
+    }
+}
+/// Appends a string to #Strings, reusing an existing occurrence (suffixes included).
+pub fn append_string(heap: &mut Vec<u8>, text: &str) -> Result<u32> {
+    if text.is_empty() {
+        return Ok(0);
+    }
+    let needle = [text.as_bytes(), &[0]].concat();
+    if let Some(at) = heap
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+    {
+        return Ok(at as u32);
+    }
+    let offset = u32::try_from(heap.len()).map_err(|_| Error::limit("#Strings heap overflow"))?;
+    heap.extend_from_slice(&needle);
+    Ok(offset)
+}
 /// Appends `entry` to a blob heap and returns its offset.
 pub fn append_blob(heap: &mut Vec<u8>, entry: &[u8]) -> Result<u32> {
     let offset = u32::try_from(heap.len()).map_err(|_| Error::limit("#Blob heap overflow"))?;

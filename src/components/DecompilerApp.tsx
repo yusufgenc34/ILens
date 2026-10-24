@@ -23,6 +23,7 @@ import ExportDialog from './ExportDialog'
 import ProjectExportDialog from './ProjectExportDialog'
 import AppMenuBar from './AppMenuBar'
 import ILEditorDialog from './ILEditorDialog'
+import AddMemberDialog from './AddMemberDialog'
 import AssemblyWarnings, {obfuscationLabels} from './AssemblyWarnings'
 import {defaultEditorSettings, editorSettingsKey, parseEditorSettings} from '../lib/editor-settings'
 interface WorkspaceAssembly extends Loaded { filename: string; declarations: Declaration[]; overview: Overview; elapsed: number }
@@ -59,6 +60,7 @@ export default function DecompilerApp() {
   const [exportOpen, setExportOpen] = useState<'source' | 'binary' | null>(null)
   const [projectOpen, setProjectOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
+  const [adding, setAdding] = useState<{assembly: number; owner: number; name: string; kind: 'field' | 'method'} | null>(null)
   const wrap = editorSettings.wrap
   const [copied, setCopied] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -397,6 +399,19 @@ export default function DecompilerApp() {
     if (token >>> 24 === 2) navigate({assembly, token, view: 'C#'})
     else {setPrimary(assembly); void followReference(token, assembly)}
   }
+  // The workspace now holds the rewritten assembly: reload its tree and overview.
+  async function memberAdded(assembly: number, token: number) {
+    setAdding(null)
+    try {
+      const core = getClient()
+      const declarations = await core.call('getTree', {assembly})
+      const overview = await core.call('getInfo', {assembly})
+      const references = await core.call('getReferences', {assembly})
+      setAssemblies(previous => previous.map(a => a.id === assembly ? {...a, declarations, overview: {...overview, references}, info: overview.info} : a))
+      setStatus(`Added ${tokenHex(token)}. The workspace shows the modified assembly; Save Module downloads it.`)
+      navigate({assembly, token, view: 'C#'})
+    } catch (error) {report(error)}
+  }
   async function closeAssembly(id: number) {
     if (loadLock.current) {report({code: 'busy', message: 'Wait for the current assembly load to finish.', detail: 'Assemblies cannot be closed while dependencies are being resolved.'}); return}
     const remaining = assemblies.filter(a => a.id !== id)
@@ -438,6 +453,7 @@ export default function DecompilerApp() {
       {label: 'Show Metadata', run: () => open('Metadata')}, null,
       ...(declaration ? [{label: 'Analyze', run: () => {navigate({assembly, token, view: 'C#'}); setPanes(previous => ({...previous, analyzer: true}))}}] : []),
       ...([2, 6].includes(table) ? [{label: 'Save Code…', run: () => {setPrimary(assembly); select(token); setExportOpen('source')}}] : []),
+      ...(table === 2 ? [null, {label: 'Add Field…', disabled: loadingFiles, run: () => setAdding({assembly, owner: token, name: node.name, kind: 'field'})}, {label: 'Add Method…', disabled: loadingFiles, run: () => setAdding({assembly, owner: token, name: node.name, kind: 'method'})}] : []),
       {label: navigation.bookmarks.some(b => b.assembly === assembly && b.token === token) ? 'Remove Bookmark' : 'Add Bookmark', run: () => setNavigation(previous => toggleBookmark(previous, {assembly, token, view: 'C#'}))}, null,
       {label: 'Copy Name', run: () => void copyText(node.declaration?.display_name || node.name)},
       {label: 'Copy Full Name', run: () => void copyText(node.declaration?.full_name ?? node.name)},
@@ -589,6 +605,7 @@ export default function DecompilerApp() {
     {searchOpen && <div className="modal-backdrop fixed [inset:0] z-80 bg-[#0008] flex justify-center items-start pt-[min(15vh,130px)] [backdrop-filter:none]" onClick={() => setSearchOpen(false)}><div className="search-dialog w-[min(680px,90vw)] border border-solid border-border shadow-[var(--shadow)] overflow-hidden bg-popover rounded-[8px]" role="dialog" aria-modal="true" aria-label="Search assembly" onClick={e => e.stopPropagation()}><div className="search-input-row flex gap-[13px] items-center p-4 text-muted-foreground border-b border-solid border-b-border [&_input]:flex-1 [&_input]:min-w-0 [&_input]:border-0 [&_input]:bg-transparent [&_input]:text-text [&_input]:text-[14px] [&_input]:[outline:none]"><Search size={19} /><input ref={searchInput} aria-label="Search members and strings" placeholder={active ? 'Search types, methods, fields, or strings…' : 'Open an assembly to search its metadata'} value={query} onChange={e => setQuery(e.target.value)} maxLength={256} /><button className={cn(ui.iconButton)} aria-label="Close search" onClick={() => setSearchOpen(false)}><X size={17} /></button></div><div className="search-scope py-[9px] px-[17px] text-faint flex justify-between bg-surface text-[12px]">{active ? active.info.identity.name : 'No assembly loaded'}<span>{searching ? 'Searching…' : `${results.length}${results.length === 250 ? '+' : ''} results`}</span></div><div className="search-results max-h-102.5 overflow-auto [&>button]:flex [&>button]:items-center [&>button]:gap-3 [&>button]:text-left [&>button]:bg-transparent [&>button]:border-0 [&>button]:border-b [&>button]:border-solid [&>button]:border-b-border [&>button]:w-full [&>button]:py-[13px] [&>button]:px-[17px] [&>button:hover]:bg-hover [&>button>span:nth-child(2)]:min-w-0 [&>button>span:nth-child(2)]:flex-1 [&_strong]:block [&_strong]:font-medium [&_strong]:overflow-hidden [&_strong]:text-ellipsis [&_strong]:whitespace-nowrap [&_strong]:text-[13px] [&_small]:block [&_small]:text-faint [&_small]:whitespace-nowrap [&_small]:text-ellipsis [&_small]:overflow-hidden [&_small]:mt-0.5 [&_small]:text-[11px] [&_code]:font-mono [&_code]:text-[9px] [&_code]:font-normal [&_code]:leading-normal [&_code]:text-faint [&_svg]:text-muted-foreground">{results.map((r, i) => <button key={`${r.token}-${i}`} onClick={() => {select(r.token); setView(r.kind === 'method' || r.kind === 'constructor' || r.kind === 'resource' ? 'C#' : 'Metadata')}}><span className="search-kind w-7 min-w-7 h-7 flex items-center justify-center rounded-[5px] text-foreground bg-accent-dim">{r.kind === 'string' ? '“ ”' : <Code2 size={15} />}</span><span><strong>{r.name}</strong><small>{r.context}</small></span><code>{tokenHex(r.token)}</code><ArrowRight size={14} /></button>)}{!results.length && <div className="search-empty text-center text-faint py-[55px] px-5 text-[13px]">{query.trim() ? searching ? 'Searching local metadata…' : 'No matching members or strings.' : 'Search metadata names, namespaces, user strings, or a token.'}</div>}</div><div className="dialog-footer flex items-center gap-[5px] py-[9px] px-4 border-t border-solid border-t-border text-faint text-[11px] [&>span]:ml-auto"><kbd>esc</kbd> to close<span>Local metadata search</span></div></div></div>}
     {projectOpen && primary && <ProjectExportDialog client={getClient()} assemblies={assemblies} primary={primary} onClose={() => setProjectOpen(false)} />}
     {exportOpen && active && <ExportDialog key={`${active.id}-${exportOpen}`} mode={exportOpen} client={getClient()} assembly={active.id} info={active.info} filename={active.filename} member={activeDeclaration} method={busy || methodAssembly !== active.id ? null : method} onClose={() => setExportOpen(null)} />}
+    {adding && <AddMemberDialog key={`${adding.assembly}-${adding.owner}-${adding.kind}`} client={getClient()} assembly={adding.assembly} owner={adding.owner} ownerName={adding.name} kind={adding.kind} onClose={() => setAdding(null)} onAdded={token => void memberAdded(adding.assembly, token)} />}
     {editOpen && active && selected && selected > 0 && <ILEditorDialog key={`${active.id}-${selected}`} client={getClient()} assembly={active.id} token={selected} name={selectedLabel} settings={editorSettings} theme={theme} onClose={() => setEditOpen(false)} onExport={() => {setEditOpen(false); setExportOpen('binary')}} />}
     {settingsOpen && <SettingsDialog onlineReferences={onlineReferences} onOnlineReferences={updateOnlineReferences} settings={editorSettings} onChange={setEditorSettings} appearance={theme} onAppearance={setTheme} onClose={() => setSettingsOpen(false)} />}
     {bookmarksOpen && <div className="fixed inset-0 z-80 flex items-center justify-center bg-black/50 p-4" onClick={() => setBookmarksOpen(false)}><div role="dialog" aria-modal="true" aria-label="Bookmarks" className="max-h-[80dvh] w-120 max-w-full overflow-auto rounded-lg border border-border bg-popover p-5 shadow-lg" onClick={event => event.stopPropagation()}><div className="mb-4 flex items-center justify-between"><h2 className="text-sm font-semibold">Bookmarks</h2><button className={ui.iconButton} aria-label="Close bookmarks" onClick={() => setBookmarksOpen(false)}><X size={16}/></button></div>{navigation.bookmarks.map(location => <div key={locationKey(location)} className="flex items-center gap-2 border-t border-border py-2"><button className="min-w-0 flex-1 truncate text-left text-xs hover:underline" onClick={() => {navigate(location); setBookmarksOpen(false)}}>{documentLabel(location)}</button><button className={ui.iconButton} aria-label={`Remove ${documentLabel(location)}`} onClick={() => setNavigation(previous => toggleBookmark(previous, location))}><X size={12}/></button></div>)}</div></div>}

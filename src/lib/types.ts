@@ -40,6 +40,7 @@ export interface Operations {
   applyMethodEdit: {input: {assembly: number; token: number; revision: number; instructions: EditableInstruction[]; locals?: string[]; regions?: EditRegion[]}; output: EditPreview}
   discardMethodEdit: {input: {assembly: number; token: number; revision: number}; output: EditPreview}
   getEdits: {input: {assembly: number}; output: EditsInfo}
+  addMember: {input: {assembly: number; revision: number; owner: number; member: NewMemberRequest}; output: {token: number; info: AssemblyInfo}}
   getOpcodes: {input: Record<string, never>; output: [string, string][]}
   exportModifiedAssembly: {input: {assembly: number; revision: number}; output: {buffer: ArrayBuffer}}
   load: { input: {buffer: ArrayBuffer}; output: Loaded }
@@ -65,6 +66,8 @@ export interface EditableInstruction {id: string; opcode: string; operand: strin
 /** An exception clause; labels name instruction ids, "" is the end of the method. */
 export interface EditRegion {kind: 'catch' | 'finally' | 'fault'; try_start: string; try_end: string; handler_start: string; handler_end: string; catch_type: string | null}
 export interface EditPreview {token: number; revision: number; instructions: EditableInstruction[]; original: EditableInstruction[]; changed: boolean; il: string; max_stack: number; code_size: number; locals: string[]; original_locals: string[]; regions: EditRegion[]; original_regions: EditRegion[]}
+/** A field or method to add; types use C# keywords, local type names or tokens. */
+export interface NewMemberRequest {kind: 'field' | 'method'; name: string; type: string; access: 'public' | 'internal' | 'protected' | 'private'; static: boolean; parameters: {name: string; type: string}[]}
 export interface EditsInfo {revision: number; edit_revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null}
 export type Operation = keyof Operations
 export type Request = { [K in Operation]: {id: number; op: K} & Operations[K]['input'] }[Operation]

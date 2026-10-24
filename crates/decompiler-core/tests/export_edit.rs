@@ -815,3 +815,126 @@ fn loaded_dependencies_establish_external_types_and_member_access() {
     let output = session.export_modified(id, session.edit_revision).unwrap();
     Assembly::load(output).unwrap();
 }
+#[test]
+fn fields_and_methods_can_be_added_with_renumbered_tokens() {
+    use decompiler_core::{pe_write::NewMember, signature::Type};
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let counter = a
+        .nodes
+        .iter()
+        .find(|n| n.token >> 24 == 2 && n.name == "Counter")
+        .unwrap()
+        .token;
+    // A field in a type that is not last renumbers every later field.
+    let added = pe_write::add_member(
+        &a,
+        counter,
+        &NewMember::Field {
+            name: "Extra".into(),
+            ty: Type::primitive("int"),
+            flags: 0x0006,
+        },
+    )
+    .unwrap();
+    let b = Assembly::load(added.bytes.clone()).unwrap();
+    assert_eq!(b.metadata().fields.len(), a.metadata().fields.len() + 1);
+    assert!(
+        b.nodes
+            .iter()
+            .any(|n| n.token == added.token && n.name == "Extra" && n.parent == counter)
+    );
+    // Code reading a later type's field still names it.
+    let read_open = method(&b, "ReadOther");
+    assert!(
+        decompiler_core::decompile::decompile(&b, read_open)
+            .unwrap()
+            .csharp
+            .contains("other.Hidden")
+    );
+    // A method with parameters renumbers later methods and parameters.
+    let operations = b
+        .nodes
+        .iter()
+        .find(|n| n.token >> 24 == 2 && n.name == "Operations")
+        .unwrap()
+        .token;
+    let with_method = pe_write::add_member(
+        &b,
+        operations,
+        &NewMember::Method {
+            name: "Twice".into(),
+            return_type: Type::primitive("int"),
+            parameters: vec![("value".into(), Type::primitive("int"))],
+            flags: 0x0096,
+        },
+    )
+    .unwrap();
+    let c = Assembly::load(with_method.bytes).unwrap();
+    let source = decompiler_core::decompile::decompile(&c, with_method.token)
+        .unwrap()
+        .csharp;
+    assert!(
+        source.contains("public static int Twice(int value)"),
+        "{source}"
+    );
+    assert!(source.contains("return 0;"), "{source}");
+    // Later methods still decompile to the same code.
+    let generic = method(&c, "Pick");
+    assert!(
+        decompiler_core::decompile::decompile(&c, generic)
+            .unwrap()
+            .csharp
+            .contains("flag ? a : b")
+    );
+    // The new method's body is editable like any other.
+    let mut rows = cil_encode::from_body(&c.body(with_method.token).unwrap().unwrap());
+    rows.insert(
+        0,
+        EditableInstruction {
+            id: "a".into(),
+            opcode: "ldarg.0".into(),
+            operand: String::new(),
+        },
+    );
+    rows.insert(
+        1,
+        EditableInstruction {
+            id: "b".into(),
+            opcode: "ldarg.0".into(),
+            operand: String::new(),
+        },
+    );
+    rows.retain(|r| r.opcode != "ldc.i4.0");
+    rows.insert(
+        2,
+        EditableInstruction {
+            id: "c".into(),
+            opcode: "add".into(),
+            operand: String::new(),
+        },
+    );
+    let edit = edit::validate(&c, with_method.token, &rows).unwrap();
+    let output = pe_write::write(&c, &BTreeMap::from([(with_method.token, edit)])).unwrap();
+    let d = Assembly::load(output).unwrap();
+    assert!(
+        decompiler_core::decompile::decompile(&d, with_method.token)
+            .unwrap()
+            .csharp
+            .contains("return value + value;")
+    );
+    // Duplicates are rejected.
+    assert!(
+        pe_write::add_member(
+            &c,
+            operations,
+            &NewMember::Method {
+                name: "Twice".into(),
+                return_type: Type::primitive("int"),
+                parameters: vec![("other".into(), Type::primitive("int"))],
+                flags: 0x0096,
+            },
+        )
+        .is_err()
+    );
+}

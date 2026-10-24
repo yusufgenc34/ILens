@@ -788,3 +788,311 @@ pub fn write(a: &Assembly, edits: &BTreeMap<u32, ValidatedEdit>) -> Result<Vec<u
 fn cil_encode_bytes(body: &cil::MethodBody) -> Result<Vec<u8>> {
     crate::cil_encode::encode(&crate::cil_encode::from_body(body))
 }
+
+/// A member to add to a type. New methods start with a default body (`ret`, or the
+/// return type's zero value) that the IL editor then changes.
+#[derive(Debug, Clone)]
+pub enum NewMember {
+    Field {
+        name: String,
+        ty: crate::signature::Type,
+        flags: u16,
+    },
+    Method {
+        name: String,
+        return_type: crate::signature::Type,
+        parameters: Vec<(String, crate::signature::Type)>,
+        flags: u16,
+    },
+}
+/// The rewritten assembly and the new member's token.
+pub struct Added {
+    pub bytes: Vec<u8>,
+    pub token: u32,
+}
+fn put_compressed(n: usize, out: &mut Vec<u8>) -> Result<()> {
+    match n {
+        0..=0x7f => out.push(n as u8),
+        0x80..=0x3fff => out.extend_from_slice(&(0x8000 | n as u16).to_be_bytes()),
+        _ => return Err(unsupported("Too many parameters")),
+    }
+    Ok(())
+}
+/// A method body that returns the return type's zero value.
+fn default_body(ty: &crate::signature::Type) -> Result<Vec<u8>> {
+    use crate::signature::Type;
+    let mut code = match ty {
+        _ if ty.is_void() => vec![],
+        Type::Primitive(name) => match name.as_str() {
+            "bool" | "char" | "sbyte" | "byte" | "short" | "ushort" | "int" | "uint" => vec![0x16],
+            "long" | "ulong" => vec![0x16, 0x6a],
+            "nint" | "nuint" => vec![0x16, 0xd3],
+            "float" => vec![0x22, 0, 0, 0, 0],
+            "double" => vec![0x23, 0, 0, 0, 0, 0, 0, 0, 0],
+            "string" | "object" => vec![0x14],
+            _ => return Err(unsupported(format!("No default value for {name}"))),
+        },
+        Type::Named(_) | Type::Array(..) => vec![0x14],
+        _ => {
+            return Err(unsupported(
+                "New methods return void, a primitive or a reference type; change the signature by editing IL afterwards",
+            ));
+        }
+    };
+    code.push(0x2a);
+    Ok(code)
+}
+pub fn add_member(a: &Assembly, owner: u32, member: &NewMember) -> Result<Added> {
+    use crate::signature::{Type, encode_type};
+    let layout = preflight(a)?;
+    let node = a
+        .nodes
+        .iter()
+        .find(|n| n.token == owner && n.token >> 24 == 2)
+        .ok_or_else(|| unsupported("Members can only be added to a type definition"))?;
+    if owner & 0xff_ffff == 1 || !matches!(node.kind.as_str(), "class" | "struct") {
+        return Err(unsupported(
+            "Members can be added to classes and structs; interfaces, enums, delegates and <Module> stay unchanged",
+        ));
+    }
+    let name = match member {
+        NewMember::Field { name, .. } | NewMember::Method { name, .. } => name.trim(),
+    };
+    if name.is_empty() || name.len() > 1024 || name.contains('\0') || name.starts_with('.') {
+        return Err(unsupported(
+            "Enter a member name (up to 1,024 characters, not a special name)",
+        ));
+    }
+    let mut strings = stream(a, "#Strings").unwrap_or_default().to_vec();
+    let mut blobs = stream(a, "#Blob").unwrap_or_default().to_vec();
+    let table_stream = stream(a, "#~").ok_or_else(|| unsupported("Missing tables stream"))?;
+    let mut tables = crate::metadata_write::Tables::decode(table_stream)?;
+    let owner_row = owner & 0xff_ffff;
+    let mut body = None;
+    let (table, (row, remap)) = match member {
+        NewMember::Field { ty, flags, .. } => {
+            if a.nodes
+                .iter()
+                .any(|n| n.parent == owner && n.token >> 24 == 4 && n.name == name)
+            {
+                return Err(unsupported(format!(
+                    "{} already has a field named {name}",
+                    node.name
+                )));
+            }
+            let mut signature = vec![0x06];
+            encode_type(ty, &mut signature)?;
+            let row = vec![
+                u32::from(*flags),
+                crate::metadata_write::append_string(&mut strings, name)?,
+                crate::metadata_write::append_blob(&mut blobs, &signature)?,
+            ];
+            (4, tables.add_field(owner_row, row)?)
+        }
+        NewMember::Method {
+            return_type,
+            parameters,
+            flags,
+            ..
+        } => {
+            let instance = flags & 0x10 == 0;
+            let mut signature = vec![if instance { 0x20 } else { 0 }];
+            put_compressed(parameters.len(), &mut signature)?;
+            encode_type(return_type, &mut signature)?;
+            for (_, ty) in parameters {
+                if matches!(ty, Type::Primitive(n) if n == "void") {
+                    return Err(unsupported("Parameters cannot be void"));
+                }
+                encode_type(ty, &mut signature)?;
+            }
+            let duplicate = a.nodes.iter().any(|n| {
+                n.parent == owner
+                    && n.token >> 24 == 6
+                    && n.name == name
+                    && a.method_ref(n.token).is_ok_and(|m| {
+                        m.signature.parameters
+                            == parameters
+                                .iter()
+                                .map(|(_, t)| t.clone())
+                                .collect::<Vec<_>>()
+                    })
+            });
+            if duplicate {
+                return Err(unsupported(format!(
+                    "{} already has a method {name} with these parameter types",
+                    node.name
+                )));
+            }
+            body = Some(default_body(return_type)?);
+            let params = parameters
+                .iter()
+                .enumerate()
+                .map(|(i, (pname, _))| {
+                    Ok(vec![
+                        0,
+                        i as u32 + 1,
+                        crate::metadata_write::append_string(&mut strings, pname.trim())?,
+                    ])
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let row = vec![
+                0,
+                0,
+                u32::from(*flags),
+                crate::metadata_write::append_string(&mut strings, name)?,
+                crate::metadata_write::append_blob(&mut blobs, &signature)?,
+                0,
+            ];
+            (6, tables.add_method(owner_row, row, params)?)
+        }
+    };
+    let token = ((table as u32) << 24) | row;
+    // Every method body's field and method tokens follow the renumbering.
+    let mut output = a.bytes.clone();
+    for (index, method) in a.metadata().method_defs.iter().enumerate() {
+        if method.rva == 0 {
+            continue;
+        }
+        let old = 0x0600_0001 + index as u32;
+        let range = header_and_code(a, old)?;
+        let header = if a.bytes[range.start] & 3 == 2 { 1 } else { 12 };
+        let Some(code) = a.body(old)? else { continue };
+        for i in &code.instructions {
+            if let cil::Operand::Token(t) = i.operand
+                && matches!(t >> 24, 4 | 6 | 8)
+                && remap.token(t) != t
+            {
+                let at =
+                    range.start + header + i.offset as usize + if i.opcode > 0xff { 2 } else { 1 };
+                put32(&mut output, at, remap.token(t))?;
+            }
+        }
+    }
+    let entry = u32_at(&output, layout.cli.start + 20)?;
+    if entry >> 24 == 6 {
+        put32(&mut output, layout.cli.start + 20, remap.token(entry))?;
+    }
+    let region = region(a, &layout, &output)?;
+    let mut data = Vec::new();
+    if let Some(code) = body {
+        let rva = u32::try_from(region.rva).map_err(|_| unsupported("Method RVA overflow"))?;
+        tables.rows[6][row as usize - 1][0] = rva;
+        data.push(((code.len() as u8) << 2) | 2);
+        data.extend_from_slice(&code);
+    }
+    data.resize(align(data.len(), 4)?, 0);
+    tables.widen_heaps(
+        strings.len(),
+        stream(a, "#GUID").map_or(0, <[u8]>::len),
+        blobs.len(),
+    );
+    let metadata = crate::metadata_write::rebuild(
+        &a.bytes[a.image.metadata.clone()],
+        &[
+            ("#~", tables.encode()),
+            ("#Strings", strings),
+            ("#Blob", blobs),
+        ],
+    )?;
+    let metadata_rva =
+        u32::try_from(region.rva + data.len()).map_err(|_| unsupported("Metadata RVA overflow"))?;
+    put32(&mut output, layout.cli.start + 8, metadata_rva)?;
+    put32(&mut output, layout.cli.start + 12, metadata.len() as u32)?;
+    data.extend_from_slice(&metadata);
+    commit_region(a, &layout, &mut output, &region, data)?;
+    for range in layout.debug.clone() {
+        output[range].fill(0);
+    }
+    output[layout.directories + 6 * 8..layout.directories + 7 * 8].fill(0);
+    put32(&mut output, layout.optional + 64, 0)?;
+    put32(&mut output, layout.pe + 8, 0)?;
+    verify_addition(a, &output, &remap, token, name)?;
+    Ok(Added {
+        bytes: output,
+        token,
+    })
+}
+/// Independently of the rewrite: every original member keeps its name, signature and
+/// flags under its new token, every body decodes to the same instructions with
+/// renumbered tokens, and the new member exists.
+fn verify_addition(
+    a: &Assembly,
+    output: &[u8],
+    remap: &crate::metadata_write::Remap,
+    token: u32,
+    name: &str,
+) -> Result<()> {
+    let parsed = Assembly::load(output.to_vec())?;
+    if parsed.info.identity != a.info.identity || parsed.image.cli_flags != a.image.cli_flags {
+        return Err(unsupported("Output identity changed unexpectedly"));
+    }
+    let same = |old: u32| -> Result<()> {
+        let new = remap.token(old);
+        let before = a.nodes.iter().find(|n| n.token == old);
+        let after = parsed.nodes.iter().find(|n| n.token == new);
+        let ok = match (before, after) {
+            (Some(x), Some(y)) => x.name == y.name && x.flags == y.flags,
+            (None, None) => true,
+            _ => false,
+        };
+        if !ok {
+            return Err(unsupported(format!(
+                "Member 0x{old:08X} did not survive renumbering"
+            )));
+        }
+        Ok(())
+    };
+    for i in 0..a.metadata().fields.len() as u32 {
+        same(0x0400_0001 + i)?;
+    }
+    for (index, method) in a.metadata().method_defs.iter().enumerate() {
+        let old = 0x0600_0001 + index as u32;
+        same(old)?;
+        let new = remap.token(old);
+        let signature = |assembly: &Assembly, t: u32| {
+            assembly
+                .method_row(t)
+                .ok()
+                .and_then(|r| assembly.blob(r.signature).ok().map(<[u8]>::to_vec))
+        };
+        if signature(a, old) != signature(&parsed, new) {
+            return Err(unsupported("A method signature changed during renumbering"));
+        }
+        if method.rva == 0 {
+            continue;
+        }
+        let (Some(before), Some(after)) = (a.body(old)?, parsed.body(new)?) else {
+            return Err(unsupported("A method body was lost during renumbering"));
+        };
+        let expected: Vec<_> = before
+            .instructions
+            .iter()
+            .map(|i| match i.operand {
+                cil::Operand::Token(t) => (i.opcode, Some(remap.token(t))),
+                _ => (i.opcode, None),
+            })
+            .collect();
+        let actual: Vec<_> = after
+            .instructions
+            .iter()
+            .map(|i| match i.operand {
+                cil::Operand::Token(t) => (i.opcode, Some(t)),
+                _ => (i.opcode, None),
+            })
+            .collect();
+        if expected != actual || before.code_size != after.code_size {
+            return Err(unsupported(format!(
+                "Method 0x{old:08X} changed during renumbering"
+            )));
+        }
+    }
+    if !parsed
+        .nodes
+        .iter()
+        .any(|n| n.token == token && n.name == name)
+    {
+        return Err(unsupported("The new member is missing from the output"));
+    }
+    goblin::pe::PE::parse(output).map_err(|e| unsupported(e.to_string()))?;
+    Ok(())
+}

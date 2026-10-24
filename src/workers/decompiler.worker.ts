@@ -27,7 +27,7 @@ async function initialize() {
   return engine
 }
 async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
-  if (['load', 'loadDependency', 'close', 'dispose', 'applyMethodEdit', 'discardMethodEdit'].includes(request.op)) cancelExport()
+  if (['load', 'loadDependency', 'close', 'dispose', 'applyMethodEdit', 'discardMethodEdit', 'addMember'].includes(request.op)) cancelExport()
   switch (request.op) {
     case 'resolveFrameworkReference': {
       const info=core.get_assembly_info(request.assembly) as Overview
@@ -45,6 +45,7 @@ async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
     }
     case 'beginProjectExport': exportRequest = request.id; cancelExport(); exportJob = createProjectExportJob(core, ++nextJob, request.options); return exportJob.progress()
     case 'getEdits': return core.get_edits(request.assembly)
+    case 'addMember': return core.add_member(request.assembly, request.revision, request.owner, JSON.stringify(request.member))
     case 'getOpcodes': return core.get_opcodes()
     case 'openMethodEdit': return core.open_method_edit(request.assembly, request.token)
     case 'applyMethodEdit': return core.apply_method_edit(request.assembly, request.token, request.revision, JSON.stringify(request.locals || request.regions ? {instructions: request.instructions, locals: request.locals, regions: request.regions} : request.instructions))

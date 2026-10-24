@@ -239,6 +239,27 @@ impl Decompiler {
             .discard_edit(id, token, revision)
             .map_err(error)?)
     }
+    pub fn add_member(
+        &mut self,
+        id: u32,
+        revision: u32,
+        owner: u32,
+        request: &str,
+    ) -> Result<JsValue, JsValue> {
+        if request.len() > 64 * 1024 {
+            return Err(error(Error::limit("Member request exceeds 64 KiB")));
+        }
+        let request = serde_json::from_str(request).map_err(|e| {
+            error(Error::new(
+                decompiler_core::error::ErrorCode::InvalidEdit,
+                e.to_string(),
+            ))
+        })?;
+        js(&self
+            .session
+            .add_member(id, revision, owner, request)
+            .map_err(error)?)
+    }
     pub fn get_edits(&self, id: u32) -> Result<JsValue, JsValue> {
         js(&self.session.edits_info(id).map_err(error)?)
     }

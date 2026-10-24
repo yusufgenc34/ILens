@@ -80,7 +80,7 @@ pub(crate) fn schema(id: usize) -> Vec<Column> {
         _ => vec![],
     }
 }
-fn coded_tables(k: K) -> Vec<Option<u8>> {
+pub(crate) fn coded_tables(k: K) -> Vec<Option<u8>> {
     // ECMA-335 HasCustomAttribute tag 8 is DeclSecurity (clrmeta 0.1 calls it unused).
     let mut tables: Vec<_> = k.tables().iter().map(|v| v.map(|t| t as u8)).collect();
     if k == K::HasCustomAttribute {

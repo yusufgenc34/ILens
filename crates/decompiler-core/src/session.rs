@@ -7,6 +7,28 @@ use crate::{
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
+/// A field or method to add, as the editor submits it.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NewMemberRequest {
+    /// "field" or "method".
+    pub kind: String,
+    pub name: String,
+    /// The field type, or the method's return type ("void" allowed).
+    #[serde(rename = "type")]
+    pub type_name: String,
+    /// "public", "internal", "protected" or "private".
+    pub access: String,
+    #[serde(default, rename = "static")]
+    pub is_static: bool,
+    #[serde(default)]
+    pub parameters: Vec<NewParameter>,
+}
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct NewParameter {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+}
 #[derive(Serialize)]
 pub struct Loaded {
     pub id: u32,
@@ -648,6 +670,90 @@ impl Session {
         self.edits.remove(&(id, token));
         self.bump_edit_revision();
         self.open_edit(id, token)
+    }
+    /// Adds a field or method to a type: pending IL edits are written first, the member
+    /// is added with renumbered tokens, and the result replaces the assembly in place.
+    pub fn add_member(
+        &mut self,
+        id: u32,
+        revision: u32,
+        owner: u32,
+        request: NewMemberRequest,
+    ) -> Result<Value> {
+        self.check_edit_revision(revision)?;
+        let a = self.assembly(id)?;
+        let parse = |text: &str| crate::edit::parse_type(a, text);
+        let access: u16 = match request.access.as_str() {
+            "private" => 1,
+            "internal" => 3,
+            "protected" => 4,
+            "public" => 6,
+            other => {
+                return Err(Error::new(
+                    crate::error::ErrorCode::InvalidEdit,
+                    format!("Unknown access {other}"),
+                ));
+            }
+        };
+        let flags = access | if request.is_static { 0x10 } else { 0 };
+        let member = match request.kind.as_str() {
+            "field" => crate::pe_write::NewMember::Field {
+                name: request.name.clone(),
+                ty: parse(&request.type_name)?,
+                flags,
+            },
+            "method" => crate::pe_write::NewMember::Method {
+                name: request.name.clone(),
+                return_type: if request.type_name.trim() == "void" {
+                    crate::signature::Type::primitive("void")
+                } else {
+                    parse(&request.type_name)?
+                },
+                parameters: request
+                    .parameters
+                    .iter()
+                    .map(|p| Ok((p.name.clone(), parse(&p.type_name)?)))
+                    .collect::<Result<_>>()?,
+                // Methods hide by signature, as C# declares them.
+                flags: flags | 0x80,
+            },
+            other => {
+                return Err(Error::new(
+                    crate::error::ErrorCode::InvalidEdit,
+                    format!("Unknown member kind {other}"),
+                ));
+            }
+        };
+        if request.parameters.len() > 64 {
+            return Err(Error::limit(
+                "A new method can declare at most 64 parameters",
+            ));
+        }
+        let pending: BTreeMap<u32, crate::edit::ValidatedEdit> = self
+            .edits
+            .iter()
+            .filter(|((assembly, _), _)| *assembly == id)
+            .map(|((_, token), edit)| (*token, edit.clone()))
+            .collect();
+        let base = if pending.is_empty() {
+            a.bytes.clone()
+        } else {
+            let externals = self.externals(id);
+            crate::edit::with_externals((*externals).clone(), || {
+                crate::pe_write::write(a, &pending)
+            })?
+        };
+        let base = Assembly::load(base)?;
+        let added = crate::pe_write::add_member(&base, owner, &member)?;
+        let replaced = Assembly::load(added.bytes)?;
+        let info = replaced.info.clone();
+        self.assemblies.insert(id, replaced);
+        self.edits.retain(|(assembly, _), _| *assembly != id);
+        self.cache.retain(|((assembly, _), _, _)| *assembly != id);
+        self.cache_bytes = self.cache.iter().map(|(_, _, bytes)| *bytes).sum();
+        self.revision += 1;
+        self.bump_edit_revision();
+        Ok(json!({"token": added.token, "info": info}))
     }
     pub fn edits_info(&self, id: u32) -> Result<Value> {
         let a = self.assembly(id)?;
