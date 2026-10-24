@@ -59,3 +59,17 @@ public static class Operations
     public static void ThrowException(Exception error) => throw error;
     public static Type RuntimeType(object value) => value.GetType();
 }
+// Accessibility: nested types see private members; derived types see protected ones
+// through their own type.
+public class Vault
+{
+    private static int secret = 3;
+    protected int Hidden = 5;
+    public class Inner { public static int Peek() => secret; }
+}
+public class VaultChild : Vault
+{
+    public int ReadHidden() => Hidden;
+    public static int ReadOther(VaultChild other) => other.Hidden;
+    public static int ReadBase(Vault other) => 0;
+}

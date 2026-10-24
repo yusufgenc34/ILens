@@ -563,3 +563,43 @@ fn constructor_bodies_track_this_initialization() {
         .operand = "\"renamed\"".into();
     edit::validate(&a, cctor, &rows).unwrap();
 }
+#[test]
+fn nested_and_derived_types_follow_accessibility_rules() {
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let body = |name: &str| {
+        let token = method(&a, name);
+        (
+            token,
+            cil_encode::from_body(&a.body(token).unwrap().unwrap()),
+        )
+    };
+    // A nested type reads its enclosing type's private static field.
+    let (peek, rows) = body("Peek");
+    edit::validate(&a, peek, &rows).unwrap();
+    // A derived type reads a protected field through `this` and through its own type.
+    let (hidden, rows) = body("ReadHidden");
+    edit::validate(&a, hidden, &rows).unwrap();
+    let (other, rows) = body("ReadOther");
+    edit::validate(&a, other, &rows).unwrap();
+    // ...but not through a reference of the base type.
+    let (base, _) = body("ReadBase");
+    let field = rows
+        .iter()
+        .find(|r| r.opcode == "ldfld")
+        .unwrap()
+        .operand
+        .clone();
+    let row = |opcode: &str, operand: &str, id: &str| EditableInstruction {
+        id: id.into(),
+        opcode: opcode.into(),
+        operand: operand.into(),
+    };
+    let through_base = vec![
+        row("ldarg.0", "", "a"),
+        row("ldfld", &field, "b"),
+        row("ret", "", "c"),
+    ];
+    let error = edit::validate(&a, base, &through_base).unwrap_err();
+    assert!(error.detail.contains("accessibility"), "{}", error.detail);
+}

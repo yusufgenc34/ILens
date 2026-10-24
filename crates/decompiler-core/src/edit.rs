@@ -89,12 +89,56 @@ fn object(stack: &mut Vec<Stack>) -> Result<Stack> {
     }
     Ok(value)
 }
-fn access(owner: u32, caller: u32, flags: u16) -> Result<()> {
+/// Member accessibility for a member of `owner` used from `caller` (ECMA-335 I.8.5.3):
+/// private members are visible to the declaring type and the types nested in it;
+/// family members also to derived types, for instance members only through a
+/// receiver of the accessing type. `receiver` is None for static members.
+fn access(
+    types: &Types<'_>,
+    owner: u32,
+    caller: u32,
+    flags: u16,
+    receiver: Option<Stack>,
+) -> Result<()> {
+    // The caller and the types enclosing it.
+    let mut scopes = vec![caller];
+    while scopes.len() < 64 {
+        let current = *scopes.last().expect("non-empty");
+        match types
+            .a
+            .nodes
+            .iter()
+            .find(|n| n.token == current)
+            .map(|n| n.parent)
+            .filter(|p| p >> 24 == 2)
+        {
+            Some(outer) => scopes.push(outer),
+            None => break,
+        }
+    }
+    let nested = scopes.contains(&owner);
+    let family = || -> Result<bool> {
+        for scope in &scopes {
+            if !types.derives(*scope, owner)? {
+                continue;
+            }
+            let through = match receiver {
+                None | Some(Stack::This) => true,
+                Some(Stack::Ref(id)) => match types.value(id) {
+                    Value::Class(t) => types.derives(t, *scope)?,
+                    _ => false,
+                },
+                Some(_) => false,
+            };
+            if through {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
     let permitted = match flags & 7 {
-        1 => owner == caller,
-        // Cross-type protected access also depends on the receiver's tracked type.
-        // Keep it closed until that separate accessibility rule is implemented.
-        2 | 4 => owner == caller,
+        1 => nested,
+        2 | 4 => nested || family()?,
         3 | 5 | 6 => true,
         _ => false,
     };
@@ -1047,7 +1091,13 @@ fn call(
             ));
         }
         if token >> 24 == 6 {
-            access(m.owner, caller, types.a.method_row(token)?.flags)?;
+            access(
+                types,
+                m.owner,
+                caller,
+                types.a.method_row(token)?.flags,
+                Some(Stack::This),
+            )?;
         }
         let mut parameters = Vec::new();
         for p in &sig.parameters {
@@ -1080,7 +1130,16 @@ fn call(
         if i.opcode == 0x28 && row.flags & 0x400 != 0 {
             return Err(invalid("An abstract method requires virtual dispatch"));
         }
-        access(m.owner, caller, row.flags)?;
+        // The receiver lies below the arguments; newobj and static calls have none.
+        let receiver = (sig.has_this && !constructor)
+            .then(|| {
+                stack
+                    .len()
+                    .checked_sub(1 + sig.parameters.len())
+                    .map(|i| stack[i])
+            })
+            .flatten();
+        access(types, m.owner, caller, row.flags, receiver)?;
     }
     let mut parameters = Vec::new();
     for p in &sig.parameters {
@@ -1150,7 +1209,16 @@ fn field(
             "Literal/init-only fields cannot be assigned by this method",
         ));
     }
-    access(owner, caller, row.flags)?;
+    // The receiver is on top for loads and below the value for stores.
+    let receiver = (!is_static)
+        .then(|| {
+            stack
+                .len()
+                .checked_sub(1 + usize::from(store))
+                .map(|i| stack[i])
+        })
+        .flatten();
+    access(types, owner, caller, row.flags, receiver)?;
     let value = types.signature(&ty)?;
     if store {
         expect(types, stack, types.stack(value))?;
