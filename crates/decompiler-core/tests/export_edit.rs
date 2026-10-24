@@ -730,6 +730,88 @@ fn multidimensional_arrays_are_editable() {
             .contains("local[0, 1] = 6;")
     );
     // The C# view writes multidimensional creation and access as C# does.
-    let source = decompiler_core::decompile::decompile(&a, grid).unwrap().csharp;
+    let source = decompiler_core::decompile::decompile(&a, grid)
+        .unwrap()
+        .csharp;
     assert!(source.contains("new int[rows, columns];"), "{source}");
+}
+#[test]
+fn loaded_dependencies_establish_external_types_and_member_access() {
+    let workspace = include_bytes!("../../../samples/fixtures/ILens.Workspace.dll").to_vec();
+    let dependency =
+        include_bytes!("../../../samples/fixtures/ILens.WorkspaceDependency.dll").to_vec();
+    let edit_rows = |session: &Session, id: u32, name: &str| {
+        let a = session.assembly(id).unwrap();
+        let token = method(a, name);
+        (
+            token,
+            cil_encode::from_body(&a.body(token).unwrap().unwrap()),
+        )
+    };
+    // Alone, an external enum and an external field cannot be established.
+    let mut alone = Session::default();
+    let id = alone.load(workspace.clone()).unwrap().id;
+    for name in ["Pick", "ReadOpen", "Area", "Create"] {
+        let (token, _) = edit_rows(&alone, id, name);
+        assert!(alone.open_edit(id, token).is_err(), "{name}");
+    }
+    // With the dependency loaded, their definitions are known.
+    let mut session = Session::default();
+    let id = session.load(workspace).unwrap().id;
+    session.load(dependency).unwrap();
+    for name in [
+        "Pick",
+        "BoxLevel",
+        "Area",
+        "Create",
+        "ReadOpen",
+        "AsInterface",
+        "ReadField",
+        "WriteField",
+    ] {
+        let (token, rows) = edit_rows(&session, id, name);
+        let revision = session
+            .open_edit(id, token)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.detail))
+            .revision;
+        session
+            .apply_edit(id, token, revision, rows, None, None)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+    }
+    // A derived class reads a protected field of its external base through `this`...
+    let (guarded, rows) = edit_rows(&session, id, "ReadGuarded");
+    let revision = session.open_edit(id, guarded).unwrap().revision;
+    session
+        .apply_edit(id, guarded, revision, rows.clone(), None, None)
+        .unwrap();
+    // ...but not through a reference of the base type.
+    let field = rows
+        .iter()
+        .find(|r| r.opcode == "ldfld")
+        .unwrap()
+        .operand
+        .clone();
+    let (other, mut through_base) = edit_rows(&session, id, "ReadOther");
+    through_base
+        .iter_mut()
+        .find(|r| r.opcode == "ldfld")
+        .unwrap()
+        .operand = field;
+    let revision = session.open_edit(id, other).unwrap().revision;
+    let Err(error) = session.apply_edit(id, other, revision, through_base, None, None) else {
+        panic!("protected access through the base type was accepted");
+    };
+    assert!(error.detail.contains("accessibility"), "{}", error.detail);
+    // A changed external enum constant writes with the dependency's definitions.
+    let (pick, mut rows) = edit_rows(&session, id, "Pick");
+    rows.iter_mut()
+        .find(|r| r.opcode == "ldc.i4.2")
+        .unwrap()
+        .opcode = "ldc.i4.1".into();
+    let revision = session.open_edit(id, pick).unwrap().revision;
+    session
+        .apply_edit(id, pick, revision, rows, None, None)
+        .unwrap();
+    let output = session.export_modified(id, session.edit_revision).unwrap();
+    Assembly::load(output).unwrap();
 }

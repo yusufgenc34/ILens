@@ -2027,8 +2027,9 @@ fn enum_constant(a: &Assembly, value: &Expr, target: &Type) -> Option<std::strin
     let Type::ValueType(enum_token) = target else {
         return None;
     };
-    // Local enums and framework enums known from the built-in summary.
-    let members = crate::bcl::members_of(a, *enum_token)?;
+    // Local enums and framework enums known from the built-in summary. An integer
+    // stored as another assembly's value type is an enum value: C# needs the cast.
+    let members = crate::bcl::members_of(a, *enum_token).unwrap_or_default();
     let enum_name = strip_arity(&a.resolve(*enum_token));
     Some(crate::bcl::enum_text(&enum_name, &members, number))
 }

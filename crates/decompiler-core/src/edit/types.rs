@@ -251,9 +251,15 @@ impl<'a> Types<'a> {
                         .is_none()
                 {
                     if !reference {
-                        return Err(unsupported("Custom value types are not editable yet"));
+                        // A loaded dependency can establish an external struct or enum.
+                        self.token_depth(*token, depth + 1).map_err(|_| {
+                            unsupported(
+                                "External value types need their defining assembly; load it as a dependency",
+                            )
+                        })?
+                    } else {
+                        self.intern(Value::Class(*token))?
                     }
-                    self.intern(Value::Class(*token))?
                 } else {
                     self.token_depth(*token, depth + 1)?
                 };
@@ -361,6 +367,30 @@ impl<'a> Types<'a> {
                 let core = self.core_name(token)?;
                 if let Some(value) = core.as_deref().and_then(Self::primitive) {
                     value
+                } else if let Some(external) = super::externals().types.get(&token).cloned() {
+                    // A loaded dependency defines this type.
+                    match external.kind {
+                        super::ExternalKind::Class { .. } | super::ExternalKind::Interface => {
+                            Value::Class(token)
+                        }
+                        super::ExternalKind::Struct => Value::Struct(token),
+                        super::ExternalKind::Enum(underlying) => {
+                            let storage = match Self::primitive(&underlying) {
+                                Some(
+                                    v @ (Value::I1
+                                    | Value::U1
+                                    | Value::I2
+                                    | Value::U2
+                                    | Value::I4
+                                    | Value::U4
+                                    | Value::I8
+                                    | Value::U8),
+                                ) => self.intern(v)?,
+                                _ => return Err(invalid("Unsupported enum storage type")),
+                            };
+                            Value::Enum(token, storage)
+                        }
+                    }
                 } else {
                     return Err(unsupported(format!(
                         "The kind of external type {} cannot be established from this method's signatures",
@@ -528,6 +558,16 @@ impl<'a> Types<'a> {
             }
             if seen.len() > 64 || pending.len() > 256 {
                 return Err(Error::limit("IL validation inheritance graph is too large"));
+            }
+            if t >> 24 == 1 {
+                // External types inherit what their loaded definition declares.
+                if let Some(external) = super::externals().types.get(&t)
+                    && to >> 24 != 0
+                    && external.bases.contains(&self.a.resolve_full(to))
+                {
+                    return Ok(true);
+                }
+                continue;
             }
             if t >> 24 != 2 {
                 continue;

@@ -22,6 +22,8 @@ pub struct Session {
     // Edits are keyed by assembly ID and token, so loading unrelated assemblies must
     // not invalidate an open editor. Only edit-set changes advance this counter.
     pub edit_revision: u32,
+    // External definitions per assembly, valid for one workspace revision.
+    externals: std::cell::RefCell<BTreeMap<u32, (u32, std::rc::Rc<crate::edit::Externals>)>>,
 }
 impl Default for Session {
     fn default() -> Self {
@@ -33,6 +35,7 @@ impl Default for Session {
             edits: BTreeMap::new(),
             revision: 0,
             edit_revision: 0,
+            externals: std::cell::RefCell::new(BTreeMap::new()),
         }
     }
 }
@@ -413,12 +416,195 @@ impl Session {
         Ok(())
     }
     pub fn open_edit(&self, id: u32, token: u32) -> Result<crate::edit::EditPreview> {
-        crate::edit::preview(
-            self.assembly(id)?,
-            token,
-            self.edit_revision,
-            self.edits.get(&(id, token)),
-        )
+        let externals = self.externals(id);
+        crate::edit::with_externals((*externals).clone(), || {
+            crate::edit::preview(
+                self.assembly(id)?,
+                token,
+                self.edit_revision,
+                self.edits.get(&(id, token)),
+            )
+        })
+    }
+    /// What loaded dependencies define for this assembly's type and member references,
+    /// so edits can use external enums, structs, classes and members.
+    fn externals(&self, id: u32) -> std::rc::Rc<crate::edit::Externals> {
+        if let Some((revision, cached)) = self.externals.borrow().get(&id)
+            && *revision == self.revision
+        {
+            return cached.clone();
+        }
+        let computed = std::rc::Rc::new(self.compute_externals(id));
+        self.externals
+            .borrow_mut()
+            .insert(id, (self.revision, computed.clone()));
+        computed
+    }
+    fn compute_externals(&self, id: u32) -> crate::edit::Externals {
+        use crate::edit::{ExternalKind, ExternalType};
+        let mut out = crate::edit::Externals::default();
+        let Some(source) = self.assemblies.get(&id) else {
+            return out;
+        };
+        if self.assemblies.len() < 2 {
+            return out;
+        }
+        // Per dependency: type full name → TypeDef, (owner, member name) → members.
+        let mut types: BTreeMap<u32, std::collections::HashMap<String, u32>> = BTreeMap::new();
+        let mut members: BTreeMap<u32, std::collections::HashMap<(u32, String), Vec<u32>>> =
+            BTreeMap::new();
+        for (target_id, target) in &self.assemblies {
+            if *target_id == id {
+                continue;
+            }
+            let mut names = std::collections::HashMap::new();
+            let mut owned = std::collections::HashMap::<(u32, String), Vec<u32>>::new();
+            for n in &target.nodes {
+                match n.token >> 24 {
+                    2 => {
+                        names.insert(n.full_name.clone(), n.token);
+                    }
+                    4 | 6 => owned
+                        .entry((n.parent, n.name.clone()))
+                        .or_default()
+                        .push(n.token),
+                    _ => {}
+                }
+            }
+            types.insert(*target_id, names);
+            members.insert(*target_id, owned);
+        }
+        // The loaded assembly that defines a TypeRef, by its resolution scope.
+        let scope_target = |token: u32| -> Option<u32> {
+            let mut scope = coded(
+                source
+                    .metadata()
+                    .type_refs
+                    .get((token & 0xff_ffff).checked_sub(1)? as usize)?
+                    .resolution_scope,
+            );
+            for _ in 0..48 {
+                if scope >> 24 != 1 {
+                    break;
+                }
+                scope = coded(
+                    source
+                        .metadata()
+                        .type_refs
+                        .get((scope & 0xff_ffff).checked_sub(1)? as usize)?
+                        .resolution_scope,
+                );
+            }
+            if scope >> 24 != 35 {
+                return None;
+            }
+            let identity = &source
+                .references
+                .iter()
+                .find(|r| r.token == scope)?
+                .identity;
+            self.assemblies
+                .iter()
+                .find(|(i, a)| **i != id && identity.matches(&a.info.identity))
+                .map(|(i, _)| *i)
+        };
+        let mut resolved = std::collections::HashMap::new();
+        for row in 1..=source.metadata().type_refs.len() as u32 {
+            let token = 0x0100_0000 | row;
+            let Some(target_id) = scope_target(token) else {
+                continue;
+            };
+            let Some(definition) = types[&target_id].get(&source.resolve_full(token)).copied()
+            else {
+                continue;
+            };
+            let target = &self.assemblies[&target_id];
+            resolved.insert(token, (target_id, definition));
+            let Some(node) = target.nodes.iter().find(|n| n.token == definition) else {
+                continue;
+            };
+            let row = &target.metadata().type_defs[(definition & 0xff_ffff) as usize - 1];
+            let kind = match node.kind.as_str() {
+                "interface" => ExternalKind::Interface,
+                "struct" => ExternalKind::Struct,
+                "enum" => {
+                    let underlying = target
+                        .nodes
+                        .iter()
+                        .find(|f| f.parent == definition && f.name == "value__")
+                        .and_then(|f| target.field_ref(f.token).ok())
+                        .map(|(_, _, ty)| match ty {
+                            crate::signature::Type::Primitive(name) => name,
+                            _ => String::new(),
+                        })
+                        .unwrap_or_default();
+                    ExternalKind::Enum(underlying)
+                }
+                kind => ExternalKind::Class {
+                    abstract_: row.flags & 0x80 != 0,
+                    delegate: kind == "delegate",
+                },
+            };
+            // Base types and interfaces, followed through the dependency's own types.
+            let mut bases = vec![];
+            let mut pending = vec![definition];
+            while let Some(t) = pending.pop() {
+                if bases.len() > 64 || t >> 24 != 2 || t & 0xff_ffff == 0 {
+                    continue;
+                }
+                let r = &target.metadata().type_defs[(t & 0xff_ffff) as usize - 1];
+                let mut parents = vec![coded(r.extends)];
+                parents.extend(
+                    target
+                        .metadata()
+                        .interface_impls
+                        .iter()
+                        .filter(|i| i.class == t & 0xff_ffff)
+                        .map(|i| coded(i.interface)),
+                );
+                // Interfaces and System.Object have no base (row 0).
+                for parent in parents.into_iter().filter(|p| p & 0xff_ffff != 0) {
+                    let name = target.resolve_full(parent);
+                    if !bases.contains(&name) {
+                        bases.push(name);
+                        pending.push(parent);
+                    }
+                }
+            }
+            out.types.insert(token, ExternalType { kind, bases });
+        }
+        for row in 1..=source.metadata().member_refs.len() as u32 {
+            let token = 0x0a00_0000 | row;
+            let member = &source.metadata().member_refs[row as usize - 1];
+            let Some((target_id, owner)) = resolved.get(&coded(member.class)).copied() else {
+                continue;
+            };
+            let target = &self.assemblies[&target_id];
+            let Ok(name) = source.string(member.name) else {
+                continue;
+            };
+            let field = source
+                .blob(member.signature)
+                .ok()
+                .and_then(|b| b.first().copied())
+                == Some(6);
+            let mut found = members[&target_id]
+                .get(&(owner, name.to_owned()))
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|t| (t >> 24 == 4) == field)
+                .filter(|t| crate::resolution::same_member(source, token, target, *t, field));
+            if let (Some(definition), None) = (found.next(), found.next()) {
+                let flags = if field {
+                    target.metadata().fields[(definition & 0xff_ffff) as usize - 1].flags
+                } else {
+                    target.metadata().method_defs[(definition & 0xff_ffff) as usize - 1].flags
+                };
+                out.members.insert(token, flags);
+            }
+        }
+        out
     }
     pub fn apply_edit(
         &mut self,
@@ -434,8 +620,10 @@ impl Session {
             return Err(Error::limit("At most 256 method edits per workspace"));
         }
         let a = self.assembly(id)?;
-        let edit =
-            crate::edit::validate_request(a, token, &rows, locals.as_deref(), regions.as_deref())?;
+        let externals = self.externals(id);
+        let edit = crate::edit::with_externals((*externals).clone(), || {
+            crate::edit::validate_request(a, token, &rows, locals.as_deref(), regions.as_deref())
+        })?;
         let original = a
             .body(token)?
             .ok_or_else(|| Error::cil("Missing method body"))?;
@@ -475,6 +663,9 @@ impl Session {
             .filter(|((assembly, _), _)| *assembly == id)
             .map(|((_, token), edit)| (*token, edit.clone()))
             .collect();
-        crate::pe_write::write(self.assembly(id)?, &edits)
+        let externals = self.externals(id);
+        crate::edit::with_externals((*externals).clone(), || {
+            crate::pe_write::write(self.assembly(id)?, &edits)
+        })
     }
 }

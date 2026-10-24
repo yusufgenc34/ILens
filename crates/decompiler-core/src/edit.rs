@@ -54,6 +54,45 @@ pub struct EditPreview {
 }
 mod types;
 use types::{Stack, Types, Value};
+
+/// What a loaded dependency defines for an external type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalKind {
+    Class {
+        abstract_: bool,
+        delegate: bool,
+    },
+    Interface,
+    Struct,
+    /// An enum and the C# keyword of its underlying type.
+    Enum(String),
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalType {
+    pub kind: ExternalKind,
+    /// Full names of its base types and interfaces, transitively.
+    pub bases: Vec<String>,
+}
+/// Definitions of an assembly's TypeRefs and MemberRefs (member flags) in loaded
+/// dependencies. Without them, external types stay limited to what signatures prove.
+#[derive(Debug, Clone, Default)]
+pub struct Externals {
+    pub types: std::collections::HashMap<u32, ExternalType>,
+    pub members: std::collections::HashMap<u32, u16>,
+}
+thread_local! {
+    static EXTERNALS: std::cell::RefCell<std::rc::Rc<Externals>> = std::cell::RefCell::new(std::rc::Rc::default());
+}
+/// Runs `f` with external definitions visible to validation.
+pub fn with_externals<T>(externals: Externals, f: impl FnOnce() -> T) -> T {
+    let previous = EXTERNALS.with(|e| e.replace(std::rc::Rc::new(externals)));
+    let result = f();
+    EXTERNALS.with(|e| *e.borrow_mut() = previous);
+    result
+}
+pub(crate) fn externals() -> std::rc::Rc<Externals> {
+    EXTERNALS.with(|e| e.borrow().clone())
+}
 fn invalid(detail: impl Into<String>) -> Error {
     Error::new(ErrorCode::InvalidEdit, detail)
 }
@@ -1139,6 +1178,75 @@ fn array_method(
     }
     Ok(())
 }
+/// Accessibility of another assembly's member: assembly-scoped access does not cross
+/// assemblies, so only public and family access remain.
+fn external_access(flags: u16) -> u16 {
+    match flags & 7 {
+        6 => 6,
+        4 | 5 => (flags & !7) | 4,
+        _ => flags & !7,
+    }
+}
+/// A field of a type in a loaded dependency, with its definition's flags.
+fn external_field(
+    types: &mut Types<'_>,
+    caller: u32,
+    stack: &mut Vec<Stack>,
+    i: &cil::Instruction,
+    owner: u32,
+    flags: u16,
+    ty: &crate::signature::Type,
+) -> Result<()> {
+    let is_static = matches!(i.opcode, 0x7e..=0x80);
+    let store = matches!(i.opcode, 0x7d | 0x80);
+    let address_of = matches!(i.opcode, 0x7c | 0x7f);
+    if (flags & 16 != 0) != is_static {
+        return Err(invalid(
+            "Field opcode disagrees with the field's static flag",
+        ));
+    }
+    if flags & 0x40 != 0 || (store || address_of) && flags & 0x20 != 0 {
+        return Err(invalid(
+            "Literal/init-only fields of other assemblies cannot be assigned",
+        ));
+    }
+    let receiver = (!is_static)
+        .then(|| {
+            stack
+                .len()
+                .checked_sub(1 + usize::from(store))
+                .map(|i| stack[i])
+        })
+        .flatten();
+    access(types, owner, caller, external_access(flags), receiver)?;
+    let value = types.signature(ty)?;
+    if store {
+        expect(types, stack, types.stack(value))?;
+    }
+    if !is_static {
+        let target = types.token(owner)?;
+        match types.value(target) {
+            Value::Struct(_) => {
+                let receiver = pop(stack)?;
+                if receiver != Stack::Pointer(target)
+                    && (store || address_of || receiver != Stack::Value(target))
+                {
+                    return Err(invalid(
+                        "Struct fields are reached through a pointer to the struct",
+                    ));
+                }
+            }
+            v if v.reference() => expect(types, stack, types.stack(target))?,
+            _ => return Err(unsupported("Fields of this external type are not editable")),
+        }
+    }
+    if address_of {
+        stack.push(address(types, value)?);
+    } else if !store {
+        stack.push(types.stack(value));
+    }
+    Ok(())
+}
 /// A managed pointer to a location of type `id`; pointers to pointers do not exist.
 fn address(types: &Types<'_>, id: usize) -> Result<Stack> {
     if matches!(types.value(id), Value::Pointer(_)) {
@@ -1243,46 +1351,73 @@ fn call(
         // External constructors need their defining metadata to distinguish structs,
         // reference classes, delegates, abstract types and accessibility.
         if token >> 24 != 6 {
-            return Err(unsupported(
-                "Creating external types requires constructor/type definitions; local reference-class constructors are supported",
-            ));
-        }
-        if types.a.method_row(token)?.impl_flags & 0x1007 != 0 {
+            // A loaded dependency establishes an external class or struct and its
+            // constructor; delegates and abstract types stay closed.
+            let creatable = matches!(
+                externals().types.get(&m.owner).map(|e| &e.kind),
+                Some(
+                    ExternalKind::Class {
+                        abstract_: false,
+                        delegate: false
+                    } | ExternalKind::Struct
+                )
+            );
+            if token >> 24 != 10 || !creatable || !externals().members.contains_key(&token) {
+                return Err(unsupported(
+                    "Creating external types requires their defining assembly; load it as a dependency (delegates and abstract types cannot be created)",
+                ));
+            }
+        } else if types.a.method_row(token)?.impl_flags & 0x1007 != 0 {
             return Err(unsupported(
                 "Runtime-provided constructors, including delegates, require specialized validation",
             ));
         }
         types.token(m.owner)?;
-        let row = &types.a.metadata().type_defs[(m.owner & 0xffffff) as usize - 1];
-        if row.flags & 0xa0 != 0 {
-            return Err(invalid(
-                "newobj cannot instantiate an abstract class or interface",
-            ));
-        }
-        // Delegate construction has additional function-pointer provenance rules.
-        // Only fully local ordinary class chains ending at System.Object qualify.
-        let mut parent = crate::assembly::coded(row.extends);
-        let mut seen = std::collections::HashSet::from([m.owner]);
-        // Local structs derive directly from System.ValueType.
-        let created = types.token(m.owner)?;
-        let structure = matches!(types.value(created), Value::Struct(_));
-        while !(types.core_name(parent)?.as_deref() == Some("Object")
-            || structure && types.core_name(parent)?.as_deref() == Some("ValueType"))
-        {
-            if parent >> 24 != 2 {
-                return Err(unsupported(
-                    "Constructor base types require resolved ordinary classes; delegate and external-base construction is not supported",
+        // Local constructors: concrete classes whose base chain is known.
+        if token >> 24 == 6 {
+            let row = &types.a.metadata().type_defs[(m.owner & 0xffffff) as usize - 1];
+            if row.flags & 0xa0 != 0 {
+                return Err(invalid(
+                    "newobj cannot instantiate an abstract class or interface",
                 ));
             }
-            if seen.len() >= 64 || !seen.insert(parent) {
-                return Err(unsupported(
-                    "Constructor inheritance chain is cyclic or too deep",
-                ));
+            // Delegate construction has additional function-pointer provenance rules.
+            // Only fully local ordinary class chains ending at System.Object qualify.
+            let mut parent = crate::assembly::coded(row.extends);
+            let mut seen = std::collections::HashSet::from([m.owner]);
+            // Local structs derive directly from System.ValueType.
+            let created = types.token(m.owner)?;
+            let structure = matches!(types.value(created), Value::Struct(_));
+            while !(types.core_name(parent)?.as_deref() == Some("Object")
+                || structure && types.core_name(parent)?.as_deref() == Some("ValueType"))
+            {
+                // An external base class its loaded definition establishes ends the walk.
+                if parent >> 24 == 1
+                    && matches!(
+                        externals().types.get(&parent).map(|e| &e.kind),
+                        Some(ExternalKind::Class {
+                            delegate: false,
+                            ..
+                        })
+                    )
+                {
+                    break;
+                }
+                if parent >> 24 != 2 {
+                    return Err(unsupported(
+                        "Constructor base types require resolved ordinary classes: delegate construction is not supported, and external base classes need their assembly loaded as a dependency",
+                    ));
+                }
+                if seen.len() >= 64 || !seen.insert(parent) {
+                    return Err(unsupported(
+                        "Constructor inheritance chain is cyclic or too deep",
+                    ));
+                }
+                types.token(parent)?;
+                parent = crate::assembly::coded(
+                    types.a.metadata().type_defs[(parent & 0xffffff) as usize - 1].extends,
+                );
             }
-            types.token(parent)?;
-            parent = crate::assembly::coded(
-                types.a.metadata().type_defs[(parent & 0xffffff) as usize - 1].extends,
-            );
         }
     } else if m.name == ".ctor" && i.opcode == 0x28 && stack.len() > sig.parameters.len() {
         // `base(...)` or `this(...)` on the uninitialized `this` of this constructor.
@@ -1377,6 +1512,16 @@ fn call(
             })
             .flatten();
         access(types, m.owner, caller, row.flags, receiver)?;
+    } else if let Some(flags) = externals().members.get(&definition).copied() {
+        let receiver = (sig.has_this && !constructor)
+            .then(|| {
+                stack
+                    .len()
+                    .checked_sub(1 + sig.parameters.len())
+                    .map(|i| stack[i])
+            })
+            .flatten();
+        access(types, m.owner, caller, external_access(flags), receiver)?;
     }
     let mut parameters = Vec::new();
     for p in &sig.parameters {
@@ -1436,12 +1581,17 @@ fn field(
         }
         10 => {
             let (parent, name, ty) = types.a.field_ref(token)?;
+            if parent >> 24 == 1
+                && let Some(flags) = externals().members.get(&token).copied()
+            {
+                return external_field(types, caller, stack, i, parent, flags, &ty);
+            }
             let Some((definition, args)) = (parent >> 24 == 27)
                 .then(|| generic_instance(types.a, parent))
                 .flatten()
             else {
                 return Err(unsupported(
-                    "External field edits require resolved field definitions; local fields are supported",
+                    "External fields require their defining assembly; load it as a dependency",
                 ));
             };
             let field = types

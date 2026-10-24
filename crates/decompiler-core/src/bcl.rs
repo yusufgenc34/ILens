@@ -365,7 +365,12 @@ pub fn enum_text(name: &str, members: &[(String, i128)], value: i128) -> String 
         parts.reverse();
         return parts.join(" | ");
     }
-    format!("({name})({value})")
+    // Only a negative value needs parentheses after the cast.
+    if value < 0 {
+        format!("({name})({value})")
+    } else {
+        format!("({name}){value}")
+    }
 }
 /// Members of a framework enum, for writing `AttributeTargets.Class` instead of `4`.
 pub fn enum_members(a: &Assembly, token: u32) -> Option<&'static [(String, i128)]> {
@@ -406,7 +411,7 @@ mod tests {
         );
         assert_eq!(
             enum_text("AttributeTargets", &members, 5),
-            "(AttributeTargets)(5)"
+            "(AttributeTargets)5"
         );
     }
     #[test]
