@@ -42,6 +42,8 @@ pub enum Stack {
     F,
     Ref(TypeId),
     Null,
+    /// `this` in an instance constructor before its base or chained constructor call.
+    This,
 }
 impl Stack {
     pub fn numeric(self) -> bool {
@@ -67,6 +69,10 @@ pub struct Types<'a> {
     work: Cell<usize>,
     /// New user strings an edit introduces, addressed by placeholder tokens.
     pub pending_strings: usize,
+    /// Some(false) in an instance constructor, Some(true) in a type initializer.
+    pub initializer: Option<bool>,
+    /// On the path being verified, whether the constructor already called its base.
+    pub this_initialized: bool,
 }
 impl<'a> Types<'a> {
     pub fn new(a: &'a Assembly) -> Self {
@@ -77,6 +83,8 @@ impl<'a> Types<'a> {
             tokens: HashMap::new(),
             work: Cell::new(0),
             pending_strings: 0,
+            initializer: None,
+            this_initialized: true,
         }
     }
     fn spend(&self) -> Result<()> {
@@ -243,9 +251,10 @@ impl<'a> Types<'a> {
     pub fn token(&mut self, token: u32) -> Result<TypeId> {
         self.token_depth(token, 0)
     }
-    /// A catch clause's type. Only objects are thrown, so an external TypeRef named
-    /// there is a class even when no signature establishes its kind.
-    pub fn exception_type(&mut self, token: u32) -> Result<TypeId> {
+    /// A type its context proves to be a class: a catch clause's type (only objects are
+    /// thrown) or a class's base type. An external TypeRef is then admitted as a class
+    /// even when no signature establishes its kind.
+    pub fn class_type(&mut self, token: u32) -> Result<TypeId> {
         if token >> 24 == 1 && !self.tokens.contains_key(&token) {
             self.a.validate_token(token)?;
             if self
@@ -260,7 +269,9 @@ impl<'a> Types<'a> {
             }
         }
         if token >> 24 == 27 {
-            return Err(unsupported("Generic catch types are not editable yet"));
+            return Err(unsupported(
+                "Generic catch and base types are not editable yet",
+            ));
         }
         self.token(token)
     }
@@ -445,6 +456,7 @@ impl<'a> Types<'a> {
     pub fn describe(&self, ty: Stack) -> String {
         match ty {
             Stack::Ref(id) => self.describe_value(id),
+            Stack::This => "uninitialized this".to_owned(),
             _ => format!("{ty:?}"),
         }
     }

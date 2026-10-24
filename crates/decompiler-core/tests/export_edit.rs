@@ -509,3 +509,57 @@ fn exception_regions_are_verified_and_written() {
             .contains("num = -1;")
     );
 }
+#[test]
+fn constructor_bodies_track_this_initialization() {
+    let a = Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
+        .unwrap();
+    let ctor = a
+        .nodes
+        .iter()
+        .find(|n| n.token >> 24 == 6 && n.name == ".ctor" && n.full_name.contains("Counter..ctor"))
+        .unwrap()
+        .token;
+    let rows = cil_encode::from_body(&a.body(ctor).unwrap().unwrap());
+    // The unchanged constructor verifies: own-field stores before base(), then base().
+    edit::validate(&a, ctor, &rows).unwrap();
+    // Returning without calling the base constructor is rejected.
+    // (The base call and the receiver pushed for it are both removed.)
+    let call_at = rows.iter().position(|r| r.opcode == "call").unwrap();
+    let mut without_base = rows.clone();
+    without_base.drain(call_at - 1..=call_at);
+    let error = edit::validate(&a, ctor, &without_base).unwrap_err();
+    assert!(
+        error.detail.contains("base or chained constructor"),
+        "{}",
+        error.detail
+    );
+    // Changing an init-only field's value is allowed in its own constructor.
+    let mut changed = rows.clone();
+    changed
+        .iter_mut()
+        .find(|r| r.opcode == "ldc.i4.7")
+        .unwrap()
+        .opcode = "ldc.i4.8".into();
+    let edit = edit::validate(&a, ctor, &changed).unwrap();
+    let output = pe_write::write(&a, &BTreeMap::from([(ctor, edit)])).unwrap();
+    let b = Assembly::load(output).unwrap();
+    assert!(
+        decompiler_core::decompile::decompile(&b, ctor)
+            .unwrap()
+            .csharp
+            .contains("this.ReadOnly = 8;")
+    );
+    // Type initializers are ordinary static bodies.
+    let cctor = a
+        .nodes
+        .iter()
+        .find(|n| n.token >> 24 == 6 && n.name == ".cctor" && n.full_name.contains("Counter"))
+        .unwrap()
+        .token;
+    let mut rows = cil_encode::from_body(&a.body(cctor).unwrap().unwrap());
+    rows.iter_mut()
+        .find(|r| r.opcode == "ldstr")
+        .unwrap()
+        .operand = "\"renamed\"".into();
+    edit::validate(&a, cctor, &rows).unwrap();
+}

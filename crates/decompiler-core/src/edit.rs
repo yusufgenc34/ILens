@@ -133,10 +133,8 @@ pub fn supported_body(a: &Assembly, token: u32) -> Result<MethodBody> {
             "Only ordinary managed CIL calling conventions can be edited",
         ));
     }
-    if method.name.starts_with('.') {
-        return Err(unsupported(
-            "Constructor bodies and type initializers require initialization-state validation; calling supported constructors with newobj is allowed",
-        ));
+    if method.name.starts_with('.') && !matches!(method.name.as_str(), ".ctor" | ".cctor") {
+        return Err(unsupported("Special-name runtime methods are not editable"));
     }
     if method.signature.has_this == (row.flags & 0x10 != 0) {
         return Err(invalid("Method signature disagrees with its static flag"));
@@ -529,6 +527,17 @@ pub fn verify_with(
     let sig = &method.signature;
     let mut types = Types::new(a);
     types.pending_strings = pending_strings;
+    types.initializer = match method.name.as_str() {
+        ".ctor" => Some(false),
+        ".cctor" => Some(true),
+        _ => None,
+    };
+    let constructing = types.initializer == Some(false);
+    if constructing && !body.exceptions.is_empty() {
+        return Err(unsupported(
+            "Exception regions in instance constructors are not editable yet",
+        ));
+    }
     let mut args = Vec::new();
     if sig.has_this {
         let id = types.token(method.owner)?;
@@ -556,6 +565,9 @@ pub fn verify_with(
     let cfg = ControlFlowGraph::build(body)?;
     let mut entries: Vec<Option<Vec<Stack>>> = vec![None; cfg.blocks.len()];
     entries[0] = Some(vec![]);
+    // Whether `this` is initialized on entry to each block (constructors only).
+    let mut initialized: Vec<Option<bool>> = vec![None; cfg.blocks.len()];
+    initialized[0] = Some(!constructing);
     let mut queue = VecDeque::from([0]);
     let mut queued = vec![false; cfg.blocks.len()];
     queued[0] = true;
@@ -567,7 +579,7 @@ pub fn verify_with(
             .ok_or_else(|| invalid("Handler does not start a block"))?;
         let entry = match e.catch_type {
             Some(t) => {
-                let id = types.exception_type(t)?;
+                let id = types.class_type(t)?;
                 if !types.value(id).reference() {
                     return Err(invalid("A catch clause must name a reference type"));
                 }
@@ -581,6 +593,7 @@ pub fn verify_with(
             ));
         }
         entries[block] = Some(entry);
+        initialized[block] = Some(true);
         if !queued[block] {
             queue.push_back(block);
             queued[block] = true;
@@ -600,6 +613,7 @@ pub fn verify_with(
         let mut stack = entries[id]
             .clone()
             .ok_or_else(|| invalid("Missing verifier stack"))?;
+        types.this_initialized = initialized[id].unwrap_or(true);
         let block = &cfg.blocks[id];
         for instruction in &body.instructions[block.first..block.last] {
             work += 1;
@@ -687,6 +701,15 @@ pub fn verify_with(
             }
         }
         for next in &block.successors {
+            match initialized[*next] {
+                Some(old) if old != types.this_initialized => {
+                    return Err(invalid(format!(
+                        "Paths reaching IL_{:04X} disagree on whether the base constructor was called",
+                        cfg.blocks[*next].start
+                    )));
+                }
+                _ => initialized[*next] = Some(types.this_initialized),
+            }
             let changed = if let Some(old) = &mut entries[*next] {
                 if old.len() != stack.len() {
                     return Err(invalid(format!(
@@ -740,6 +763,10 @@ fn transfer(
     let var = crate::analysis::variable(i).unwrap_or(usize::MAX);
     match i.opcode {
         0 | 1 => {}
+        // Before the base constructor call, `this` is uninitialized.
+        0x02..=0x05 | 0x0e | 0xfe09 if has_this && var == 0 && !types.this_initialized => {
+            stack.push(Stack::This)
+        }
         0x02..=0x05 | 0x0e | 0xfe09 => stack.push(
             *args
                 .get(var)
@@ -782,6 +809,11 @@ fn transfer(
         }
         0x28 | 0x6f | 0x73 => call(types, owner, stack, i)?,
         0x2a => {
+            if !types.this_initialized {
+                return Err(invalid(
+                    "A constructor must call a base or chained constructor before returning",
+                ));
+            }
             if let Some(result) = result {
                 expect(types, stack, result)?;
             }
@@ -999,6 +1031,36 @@ fn call(
                 types.a.metadata().type_defs[(parent & 0xffffff) as usize - 1].extends,
             );
         }
+    } else if m.name == ".ctor" && i.opcode == 0x28 && stack.len() > sig.parameters.len() {
+        // `base(...)` or `this(...)` on the uninitialized `this` of this constructor.
+        let receiver = stack[stack.len() - 1 - sig.parameters.len()];
+        let declaring = &types.a.metadata().type_defs[(caller & 0xffffff) as usize - 1];
+        let base = crate::assembly::coded(declaring.extends);
+        if receiver != Stack::This || m.owner != base && m.owner != caller {
+            return Err(unsupported(
+                "Direct constructor calls are only verified as this constructor's base(...) or this(...) call",
+            ));
+        }
+        if !sig.has_this || !sig.return_type.is_void() {
+            return Err(invalid(
+                "A constructor call must be an instance call returning void",
+            ));
+        }
+        if token >> 24 == 6 {
+            access(m.owner, caller, types.a.method_row(token)?.flags)?;
+        }
+        let mut parameters = Vec::new();
+        for p in &sig.parameters {
+            let id = types.signature(p)?;
+            parameters.push(types.stack(id));
+        }
+        for p in parameters.into_iter().rev() {
+            expect(types, stack, p)?;
+        }
+        types.class_type(m.owner)?;
+        pop(stack)?;
+        types.this_initialized = true;
+        return Ok(());
     } else if m.name.starts_with('.') {
         return Err(unsupported(
             "Direct constructor calls require initialization-state validation",
@@ -1081,7 +1143,9 @@ fn field(
             "Field opcode disagrees with the field's static flag",
         ));
     }
-    if row.flags & 0x40 != 0 || store && row.flags & 0x20 != 0 {
+    // Init-only fields are assigned by their own type's constructor or initializer.
+    let initializing = types.initializer == Some(is_static) && owner == caller;
+    if row.flags & 0x40 != 0 || store && row.flags & 0x20 != 0 && !initializing {
         return Err(invalid(
             "Literal/init-only fields cannot be assigned by this method",
         ));
@@ -1090,6 +1154,11 @@ fn field(
     let value = types.signature(&ty)?;
     if store {
         expect(types, stack, types.stack(value))?;
+    }
+    // A constructor may store its own fields before calling the base constructor.
+    if store && !is_static && owner == caller && stack.last() == Some(&Stack::This) {
+        pop(stack)?;
+        return Ok(());
     }
     if !is_static {
         let target = types.token(owner)?;
