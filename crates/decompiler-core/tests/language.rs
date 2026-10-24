@@ -180,5 +180,23 @@ fn declarations_read_like_source() {
         Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Editing.dll").to_vec())
             .unwrap();
     // `cgt.un` of a reference and null is the non-null test.
-    assert_contains(&view(&editing, "Operations"), &["return value != null;"]);
+    assert_contains(
+        &view(&editing, "Operations"),
+        &[
+            "return value != null;",
+            // Jagged creation puts the count before the element's brackets.
+            "return new int[1][] { values };",
+            "return values[0, 0];",
+            "return values.LongLength;",
+        ],
+    );
+    let readability =
+        Assembly::load(include_bytes!("../../../samples/fixtures/ILens.Readability.dll").to_vec())
+            .unwrap();
+    assert_contains(
+        &view(&readability, "FormValues"),
+        &[
+            "            catch\n            {\n                return array;\n            }\n            return array;",
+        ],
+    );
 }

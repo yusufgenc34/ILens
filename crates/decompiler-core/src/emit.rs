@@ -644,6 +644,24 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             } else {
                 None
             };
+            // Multidimensional arrays are accessed through runtime Get/Set methods.
+            if let Some(i) = instance
+                && matches!(i.ty, Type::MultiArray(..))
+                && let Some(receiver) = &receiver_text
+            {
+                match (name.as_str(), rendered.split_last()) {
+                    ("Get", _) => {
+                        return Ok((format!("{receiver}[{}]", rendered.join(", ")), PRIMARY));
+                    }
+                    ("Set", Some((value, index))) => {
+                        return Ok((
+                            format!("{receiver}[{}] = {value}", index.join(", ")),
+                            ASSIGNMENT,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             if let Some(property) = accessor {
                 let receiver = receiver_text.unwrap_or_else(|| strip_arity(&a.resolve(*owner)));
                 if property.indexer {
@@ -841,11 +859,7 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
         ),
         Index { array, index } => (format!("{}[{}]", receiver(array)?, expr(index)?.0), PRIMARY),
         NewArray { element, length } => (
-            format!(
-                "new {}[{}]",
-                type_name(a, element, context),
-                expr(length)?.0
-            ),
+            array_creation(&type_name(a, element, context), &expr(length)?.0),
             PRIMARY,
         ),
         ArrayInitializer { element, values } => {
@@ -860,9 +874,8 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             };
             (
                 format!(
-                    "new {}[{}]{}{contents}",
-                    type_name(a, element, context),
-                    values.len(),
+                    "{}{}{contents}",
+                    array_creation(&type_name(a, element, context), &values.len().to_string()),
                     if values.len() <= 4 { " " } else { "" }
                 ),
                 PRIMARY,
@@ -898,11 +911,18 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                     (_, n) => (format!("({t}){n}"), UNARY),
                 });
             }
-            // (int)(nuint)array.Length is the CIL shape of array.Length.
-            if let Length(array) = &value.kind
-                && matches!(t.as_str(), "int" | "System.Int32")
-            {
-                return Ok((format!("{}.Length", receiver(array)?), PRIMARY));
+            // (int)(nuint)array.Length is the CIL shape of array.Length; (long) of it
+            // is array.LongLength.
+            if let Length(array) = &value.kind {
+                match t.as_str() {
+                    "int" | "System.Int32" => {
+                        return Ok((format!("{}.Length", receiver(array)?), PRIMARY));
+                    }
+                    "long" | "System.Int64" => {
+                        return Ok((format!("{}.LongLength", receiver(array)?), PRIMARY));
+                    }
+                    _ => {}
+                }
             }
             let v = expr(value)?;
             match mode.as_str() {
@@ -1330,6 +1350,24 @@ fn assignment_flow(
         }
     }
     state
+}
+/// `new T[n]`; for an array element type the count precedes its brackets:
+/// `new int[n][]`, as C# writes jagged array creation.
+fn array_creation(element: &str, count: &str) -> std::string::String {
+    let mut nesting = 0;
+    let split = element.char_indices().find_map(|(i, c)| {
+        match c {
+            '<' | '(' => nesting += 1,
+            '>' | ')' => nesting -= 1,
+            '[' if nesting == 0 => return Some(i),
+            _ => {}
+        }
+        None
+    });
+    match split {
+        Some(i) => format!("new {}[{count}]{}", &element[..i], &element[i..]),
+        None => format!("new {element}[{count}]"),
+    }
 }
 /// Roslyn lowers `switch` on a string into length, character or hash tests that end
 /// in one `s == "literal"` comparison per case. When every path ends either in such a
@@ -3124,6 +3162,7 @@ pub fn csharp_body(
     crate::tidy::foreach_arrays(&mut lines);
     crate::tidy::unused_declarations(&mut lines);
     crate::tidy::nullable_member_access(&mut lines);
+    crate::tidy::return_assignments(&mut lines);
     // Local functions follow the statements, inside the method's closing brace.
     let functions = LOCAL_FUNCTIONS.with(|f| std::mem::replace(&mut *f.borrow_mut(), enclosing));
     if !functions.is_empty() && lines.last().is_some_and(|l| l == "}") {

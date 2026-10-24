@@ -1058,6 +1058,74 @@ pub fn type_patterns(lines: &mut Vec<String>) {
         i += 1;
     }
 }
+/// `x = E; return x;` becomes `return E;` when `x` has no other use than such pairs
+/// and its declaration, which is then dropped.
+pub fn return_assignments(lines: &mut Vec<String>) {
+    let mut names: Vec<String> = vec![];
+    for k in 1..lines.len() {
+        if let Some(name) = lines[k]
+            .trim()
+            .strip_prefix("return ")
+            .and_then(|r| r.strip_suffix(';'))
+            && !name.is_empty()
+            && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && lines[k - 1].trim().starts_with(&format!("{name} = "))
+            && depth(&lines[k - 1]) == depth(&lines[k])
+            && !names.iter().any(|n| n == name)
+        {
+            names.push(name.to_owned());
+        }
+    }
+    for name in names {
+        let pair = |k: usize, lines: &[String]| {
+            lines[k].trim() == format!("return {name};")
+                && k > 0
+                && lines[k - 1].trim().starts_with(&format!("{name} = "))
+                && depth(&lines[k - 1]) == depth(&lines[k])
+        };
+        // `T name;`, where T may contain spaces inside generic arguments.
+        let declaration = lines.iter().position(|l| {
+            l.trim()
+                .strip_suffix(&format!(" {name};"))
+                .is_some_and(|ty| !ty.is_empty() && ty != "return" && !ty.contains('='))
+        });
+        let Some(declaration) = declaration else {
+            continue;
+        };
+        let allowed = (0..lines.len()).all(|k| {
+            k == declaration
+                || !mentions(&lines[k], &name)
+                || pair(k, lines)
+                || k + 1 < lines.len()
+                    && pair(k + 1, lines)
+                    && !mentions(
+                        lines[k].trim().split_once(" = ").map_or("", |(_, v)| v),
+                        &name,
+                    )
+        });
+        if !allowed {
+            continue;
+        }
+        let mut k = 1;
+        while k < lines.len() {
+            if pair(k, lines) {
+                let indent = " ".repeat(depth(&lines[k]) * 4);
+                let value = lines[k - 1].trim()[name.len() + 3..].to_owned();
+                lines.splice(k - 1..=k, [format!("{indent}return {value}")]);
+                continue;
+            }
+            k += 1;
+        }
+        lines.remove(declaration);
+        // The separator after the declarations goes with the last of them.
+        if declaration > 0
+            && lines[declaration - 1].trim() == "{"
+            && lines.get(declaration).is_some_and(|l| l.is_empty())
+        {
+            lines.remove(declaration);
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1256,5 +1324,21 @@ mod tests {
         );
         type_patterns(&mut guard);
         assert_eq!(guard[1], "    if (!(o is string s))");
+    }
+    #[test]
+    fn return_assignments_fold_only_exclusive_temporaries() {
+        let mut body = lines(
+            "{\n    int[] copy;\n\n    if (f)\n    {\n        copy = a;\n        return copy;\n    }\n    copy = b;\n    return copy;\n}",
+        );
+        return_assignments(&mut body);
+        assert_eq!(
+            body,
+            lines("{\n    if (f)\n    {\n        return a;\n    }\n    return b;\n}")
+        );
+        let mut kept =
+            lines("{\n    int n;\n    n = 1;\n    Use(n);\n    n = 2;\n    return n;\n}");
+        let original = kept.clone();
+        return_assignments(&mut kept);
+        assert_eq!(kept, original);
     }
 }
