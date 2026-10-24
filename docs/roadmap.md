@@ -8,7 +8,7 @@ The agreed scope is source download, complete type export, assembly source archi
 
 The first expansion is implemented: primitive/reference vectors and jagged arrays, array element verification, null/reference stack merges, nongeneric reference-class instance methods, local fields/property accessors, local constructor calls, primitive boxing/unboxing and supported casts. The signature model now distinguishes class/value-type markers and vectors/general arrays. Browser tests independently verify downloaded modified assemblies with ILVerify.
 
-The next write-verifier stages remain generic type substitution/constraints, custom value types and managed addresses, external definition resolution, constructor initialization states, and symbolic exception regions. These require dedicated verification and writer support; they are not enabled by removing capability guards. Current support is documented in [IL write verification](il-verification.md).
+The second expansion is implemented as well: generic substitution, local structs and managed pointers, multidimensional arrays, external definitions from loaded dependencies, constructor initialization states and symbolic exception regions, plus metadata growth (string literals, locals) and Add Field/Add Method with token renumbering. Remaining stages are filter clauses, prefixes, new types and references, and C# editing ([design note](csharp-editing.md)). Current support is documented in [IL write verification](il-verification.md).
 
 ## Planning baseline (before the first implementation)
 
