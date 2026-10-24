@@ -113,7 +113,10 @@ fn compact_backing_field(a: &Assembly, source: &MemberSource) -> Option<u32> {
             source
                 .accessors
                 .iter()
-                .all(|(kind, t)| backing_field(a, *t, kind == "set") == Some(expected))
+                .all(|(kind, t)| {
+                    backing_field(a, *t, kind.ends_with("set") || kind.ends_with("init"))
+                        == Some(expected)
+                })
                 .then_some(expected)
         }
         20 => {
@@ -289,6 +292,14 @@ impl Render<'_> {
         } else {
             declaration
         };
+        // A record whose members are all synthesized is a single declaration.
+        if members.is_empty()
+            && header.contains(" record ")
+            && !self.types.iter().any(|t| t.parent == token)
+        {
+            self.out.lines(depth, &format!("{header};"));
+            return Ok(());
+        }
         self.out.lines(depth, &header);
         self.out.lines(depth, "{");
         let mut sources: Vec<MemberSource> =

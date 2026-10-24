@@ -35,8 +35,12 @@ impl Type {
     pub fn primitive(name: &str) -> Self {
         Self::Primitive(name.to_owned())
     }
+    /// Also `modreq(IsExternalInit) void`, the return type of init-only setters.
     pub fn is_void(&self) -> bool {
-        *self == Self::primitive("void")
+        match self {
+            Self::Modified { inner, .. } => inner.is_void(),
+            _ => *self == Self::primitive("void"),
+        }
     }
     pub fn is_bool(&self) -> bool {
         *self == Self::primitive("bool")

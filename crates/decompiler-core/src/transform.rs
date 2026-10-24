@@ -39,6 +39,11 @@ fn children(e: &mut Expr, f: &mut impl FnMut(&mut Expr)) {
             walk(index, f);
         }
         NewArray { length, .. } => walk(length, f),
+        Conditional { condition, yes, no } => {
+            walk(condition, f);
+            walk(yes, f);
+            walk(no, f);
+        }
         _ => {}
     }
 }
@@ -124,6 +129,9 @@ fn expression_depth(e: &Expr) -> usize {
         Field { instance, .. } | FunctionPointer { instance, .. } => {
             instance.as_ref().map_or(0, |e| expression_depth(e))
         }
+        Conditional { condition, yes, no } => expression_depth(condition)
+            .max(expression_depth(yes))
+            .max(expression_depth(no)),
         _ => 0,
     }
 }
@@ -177,7 +185,8 @@ fn evaluation_prefix(e: &Expr, name: &str, exposed: &HashSet<String>) -> Prefix 
     // Allocation happens before an array initializer's elements. Moving a call
     // into an element would reverse it with a possibly failing allocation.
     let children: Vec<&Expr> = match &e.kind {
-        ArrayInitializer { .. } => return Prefix::Blocked,
+        // Only one branch of a conditional runs.
+        ArrayInitializer { .. } | Conditional { .. } => return Prefix::Blocked,
         Binary { left, right, .. }
         | Index {
             array: left,

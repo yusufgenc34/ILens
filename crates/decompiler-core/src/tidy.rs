@@ -362,7 +362,13 @@ pub fn compound_assignments(lines: &mut [String]) {
         else {
             continue;
         };
-        if !target.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        // Locals and member chains such as `Type.field` (with navigation markers);
+        // their receivers are names, so evaluating them once changes nothing.
+        if target.is_empty()
+            || !target
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '\0' | '\u{1}' | '\u{2}'))
+        {
             continue;
         }
         let Some(rest) = value.strip_prefix(&format!("{target} ")) else {
@@ -623,6 +629,334 @@ pub fn foreach_arrays(lines: &mut Vec<String>) {
         i += 1;
     }
 }
+/// The comma-separated parts of an argument list, split outside nested brackets/strings.
+fn top_level_parts(text: &str) -> Vec<&str> {
+    let (mut parts, mut nesting, mut start, mut quoted) = (vec![], 0i32, 0, false);
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\\' if quoted => {
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            '(' | '[' | '{' | '<' if !quoted => nesting += 1,
+            ')' | ']' | '}' | '>' if !quoted => nesting -= 1,
+            ',' if !quoted && nesting == 0 => {
+                parts.push(text[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(text[start..].trim());
+    parts
+}
+/// `T x = new T(…); x.P = v; x.Add(e);` becomes `T x = new T(…) { P = v, e };` (element
+/// initializers only for `collection` types), and `T x = E.<Clone>$(); x.P = v;` becomes
+/// the record expression `E with { P = v }`. Only the statements directly following the
+/// creation are folded, so no other code observes the object in between.
+pub fn initializers(lines: &mut Vec<String>, collection: &dyn Fn(&str) -> bool) {
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let result = (|| {
+            let (ty, name, value) = declaration(&lines[i])?;
+            let d = depth(&lines[i]);
+            let shown = plain(value);
+            // Display names keep `<Clone>$`; exported names are escaped identifiers.
+            let clone = value
+                .rfind(".\0")
+                .filter(|at| {
+                    matches!(
+                        plain(&value[*at..]).as_str(),
+                        ".<Clone>$()" | "._u003C_Clone_u003E__u0024_()"
+                    )
+                })
+                .map(|at| &value[..at]);
+            // Only a whole `new T(…)`: its first argument list closes at the end.
+            let created = shown.starts_with("new ")
+                && !shown.contains('{')
+                && shown.ends_with(')')
+                && shown.find('(').is_some_and(|open| {
+                    let mut nesting = 0;
+                    shown[open..].char_indices().all(|(k, c)| {
+                        match c {
+                            '(' => nesting += 1,
+                            ')' => nesting -= 1,
+                            _ => {}
+                        }
+                        nesting > 0 || open + k == shown.len() - 1
+                    })
+                });
+            if clone.is_none() && !created {
+                return None;
+            }
+            let elements = clone.is_none() && collection(&plain(ty));
+            let mut items = vec![];
+            let mut j = i + 1;
+            while let Some(line) = lines.get(j) {
+                let Some(member) = line
+                    .trim()
+                    .strip_prefix(&format!("{name}."))
+                    .and_then(|m| m.strip_suffix(';'))
+                    .filter(|_| depth(line) == d)
+                else {
+                    break;
+                };
+                if mentions(member, name) {
+                    break;
+                }
+                if let Some((target, assigned)) = member.split_once(" = ")
+                    && plain(target)
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_')
+                {
+                    items.push(format!("{target} = {assigned}"));
+                } else if elements
+                    && let Some(args) = member
+                        .strip_suffix(')')
+                        .and_then(|m| m.split_once('('))
+                        .filter(|(method, _)| plain(method) == "Add")
+                        .map(|(_, args)| args)
+                    && let [single] = top_level_parts(args)[..]
+                    && !single.is_empty()
+                {
+                    items.push(single.to_owned());
+                } else {
+                    break;
+                }
+                j += 1;
+            }
+            if items.is_empty() {
+                return None;
+            }
+            let body = items.join(", ");
+            let expression = match clone {
+                Some(source) => format!("{source} with {{ {body} }}"),
+                None => {
+                    // `new T()` with an initializer reads `new T { … }`.
+                    let creation = value.strip_suffix("()").unwrap_or(value);
+                    format!("{creation} {{ {body} }}")
+                }
+            };
+            Some((
+                j,
+                format!("{}{ty} {name} = {expression};", " ".repeat(d * 4)),
+            ))
+        })();
+        if let Some((end, line)) = result {
+            lines.splice(i..end, [line]);
+        }
+        i += 1;
+    }
+}
+
+/// `T o = E; bool f = false; try { Monitor.Enter(o, ref f); … } finally { if (f) {
+/// Monitor.Exit(o); } }` is the expansion of `lock (E) { … }` when `o` and `f` have
+/// no other use.
+pub fn lock_statements(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i + 12 < lines.len() {
+        let rewritten = (|| {
+            let (_, object, source) = declaration(&lines[i])?;
+            let (flag_type, flag, initial) = declaration(&lines[i + 1])?;
+            let d = depth(&lines[i]);
+            if plain(flag_type) != "bool" || initial != "false" || depth(&lines[i + 1]) != d {
+                return None;
+            }
+            if lines[i + 2].trim() != "try" || lines[i + 3].trim() != "{" {
+                return None;
+            }
+            let enter = plain(lines[i + 4].trim());
+            if enter != format!("Monitor.Enter({object}, ref {flag});")
+                && enter != format!("System.Threading.Monitor.Enter({object}, ref {flag});")
+            {
+                return None;
+            }
+            let try_end = close(lines, i + 3)?;
+            let expected = [
+                "finally".to_owned(),
+                "{".to_owned(),
+                format!("if ({flag})"),
+                "{".to_owned(),
+            ];
+            if (0..4)
+                .any(|k| lines.get(try_end + 1 + k).map(|l| l.trim()) != Some(expected[k].as_str()))
+            {
+                return None;
+            }
+            let exit = plain(lines.get(try_end + 5)?.trim());
+            if exit != format!("Monitor.Exit({object});")
+                && exit != format!("System.Threading.Monitor.Exit({object});")
+            {
+                return None;
+            }
+            if lines.get(try_end + 6).map(|l| l.trim()) != Some("}")
+                || lines.get(try_end + 7).map(|l| l.trim()) != Some("}")
+                || depth(lines.get(try_end + 7)?) != d
+            {
+                return None;
+            }
+            let end = try_end + 7;
+            let body = i + 5..try_end;
+            let outside = (0..lines.len()).filter(|j| !(i..=end).contains(j) || body.contains(j));
+            if outside
+                .into_iter()
+                .any(|j| mentions(&lines[j], object) || mentions(&lines[j], flag))
+            {
+                return None;
+            }
+            let pad = " ".repeat(d * 4);
+            let mut out = vec![format!("{pad}lock ({source})"), format!("{pad}{{")];
+            out.extend(lines[body].iter().cloned());
+            out.push(format!("{pad}}}"));
+            Some((end, out))
+        })();
+        if let Some((end, out)) = rewritten {
+            lines.splice(i..=end, out);
+        }
+        i += 1;
+    }
+}
+
+/// The text of a C# interpolated string hole: `{x}`, `{x,alignment}`, `{x:format}`.
+fn hole(args: &[&str]) -> Option<String> {
+    let value = *args.first()?;
+    // `:` and `?:` inside a hole need parentheses.
+    let shown = plain(value);
+    let value = if shown.contains([':', '?']) {
+        format!("({value})")
+    } else {
+        value.to_owned()
+    };
+    let format = |text: &str| -> Option<String> { serde_json::from_str::<String>(text).ok() };
+    Some(match args {
+        [_] => format!("{{{value}}}"),
+        [_, extra] if extra.starts_with('"') => format!("{{{value}:{}}}", format(extra)?),
+        [_, alignment] => format!("{{{value},{alignment}}}"),
+        [_, alignment, extra] => format!("{{{value},{alignment}:{}}}", format(extra)?),
+        _ => return None,
+    })
+}
+/// `DefaultInterpolatedStringHandler h = new …(n, m); h.AppendLiteral("a");
+/// h.AppendFormatted(x); … h.ToStringAndClear()` is the interpolated string `$"a{x}"`.
+pub fn interpolated_strings(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i + 2 < lines.len() {
+        let rewritten = (|| {
+            let (ty, name, value) = declaration(&lines[i])?;
+            if !plain(ty).ends_with("DefaultInterpolatedStringHandler") {
+                return None;
+            }
+            let args = plain(value)
+                .strip_prefix("new ")?
+                .split_once('(')?
+                .1
+                .strip_suffix(')')?
+                .to_owned();
+            // A format provider or destination buffer has no interpolated-string syntax.
+            if top_level_parts(&args).len() != 2 {
+                return None;
+            }
+            let d = depth(&lines[i]);
+            let mut text = String::new();
+            let mut j = i + 1;
+            while let Some(call) = lines
+                .get(j)
+                .filter(|l| depth(l) == d)
+                .and_then(|l| l.trim().strip_prefix(&format!("{name}.")))
+                .and_then(|c| c.strip_suffix(");"))
+            {
+                let (method, args) = call.split_once('(')?;
+                let method = plain(method);
+                let parts = top_level_parts(args);
+                if mentions(args, name) {
+                    return None;
+                }
+                if method == "AppendLiteral" {
+                    let [literal] = parts[..] else { return None };
+                    let literal = serde_json::from_str::<String>(literal).ok()?;
+                    let escaped = serde_json::to_string(&literal).ok()?;
+                    let escaped = &escaped[1..escaped.len() - 1];
+                    text.push_str(&escaped.replace('{', "{{").replace('}', "}}"));
+                } else if method == "AppendFormatted" || method.starts_with("AppendFormatted<") {
+                    text.push_str(&hole(&parts)?);
+                } else {
+                    return None;
+                }
+                j += 1;
+            }
+            let last = lines.get(j)?;
+            let call = format!("{name}.");
+            let at = last.find(&call)?;
+            let after = &last[at + call.len()..];
+            let end = after.find("()")? + 2;
+            if plain(&after[..end]) != "ToStringAndClear()"
+                || mentions(&after[end..], name)
+                || mentions(&last[..at], name)
+            {
+                return None;
+            }
+            if lines
+                .iter()
+                .enumerate()
+                .any(|(k, l)| !(i..=j).contains(&k) && mentions(l, name))
+            {
+                return None;
+            }
+            let line = format!("{}$\"{text}\"{}", &last[..at], &after[end..]);
+            Some((j, line))
+        })();
+        if let Some((end, line)) = rewritten {
+            lines.splice(i..=end, [line]);
+        }
+        i += 1;
+    }
+}
+
+/// `if (x != null) { return new T?(x.M); } return default(T?);` is `return x?.M;`
+/// (also with the test inverted), for a plain variable `x`.
+pub fn nullable_member_access(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i + 4 < lines.len() {
+        let rewritten = (|| {
+            let d = depth(&lines[i]);
+            let trimmed: Vec<&str> = lines[i..i + 5].iter().map(|l| l.trim()).collect();
+            if trimmed[1] != "{"
+                || trimmed[3] != "}"
+                || depth(&lines[i + 3]) != d
+                || depth(&lines[i + 4]) != d
+            {
+                return None;
+            }
+            let test = trimmed[0].strip_prefix("if (")?.strip_suffix(')')?;
+            let (variable, present, absent) = if let Some(v) = test.strip_suffix(" != null") {
+                (v, trimmed[2], trimmed[4])
+            } else {
+                (test.strip_suffix(" == null")?, trimmed[4], trimmed[2])
+            };
+            if !variable.chars().all(|c| c.is_alphanumeric() || c == '_') || variable.is_empty() {
+                return None;
+            }
+            let value = present.strip_prefix("return new ")?.strip_suffix(");")?;
+            let (ty, inner) = value.split_once('(')?;
+            let shown = plain(ty);
+            let ty = shown.strip_suffix('?')?;
+            if absent != format!("return default({ty}?);") {
+                return None;
+            }
+            let member = inner.strip_prefix(&format!("{variable}."))?;
+            if mentions(member, variable) {
+                return None;
+            }
+            Some(format!("{}return {variable}?.{member};", " ".repeat(d * 4)))
+        })();
+        if let Some(line) = rewritten {
+            lines.splice(i..i + 5, [line]);
+        }
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,5 +1093,52 @@ mod tests {
         unused_catch_variables(&mut general);
         assert_eq!(general[0], "    catch");
         assert_eq!(body[4], "    catch (IOException ex2)");
+    }
+    #[test]
+    fn initializers_with_lock_interpolation_and_nullable_access() {
+        let mut body = lines(
+            "{\n    List<int> list = new List<int>();\n    list.Add(1);\n    list.Add(F(2, 3));\n    return list;\n}",
+        );
+        initializers(&mut body, &|ty| ty.starts_with("List<"));
+        assert_eq!(
+            body[1],
+            "    List<int> list = new List<int> { 1, F(2, 3) };"
+        );
+        // Element initializers need a collection type; a call result is no creation.
+        let mut kept = lines(
+            "{\n    Bag bag = new Bag();\n    bag.Add(1);\n    Point p = new Point(1).Move();\n    p.X = 2;\n}",
+        );
+        let original = kept.clone();
+        initializers(&mut kept, &|_| false);
+        assert_eq!(kept, original);
+        let mut record = lines(
+            "{\n    Point point = new Point(1, 2).\u{0}06000001\u{1}<Clone>$\u{2}();\n    point.Y = 5;\n}",
+        );
+        initializers(&mut record, &|_| false);
+        assert_eq!(
+            record[1],
+            "    Point point = new Point(1, 2) with { Y = 5 };"
+        );
+
+        let mut locked = lines(
+            "{\n    object obj = Gate;\n    bool flag = false;\n    try\n    {\n        Monitor.Enter(obj, ref flag);\n        count++;\n    }\n    finally\n    {\n        if (flag)\n        {\n            Monitor.Exit(obj);\n        }\n    }\n}",
+        );
+        lock_statements(&mut locked);
+        assert_eq!(
+            locked,
+            lines("{\n    lock (Gate)\n    {\n        count++;\n    }\n}")
+        );
+
+        let mut text = lines(
+            "{\n    DefaultInterpolatedStringHandler h = new DefaultInterpolatedStringHandler(4, 2);\n    h.AppendLiteral(\"{a} \");\n    h.AppendFormatted<int>(n, \"X2\");\n    h.AppendFormatted(flag ? 1 : 2);\n    return h.ToStringAndClear();\n}",
+        );
+        interpolated_strings(&mut text);
+        assert_eq!(text[1], "    return $\"{{a}} {n:X2}{(flag ? 1 : 2)}\";");
+
+        let mut access = lines(
+            "{\n    if (s != null)\n    {\n        return new int?(s.Length);\n    }\n    return default(int?);\n}",
+        );
+        nullable_member_access(&mut access);
+        assert_eq!(access, lines("{\n    return s?.Length;\n}"));
     }
 }

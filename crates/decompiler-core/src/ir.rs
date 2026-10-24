@@ -80,6 +80,12 @@ pub enum ExprKind {
     SizeOf(Type),
     /// `await value`, recovered from an async state machine.
     Await(Box<Expr>),
+    /// `condition ? yes : no`, recovered from branches that store or return one value.
+    Conditional {
+        condition: Box<Expr>,
+        yes: Box<Expr>,
+        no: Box<Expr>,
+    },
 }
 #[derive(Debug, Clone, Serialize)]
 pub enum Statement {

@@ -326,7 +326,12 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                     });
                 }
             }
-            let (mut l, mut r) = (at(left, precedence)?, at(right, precedence + 1)?);
+            // `&&` and `||` are associative, so a right operand of the same operator
+            // needs no parentheses.
+            let same = (op == "&&" || op == "||")
+                && matches!(&right.kind, Binary { op: inner, .. } if inner == op);
+            let right_precedence = if same { precedence } else { precedence + 1 };
+            let (mut l, mut r) = (at(left, precedence)?, at(right, right_precedence)?);
             // CIL `ceq` on references is reference equality; C# `==` would call a
             // user-defined operator (string, delegates, records), so it needs (object).
             if matches!(op.as_str(), "==" | "!=")
@@ -658,6 +663,22 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
                     } else {
                         crate::bcl::is_extension(a, definition)
                     };
+                // Exported source has no `using` directives, so an extension method
+                // outside the caller's namespace scope is called through its class.
+                let extension = extension
+                    && (crate::assembly::display_view() || {
+                        let namespace = |t: u32| {
+                            a.resolve_full(t)
+                                .rsplit_once('.')
+                                .map(|(ns, _)| ns.to_owned())
+                                .unwrap_or_default()
+                        };
+                        let declaring = namespace(*owner);
+                        a.method_ref(context).is_ok_and(|m| {
+                            let caller = namespace(m.owner);
+                            caller == declaring || caller.starts_with(&format!("{declaring}."))
+                        })
+                    });
                 // A local function of this method is called by its own name.
                 if receiver_text.is_none()
                     && let Some((outer, local)) = local_function(a, definition)
@@ -892,6 +913,18 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
         },
         SizeOf(t) => (format!("sizeof({})", type_name(a, t, context)), PRIMARY),
         Await(value) => (format!("await {}", at(value, UNARY)?), UNARY),
+        // `x != null ? x : y` is `x ?? y`.
+        Conditional { condition, yes, no }
+            if matches!(&condition.kind, Binary { op, left, right, .. }
+                if op == "!=" && matches!(right.kind, Null)
+                    && matches!((&left.kind, &yes.kind), (Variable(a), Variable(b)) if a == b)) =>
+        {
+            (format!("{} ?? {}", at(yes, 4)?, at(no, 3)?), 3)
+        }
+        Conditional { condition, yes, no } => (
+            format!("{} ? {} : {}", at(condition, 3)?, at(yes, 3)?, at(no, 2)?),
+            2,
+        ),
     })
 }
 /// In display views an auto-property's backing field is written as the property, as
@@ -937,7 +970,10 @@ pub fn state_machine_source(
 ) -> Result<MethodSource> {
     let mut declaration = a.declaration(token)?;
     let method = a.method_ref(token)?;
-    if matches!(lowered.kind, crate::statemachine::Kind::Async) {
+    if matches!(
+        lowered.kind,
+        crate::statemachine::Kind::Async | crate::statemachine::Kind::AsyncIterator
+    ) {
         // `async` precedes the return type: public static async Task<int> Later(int value)
         let returns = format!(
             "{} {}",
@@ -948,7 +984,10 @@ pub fn state_machine_source(
             declaration.insert_str(i, "async ");
         }
     }
-    let iterator = matches!(lowered.kind, crate::statemachine::Kind::Iterator);
+    let iterator = matches!(
+        lowered.kind,
+        crate::statemachine::Kind::Iterator | crate::statemachine::Kind::AsyncIterator
+    );
     ITERATOR.with(|i| i.set(iterator));
     let raw = csharp_body(a, token, &lowered.body, &lowered.ir, &lowered.cfg, ast);
     ITERATOR.with(|i| i.set(false));
@@ -1002,6 +1041,294 @@ thread_local! {
 }
 thread_local! {
     static LAMBDA_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+/// Variables read anywhere in the structured body.
+fn note(e: &Expr, read: &mut HashSet<std::string::String>) {
+    crate::transform::statement_exprs(&mut Statement::Evaluate(e.clone()), &mut |x: &mut Expr| {
+        if let ExprKind::Variable(n) = &x.kind {
+            read.insert(n.clone());
+        }
+    });
+}
+fn reads(nodes: &[Ast], read: &mut HashSet<std::string::String>) {
+    for n in nodes {
+        match n {
+            // A discarded variable (IL `pop`) is not a use.
+            Ast::Statement(Statement::Evaluate(Expr {
+                kind: ExprKind::Variable(_),
+                ..
+            })) => {}
+            Ast::Statement(Statement::Assign { target, value }) => {
+                if !matches!(target.kind, ExprKind::Variable(_)) {
+                    note(target, read);
+                }
+                note(value, read);
+            }
+            Ast::Statement(Statement::Let { value, .. })
+            | Ast::Statement(Statement::Evaluate(value))
+            | Ast::Statement(Statement::Yield(value))
+            | Ast::Return(Some(value))
+            | Ast::Throw(Some(value)) => note(value, read),
+            Ast::ParallelAssign { values, .. } => values.iter().for_each(|v| note(v, read)),
+            Ast::If { condition, yes, no } => {
+                note(condition, read);
+                reads(yes, read);
+                reads(no, read);
+            }
+            Ast::While { condition, body } => {
+                note(condition, read);
+                reads(body, read);
+            }
+            Ast::For {
+                initializer,
+                condition,
+                increment,
+                body,
+            } => {
+                for s in [initializer.as_ref(), increment.as_ref()] {
+                    reads(&[Ast::Statement(s.clone())], read);
+                }
+                note(condition, read);
+                reads(body, read);
+            }
+            Ast::Switch {
+                value,
+                arms,
+                default,
+            } => {
+                note(value, read);
+                arms.iter().for_each(|arm| reads(arm, read));
+                reads(default, read);
+            }
+            Ast::Try { body, handlers } => {
+                reads(body, read);
+                handlers.iter().for_each(|h| reads(&h.body, read));
+            }
+            _ => {}
+        }
+    }
+}
+/// `stack_N = v;` for a stack slot nothing reads: IL `dup` followed by `pop`.
+fn drop_dead_stack_copies(nodes: &mut Vec<Ast>, read: &HashSet<std::string::String>) {
+    nodes.retain(|n| {
+        !matches!(n, Ast::Statement(Statement::Assign {
+            target: Expr { kind: ExprKind::Variable(name), .. },
+            value: Expr { kind: ExprKind::Variable(_) | ExprKind::Constant(_) | ExprKind::Null | ExprKind::String(_), .. },
+        }) if name.starts_with("stack_") && !read.contains(name))
+    });
+    for n in nodes.iter_mut() {
+        match n {
+            Ast::If { yes, no, .. } => {
+                drop_dead_stack_copies(yes, read);
+                drop_dead_stack_copies(no, read);
+            }
+            Ast::While { body, .. } | Ast::For { body, .. } => drop_dead_stack_copies(body, read),
+            Ast::Switch { arms, default, .. } => {
+                arms.iter_mut()
+                    .for_each(|arm| drop_dead_stack_copies(arm, read));
+                drop_dead_stack_copies(default, read);
+            }
+            Ast::Try { body, handlers } => {
+                drop_dead_stack_copies(body, read);
+                handlers
+                    .iter_mut()
+                    .for_each(|h| drop_dead_stack_copies(&mut h.body, read));
+            }
+            _ => {}
+        }
+    }
+}
+/// The logical negation; `==`/`!=` flip, other operators (NaN-sensitive) gain `!`.
+fn negate(e: &Expr) -> Expr {
+    match &e.kind {
+        ExprKind::Binary {
+            op,
+            left,
+            right,
+            checked,
+            unsigned,
+        } if op == "==" || op == "!=" => Expr {
+            ty: e.ty.clone(),
+            kind: ExprKind::Binary {
+                op: if op == "==" { "!=" } else { "==" }.to_owned(),
+                left: left.clone(),
+                right: right.clone(),
+                checked: *checked,
+                unsigned: *unsigned,
+            },
+        },
+        ExprKind::Unary { op, value } if op == "!" => (**value).clone(),
+        _ => Expr {
+            ty: Type::primitive("bool"),
+            kind: ExprKind::Unary {
+                op: "!".to_owned(),
+                value: Box::new(e.clone()),
+            },
+        },
+    }
+}
+/// `if (c) return a; return b;` and `if (c) v = a; else v = b;` become `c ? a : b`.
+/// Constants that read differently at their destination (chars, enum members) keep
+/// the statement form, where the destination type spells them.
+fn conditionals(a: &Assembly, returns: &Type, nodes: &mut Vec<Ast>) {
+    // Discarded values (IL `pop`) render as nothing.
+    nodes.retain(|n| {
+        !matches!(
+            n,
+            Ast::Statement(Statement::Evaluate(Expr {
+                kind: ExprKind::Variable(_) | ExprKind::Constant(_) | ExprKind::Null,
+                ..
+            }))
+        )
+    });
+    for n in nodes.iter_mut() {
+        match n {
+            Ast::If { yes, no, .. } => {
+                conditionals(a, returns, yes);
+                conditionals(a, returns, no);
+            }
+            Ast::While { body, .. } | Ast::For { body, .. } => conditionals(a, returns, body),
+            Ast::Switch { arms, default, .. } => {
+                for arm in arms {
+                    conditionals(a, returns, arm);
+                }
+                conditionals(a, returns, default);
+            }
+            Ast::Try { body, handlers } => {
+                conditionals(a, returns, body);
+                for h in handlers {
+                    conditionals(a, returns, &mut h.body);
+                }
+            }
+            _ => {}
+        }
+    }
+    let plain = |e: &Expr, target: &Type| {
+        typed_constant(a, e, target).is_none() && !matches!(e.kind, ExprKind::Null)
+            || matches!(e.kind, ExprKind::Null) && !matches!(target, Type::Primitive(_))
+    };
+    let join = |condition: &Expr, yes: &Expr, no: &Expr| {
+        // A boolean constant arm is a short-circuit operator: c ? true : x is c || x.
+        let flag = |e: &Expr| match &e.kind {
+            ExprKind::Constant(v) if v == "true" || v == "false" => Some(v == "true"),
+            _ => None,
+        };
+        let logical = |op: &str, left: Expr, right: &Expr| Expr {
+            ty: Type::primitive("bool"),
+            kind: ExprKind::Binary {
+                op: op.to_owned(),
+                left: Box::new(left),
+                right: Box::new(right.clone()),
+                checked: false,
+                unsigned: false,
+            },
+        };
+        match (flag(yes), flag(no)) {
+            (Some(true), None) => logical("||", condition.clone(), no),
+            (Some(false), None) => logical("&&", negate(condition), no),
+            (None, Some(false)) => logical("&&", condition.clone(), yes),
+            (None, Some(true)) => logical("||", negate(condition), yes),
+            _ => Expr {
+                ty: if matches!(yes.kind, ExprKind::Null) {
+                    no.ty.clone()
+                } else {
+                    yes.ty.clone()
+                },
+                kind: ExprKind::Conditional {
+                    condition: Box::new(condition.clone()),
+                    yes: Box::new(yes.clone()),
+                    no: Box::new(no.clone()),
+                },
+            },
+        }
+    };
+    let mut i = 0;
+    while i < nodes.len() {
+        let Ast::If { condition, yes, no } = &nodes[i] else {
+            i += 1;
+            continue;
+        };
+        // Both null has no type to infer.
+        // Readability: a conditional arm only as a short `else` chain (a ? x : b ? y : z).
+        let nested = |e: &Expr| matches!(e.kind, ExprKind::Conditional { .. });
+        let shallow = |x: &Expr, y: &Expr| {
+            !nested(x)
+                && match &y.kind {
+                    ExprKind::Conditional { yes, no, .. } => !nested(yes) && !nested(no),
+                    _ => true,
+                }
+        };
+        let typed = |x: &Expr, y: &Expr, t: &Type| {
+            shallow(x, y)
+                && plain(x, t)
+                && plain(y, t)
+                && !(matches!(x.kind, ExprKind::Null) && matches!(y.kind, ExprKind::Null))
+        };
+        let replacement = match (yes.as_slice(), no.as_slice(), nodes.get(i + 1)) {
+            ([Ast::Return(Some(x))], [Ast::Return(Some(y))], _) if typed(x, y, returns) => {
+                Some((Ast::Return(Some(join(condition, x, y))), 1))
+            }
+            ([Ast::Return(Some(x))], [], Some(Ast::Return(Some(y)))) if typed(x, y, returns) => {
+                Some((Ast::Return(Some(join(condition, x, y))), 2))
+            }
+            (
+                [
+                    Ast::Statement(Statement::Assign {
+                        target: t1,
+                        value: x,
+                    }),
+                ],
+                [
+                    Ast::Statement(Statement::Assign {
+                        target: t2,
+                        value: y,
+                    }),
+                ],
+                _,
+            ) if matches!((&t1.kind, &t2.kind), (ExprKind::Variable(p), ExprKind::Variable(q)) if p == q)
+                && typed(x, y, &t1.ty) =>
+            {
+                Some((
+                    Ast::Statement(Statement::Assign {
+                        target: t1.clone(),
+                        value: join(condition, x, y),
+                    }),
+                    1,
+                ))
+            }
+            _ => None,
+        };
+        if let Some((node, count)) = replacement {
+            nodes.splice(i..i + count, [node]);
+        }
+        i += 1;
+    }
+}
+/// Whether a displayed type supports collection initializers (IEnumerable with Add):
+/// well-known framework collections, or a local type implementing IEnumerable.
+fn collection_type(a: &Assembly, shown: &str) -> bool {
+    let name = shown.split('<').next().unwrap_or(shown);
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    // Short display names, or qualified names in System.Collections namespaces.
+    let local: Vec<_> = a
+        .nodes
+        .iter()
+        .filter(|n| n.token >> 24 == 2 && crate::assembly::strip_arity(&n.name) == simple)
+        .collect();
+    let framework = matches!(
+        simple,
+        "List" | "HashSet" | "SortedSet" | "Collection" | "ObservableCollection" | "ArrayList"
+    ) && (name.starts_with("System.Collections.")
+        || name == simple && local.is_empty());
+    framework
+        || local.iter().any(|n| {
+            a.metadata().interface_impls.iter().any(|i| {
+                let interface = a.resolve_full(crate::assembly::coded(i.interface));
+                i.class == n.token & 0xffffff
+                    && interface.starts_with("System.Collections")
+                    && interface.contains("IEnumerable")
+            })
+        })
 }
 /// `static R Name(parameters) { body }` for a local function.
 fn local_function_source(a: &Assembly, token: u32) -> Result<std::string::String> {
@@ -1518,6 +1845,23 @@ fn nodes(
                 // After a branch that always leaves, the else body follows directly.
                 if matches!(yes.last(), Some(Ast::Return(_) | Ast::Throw(_))) {
                     nodes(a, token, no, out, indent, cfg)?;
+                } else if let [nested @ Ast::If { .. }] = no.as_slice() {
+                    // else { if (…) … } is the chain `else if (…)`.
+                    let mut text = std::string::String::new();
+                    nodes(
+                        a,
+                        token,
+                        std::slice::from_ref(nested),
+                        &mut text,
+                        indent,
+                        cfg,
+                    )?;
+                    let pad = "    ".repeat(indent);
+                    out.push_str(&text.replacen(
+                        &format!("{pad}if ("),
+                        &format!("{pad}else if ("),
+                        1,
+                    ));
                 } else if !no.is_empty() {
                     line(out, indent, "else");
                     line(out, indent, "{");
@@ -2159,6 +2503,11 @@ pub fn csharp_body(
     let mut owned = ast.to_vec();
     if structured {
         strip_final_returns(&mut owned);
+        let returns = a.method_ref(token)?.signature.return_type;
+        let mut read = HashSet::new();
+        reads(&owned, &mut read);
+        drop_dead_stack_copies(&mut owned, &read);
+        conditionals(a, &returns, &mut owned);
     }
     let ast = owned.as_slice();
     let enclosing = LOCAL_FUNCTIONS.with(|f| std::mem::take(&mut *f.borrow_mut()));
@@ -2179,6 +2528,7 @@ pub fn csharp_body(
             ),
         );
     }
+    let mut stack_slots = vec![];
     for b in &cfg.blocks {
         if let Some(entry) = &ir.stack.entry_stacks[b.id] {
             for (i, t) in entry.iter().enumerate() {
@@ -2188,6 +2538,7 @@ pub fn csharp_body(
                     continue;
                 }
                 line(&mut out, 1, &format!("{} {name};", type_name(a, t, token)));
+                stack_slots.push((type_name(a, t, token), name));
             }
         }
     }
@@ -2200,8 +2551,10 @@ pub fn csharp_body(
         exception_body(a, token, body, ir, cfg, &mut out)?;
     }
     line(&mut out, 0, "}");
+    // Merge slots declared like locals into their first assignment, too.
     let declared: Vec<(String, String)> = (0..ir.locals.len())
         .map(|i| (type_name(a, &ir.locals[i], token), local(i)))
+        .chain(stack_slots)
         .collect();
     let mut lines: Vec<String> = inline_labels(out).lines().map(str::to_owned).collect();
     crate::tidy::stack_copies(&mut lines);
@@ -2213,13 +2566,17 @@ pub fn csharp_body(
         .map(str::to_owned)
         .collect();
     crate::tidy::closures(&mut lines);
+    crate::tidy::initializers(&mut lines, &|ty| collection_type(a, ty));
     crate::tidy::null_conditional(&mut lines);
     crate::tidy::using_statements(&mut lines);
+    crate::tidy::lock_statements(&mut lines);
+    crate::tidy::interpolated_strings(&mut lines);
     crate::tidy::inline_temporaries(&mut lines);
     crate::tidy::compound_assignments(&mut lines);
     crate::tidy::while_to_for(&mut lines);
     crate::tidy::foreach_arrays(&mut lines);
     crate::tidy::unused_declarations(&mut lines);
+    crate::tidy::nullable_member_access(&mut lines);
     // Local functions follow the statements, inside the method's closing brace.
     let functions = LOCAL_FUNCTIONS.with(|f| std::mem::replace(&mut *f.borrow_mut(), enclosing));
     if !functions.is_empty() && lines.last().is_some_and(|l| l == "}") {

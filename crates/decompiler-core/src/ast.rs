@@ -454,10 +454,91 @@ fn labels(nodes: &[Ast], needed: &mut HashSet<usize>) {
         }
     }
 }
+fn lists(nodes: &mut [Ast]) -> Vec<&mut Vec<Ast>> {
+    let mut out = vec![];
+    for n in nodes {
+        match n {
+            Ast::If { yes, no, .. } => {
+                out.push(yes);
+                out.push(no);
+            }
+            Ast::While { body, .. } | Ast::For { body, .. } => out.push(body),
+            Ast::Switch { arms, default, .. } => {
+                out.extend(arms.iter_mut());
+                out.push(default);
+            }
+            Ast::Try { body, handlers } => {
+                out.push(body);
+                out.extend(handlers.iter_mut().map(|h| &mut h.body));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+/// Short exits that end in `return`/`throw` and are reached by `goto` from elsewhere.
+fn exits(nodes: &mut [Ast], found: &mut HashMap<usize, Vec<Ast>>) {
+    for (i, n) in nodes.iter().enumerate() {
+        let Ast::Label(id) = n else { continue };
+        let tail = &nodes[i + 1..];
+        let Some(end) = tail
+            .iter()
+            .take(4)
+            .position(|n| matches!(n, Ast::Return(_) | Ast::Throw(_)))
+        else {
+            continue;
+        };
+        if tail[..end].iter().all(|n| matches!(n, Ast::Statement(_))) {
+            found.insert(*id, tail[..=end].to_vec());
+        }
+    }
+    for list in lists(nodes) {
+        exits(list, found);
+    }
+}
+fn replace_gotos(nodes: &mut Vec<Ast>, exits: &HashMap<usize, Vec<Ast>>) {
+    let mut i = 0;
+    while i < nodes.len() {
+        if let Ast::Goto(id) = nodes[i]
+            && let Some(copy) = exits.get(&id)
+        {
+            nodes.splice(i..=i, copy.iter().cloned());
+            i += copy.len();
+            continue;
+        }
+        i += 1;
+    }
+    for list in lists(nodes) {
+        replace_gotos(list, exits);
+    }
+}
 fn clean(nodes: &mut Vec<Ast>) {
+    // A shared `return`/`throw` exit is repeated at each jump to it, as ILSpy does; C#
+    // cannot jump into the nested block where structuring placed it.
+    let mut found = HashMap::new();
+    exits(nodes, &mut found);
+    replace_gotos(nodes, &found);
     let mut needed = HashSet::new();
     labels(nodes, &mut needed);
     fn trim(nodes: &mut Vec<Ast>, needed: &HashSet<usize>) {
+        // Code after a terminal statement under a label nothing jumps to is unreachable.
+        let mut i = 1;
+        while i < nodes.len() {
+            if matches!(nodes[i], Ast::Label(id) if !needed.contains(&id))
+                && matches!(
+                    nodes[i - 1],
+                    Ast::Return(_) | Ast::Throw(_) | Ast::Goto(_) | Ast::Break
+                )
+            {
+                let end = nodes[i + 1..]
+                    .iter()
+                    .position(|n| matches!(n, Ast::Label(id) if needed.contains(id)))
+                    .map_or(nodes.len(), |p| i + 1 + p);
+                nodes.drain(i..end);
+                continue;
+            }
+            i += 1;
+        }
         nodes.retain(|n| !matches!(n,Ast::Label(id)if !needed.contains(id)));
         for n in nodes.iter_mut() {
             match n {

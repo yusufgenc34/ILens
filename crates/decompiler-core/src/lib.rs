@@ -22,6 +22,7 @@ mod opcodes;
 pub mod pe;
 pub mod pe_write;
 pub mod reader;
+pub mod records;
 pub mod resolution;
 pub mod resources;
 pub mod session;

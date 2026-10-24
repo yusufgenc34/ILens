@@ -82,7 +82,8 @@ fn common_csharp_patterns() {
     let a = fixture();
     for (name, expected) in [
         ("Add", "return left + right;"),
-        ("Absolute", "if ("),
+        // Roslyn compiles `if (c) return a; return b;` and `return c ? a : b;` alike.
+        ("Absolute", "return value >= 0 ? value : -value;"),
         ("Sum", "for (int num2 = 0; num2 < count; num2++)"),
         ("Countdown", "while ("),
         ("Describe", "switch ("),
@@ -93,7 +94,6 @@ fn common_csharp_patterns() {
         ),
         ("Sum", "    int num = 0;\n"),
         ("Countdown", "value--;"),
-        ("Absolute", "    }\n    return -value;"),
         ("MakeArray", "new System.Int32[3]"),
         ("SafeDivide", "catch (System.DivideByZeroException"),
         ("Identity", "T value"),

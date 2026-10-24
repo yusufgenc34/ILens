@@ -123,9 +123,13 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
             // Compare the qualified name; display names may be shortened.
             if !matches!(a.resolve_full(coded(row.extends)).as_str(), "System.Object"|"System.ValueType"|"System.Enum"|"System.MulticastDelegate") { bases.push(a.resolve(coded(row.extends))); }
         }
-        for i in &a.metadata().interface_impls { if i.class == n.token & 0xffffff { bases.push(a.resolve(coded(i.interface))); } }
+        // Record classes: the synthesized IEquatable<T> implementation is implied.
+        let record = crate::records::record(a, n.token);
+        for i in &a.metadata().interface_impls { if i.class == n.token & 0xffffff && !(record.is_some() && a.resolve_full(coded(i.interface)).starts_with("System.IEquatable")) { bases.push(a.resolve(coded(i.interface))); } }
         if n.kind == "enum" && let Some(field) = children.get(&n.token).into_iter().flatten().find(|f| f.name == "value__") { bases = vec![a.format_type(&a.field_ref(field.token)?.2, n.token)]; }
-        let mut declaration = format!("{access}{modifier} {} {name}{generics}{}{}", n.kind, if bases.is_empty() { String::new() } else { format!(" : {}", bases.join(", ")) }, constraints(a, n.token)?);
+        let kind = if record.is_some() { "record" } else { n.kind.as_str() };
+        let parameters = record.as_ref().map_or("", |r| r.parameters.as_str());
+        let mut declaration = format!("{access}{modifier} {kind} {name}{generics}{parameters}{}{}", if bases.is_empty() { String::new() } else { format!(" : {}", bases.join(", ")) }, constraints(a, n.token)?);
         if n.kind == "delegate" {
             if let Some(invoke) = children.get(&n.token).into_iter().flatten().find(|m| m.name == "Invoke") {
                 let sig = a.method_ref(invoke.token)?.signature;
@@ -138,7 +142,7 @@ pub fn plan(a: &Assembly, root: Option<u32>) -> Result<Vec<TypeDeclaration>> {
             let mapped = identifier(&child.name);
             if let Some(previous) = symbol_names.insert(mapped,child.name.as_str()) && previous != child.name {diagnostics.push("Distinct metadata names collide after C# identifier mapping; manual renaming is required.".to_owned());}
         }
-        let members: Vec<u32> = children.get(&n.token).into_iter().flatten().filter(|m| m.token >> 24 != 2 && crate::emit::local_function(a, m.token).is_none()).map(|m| m.token).collect();
+        let members: Vec<u32> = children.get(&n.token).into_iter().flatten().filter(|m| m.token >> 24 != 2 && crate::emit::local_function(a, m.token).is_none() && !record.as_ref().is_some_and(|r| r.hidden.contains(&m.token))).map(|m| m.token).collect();
         if a.generics.contains_key(&n.token) { diagnostics.push("Generic declarations require review of nested arity, variance and reference binding.".to_owned()); }
         if n.namespace.split('.').any(|part| !part.is_empty() && !part.chars().enumerate().all(|(i,c)| c == '_' || c.is_ascii_alphabetic() || i > 0 && c.is_ascii_digit())) { diagnostics.push("Namespace names require manual C# identifier mapping.".to_owned()); }
         if n.name == "<Module>" { declaration = "// CLI module metadata; global members are preserved in IL.".to_owned(); if !members.is_empty() { diagnostics.push("Global module members cannot be emitted inside a normal C# type.".to_owned()); } }
@@ -394,6 +398,7 @@ pub fn member_with(
                 .into_iter()
                 .map(|(f, t)| {
                     let kind = match f {
+                        1 if crate::records::init_only(a, t) => "init",
                         1 => "set",
                         2 => "get",
                         8 => "add",

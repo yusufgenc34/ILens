@@ -113,12 +113,7 @@ pub fn decompile_with(
         if crate::statemachine::kind_of(a, token).is_some() {
             // async and iterator methods are rebuilt from their compiler state machine.
             let lowered = crate::statemachine::lower(a, token, accessor)?;
-            let ast = ast::structure_from(
-                &lowered.ir,
-                &lowered.cfg,
-                &lowered.body.exceptions,
-                lowered.entry,
-            );
+            let ast = crate::statemachine::structure(&lowered)?;
             let source = emit::state_machine_source(a, token, &lowered, &ast)?;
             return finish(a, token, &mut result, source);
         }

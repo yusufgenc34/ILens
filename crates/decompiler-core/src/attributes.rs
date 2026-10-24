@@ -273,6 +273,10 @@ pub fn render(a: &Assembly, parent: u32) -> Vec<String> {
         let Ok(method) = a.method_ref(constructor) else {
             continue;
         };
+        // Check hidden attributes by full name, so they add no `using` to the view.
+        if HIDDEN.contains(&short(&strip_arity(&a.resolve_full(method.owner)))) {
+            continue;
+        }
         let owner = strip_arity(&a.resolve(method.owner));
         if HIDDEN.contains(&short(&owner)) {
             continue;
@@ -329,7 +333,9 @@ pub fn compiler_generated(a: &Assembly, parent: u32) -> bool {
         .flatten()
         .any(|index| {
             let constructor = coded(a.metadata().custom_attributes[*index].attr_type);
-            a.method_ref(constructor)
-                .is_ok_and(|m| a.resolve(m.owner).ends_with("CompilerGeneratedAttribute"))
+            a.method_ref(constructor).is_ok_and(|m| {
+                a.resolve_full(m.owner)
+                    .ends_with("CompilerGeneratedAttribute")
+            })
         })
 }

@@ -31,19 +31,31 @@ fn operators_constructors_and_framework_members() {
             "if (!(obj is Money))",
         ],
     );
-    let point = view(&a, "Point");
+    // Synthesized record members are implied by the declaration, as dnSpy shows it.
+    assert_contains(&view(&a, "Point"), &["public record Point(int X, int Y);"]);
+    let method = |name: &str| {
+        let n = a
+            .nodes
+            .iter()
+            .find(|n| n.token >> 24 == 6 && n.full_name.contains("Point.") && n.name == name)
+            .unwrap();
+        decompiler_core::decompile::decompile_view(&a, n.token, &|t| local_accessor(&a, t))
+            .unwrap()
+            .csharp
+    };
+    assert_contains(&method("get_EqualityContract"), &["return typeof(Point);"]);
     assert_contains(
-        &point,
-        &[
-            "return typeof(Point);",
-            "EqualityComparer<int>.Default.GetHashCode(this.X)",
-            "stringBuilder.Append(' ');",
-            // Reference equality must not call the operator being defined.
-            "if ((object)left == right)",
-            "if ((object)left == null)",
-        ],
+        &method("GetHashCode"),
+        &["EqualityComparer<int>.Default.GetHashCode(this.X)"],
     );
-    assert!(!point.contains("_ = stringBuilder"), "{point}");
+    let printed = method("ToString");
+    assert_contains(&printed, &["stringBuilder.Append(' ');"]);
+    assert!(!printed.contains("_ = stringBuilder"), "{printed}");
+    // Reference equality must not call the operator being defined.
+    assert_contains(
+        &method("op_Equality"),
+        &["return (object)left == right || (object)left != null && left.Equals(right);"],
+    );
     assert_contains(
         &view(&a, "Bag"),
         &[
@@ -102,4 +114,22 @@ fn cached_lambdas_and_local_functions_read_as_source() {
     // The caching field and the generated method are not shown.
     assert!(!constructs.contains("<>9__"), "{constructs}");
     assert!(!constructs.contains("g__Twice"), "{constructs}");
+}
+#[test]
+fn iterator_finally_async_iterators_and_spilled_awaits() {
+    let a = Assembly::load(LANGUAGE.to_vec()).unwrap();
+    let constructs = view(&a, "Constructs");
+    assert_contains(
+        &constructs,
+        &[
+            "public static IEnumerable<int> Guarded(int n)\n        {\n            try\n            {\n                for (int i = 0; i < n; i++)\n                {\n                    yield return i;\n                }\n            }\n            finally\n            {\n                Constructs.counter--;\n            }\n        }",
+            "public static async IAsyncEnumerable<int> Stream(int n)\n        {\n            for (int i = 0; i < n; i++)\n            {\n                await Task.Yield();\n                yield return i;\n            }\n        }",
+            "public static async Task<int> AwaitTwice(Task<int> first, Task<int> second)",
+            "= await first;",
+        ],
+    );
+    assert!(
+        !constructs.contains("State-machine reconstruction"),
+        "{constructs}"
+    );
 }
