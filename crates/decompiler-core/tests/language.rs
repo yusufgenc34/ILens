@@ -153,6 +153,14 @@ fn conditionals_patterns_and_statement_idioms() {
             "lock (Constructs.Gate)\n            {\n                Constructs.counter++;\n            }",
         ],
     );
-    // No jump enters a nested block.
-    assert!(!constructs.contains("goto IL_00D5"), "{constructs}");
+    // Roslyn's length/character dispatch is the original string switch again.
+    assert_contains(
+        &constructs,
+        &[
+            "switch (key)\n            {\n                case \"eta\":\n                    return 7;",
+            "case \"alpha\":\n                    return 1;",
+            "default:\n                    return 0;\n            }",
+        ],
+    );
+    assert!(!constructs.contains("key.Length"), "{constructs}");
 }

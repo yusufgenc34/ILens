@@ -1095,6 +1095,7 @@ fn reads(nodes: &[Ast], read: &mut HashSet<std::string::String>) {
                 value,
                 arms,
                 default,
+                ..
             } => {
                 note(value, read);
                 arms.iter().for_each(|arm| reads(arm, read));
@@ -1135,6 +1136,339 @@ fn drop_dead_stack_copies(nodes: &mut Vec<Ast>, read: &HashSet<std::string::Stri
                     .for_each(|h| drop_dead_stack_copies(&mut h.body, read));
             }
             _ => {}
+        }
+    }
+}
+/// Roslyn lowers `switch` on a string into length, character or hash tests that end
+/// in one `s == "literal"` comparison per case. When every path ends either in such a
+/// case or in one common default, the original `switch (s)` is shown, as ILSpy does.
+fn string_switches(a: &Assembly, nodes: &mut Vec<Ast>) {
+    for n in nodes.iter_mut() {
+        match n {
+            Ast::If { yes, no, .. } => {
+                string_switches(a, yes);
+                string_switches(a, no);
+            }
+            Ast::While { body, .. } | Ast::For { body, .. } => string_switches(a, body),
+            Ast::Try { body, handlers } => {
+                string_switches(a, body);
+                for h in handlers {
+                    string_switches(a, &mut h.body);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Lowered switches jump to labeled case blocks.
+    let mut labels = HashMap::new();
+    labeled(nodes, &mut labels);
+    for start in 0..nodes.len() {
+        let Some(key) = first_literal_test(a, &nodes[start..]) else {
+            continue;
+        };
+        // Jumps from before the candidate into it would lose their target.
+        let mut inside = HashMap::new();
+        labeled(&nodes[start..], &mut inside);
+        let mut earlier = HashSet::new();
+        gotos(&nodes[..start], &mut earlier);
+        if earlier.iter().any(|id| inside.contains_key(id)) {
+            continue;
+        }
+        let mut tree = Decisions {
+            a,
+            key: key.clone(),
+            labels: &labels,
+            derived: HashSet::new(),
+            tests: 0,
+            cases: vec![],
+            defaults: vec![],
+        };
+        if !tree.decide(&nodes[start..], 0) || tree.tests == 0 || tree.cases.len() < 2 {
+            continue;
+        }
+        let shape = |body: &[Ast]| serde_json::to_string(body).unwrap_or_default();
+        let Some(default) = tree.defaults.first().cloned() else {
+            continue;
+        };
+        let mut seen = HashSet::new();
+        let literals_unique = tree
+            .cases
+            .iter()
+            .all(|(l, _)| seen.insert(shape(&[Ast::Statement(Statement::Evaluate(l.clone()))])));
+        let mut used = HashSet::new();
+        for body in tree.cases.iter().map(|(_, b)| b).chain(&tree.defaults) {
+            reads(body, &mut used);
+        }
+        if !literals_unique
+            || tree.defaults.iter().any(|d| shape(d) != shape(&default))
+            || used.iter().any(|v| tree.derived.contains(v))
+        {
+            continue;
+        }
+        // Cases with the same body share it: `case "a": case "b":`.
+        let mut labels: Vec<Vec<Expr>> = vec![];
+        let mut arms: Vec<Vec<Ast>> = vec![];
+        for (literal, body) in tree.cases {
+            match arms.iter().position(|arm| shape(arm) == shape(&body)) {
+                Some(i) => labels[i].push(literal),
+                None => {
+                    labels.push(vec![literal]);
+                    arms.push(body);
+                }
+            }
+        }
+        let value = Expr::var(key, Type::primitive("string"));
+        nodes.splice(
+            start..,
+            [Ast::Switch {
+                value,
+                arms,
+                default,
+                labels,
+            }],
+        );
+        return;
+    }
+}
+/// Each label with the statements that follow it in its list.
+fn labeled(nodes: &[Ast], found: &mut HashMap<usize, Vec<Ast>>) {
+    for (i, n) in nodes.iter().enumerate() {
+        match n {
+            Ast::Label(id) => {
+                found.insert(*id, nodes[i + 1..].to_vec());
+            }
+            Ast::If { yes, no, .. } => {
+                labeled(yes, found);
+                labeled(no, found);
+            }
+            Ast::While { body, .. } | Ast::For { body, .. } => labeled(body, found),
+            Ast::Switch { arms, default, .. } => {
+                arms.iter().for_each(|arm| labeled(arm, found));
+                labeled(default, found);
+            }
+            Ast::Try { body, handlers } => {
+                labeled(body, found);
+                handlers.iter().for_each(|h| labeled(&h.body, found));
+            }
+            _ => {}
+        }
+    }
+}
+fn gotos(nodes: &[Ast], found: &mut HashSet<usize>) {
+    for n in nodes {
+        match n {
+            Ast::Goto(id) => {
+                found.insert(*id);
+            }
+            Ast::If { yes, no, .. } => {
+                gotos(yes, found);
+                gotos(no, found);
+            }
+            Ast::While { body, .. } | Ast::For { body, .. } => gotos(body, found),
+            Ast::Switch { arms, default, .. } => {
+                arms.iter().for_each(|arm| gotos(arm, found));
+                gotos(default, found);
+            }
+            Ast::Try { body, handlers } => {
+                gotos(body, found);
+                handlers.iter().for_each(|h| gotos(&h.body, found));
+            }
+            _ => {}
+        }
+    }
+}
+fn string_literal_test(a: &Assembly, e: &Expr) -> Option<(std::string::String, Expr)> {
+    let (left, right) = match &e.kind {
+        ExprKind::Call {
+            name,
+            owner,
+            args,
+            instance: None,
+            ..
+        } if name == "op_Equality" && a.resolve_full(*owner) == "System.String" => {
+            match args.as_slice() {
+                [l, r] => (l, r),
+                _ => return None,
+            }
+        }
+        ExprKind::Binary {
+            op, left, right, ..
+        } if op == "==" => (left.as_ref(), right.as_ref()),
+        _ => return None,
+    };
+    match (&left.kind, &right.kind) {
+        (ExprKind::Variable(key), ExprKind::String(_)) => Some((key.clone(), right.clone())),
+        _ => None,
+    }
+}
+fn first_literal_test(a: &Assembly, nodes: &[Ast]) -> Option<std::string::String> {
+    nodes.iter().find_map(|n| match n {
+        Ast::If { condition, yes, no } => string_literal_test(a, condition)
+            .map(|(key, _)| key)
+            .or_else(|| first_literal_test(a, yes))
+            .or_else(|| first_literal_test(a, no)),
+        Ast::Switch { arms, default, .. } => arms
+            .iter()
+            .find_map(|arm| first_literal_test(a, arm))
+            .or_else(|| first_literal_test(a, default)),
+        _ => None,
+    })
+}
+struct Decisions<'a> {
+    a: &'a Assembly,
+    key: std::string::String,
+    labels: &'a HashMap<usize, Vec<Ast>>,
+    /// Locals holding `key.Length`, `key[i]` or the string hash.
+    derived: HashSet<std::string::String>,
+    /// Tests on derived values; a plain comparison chain is no lowered switch.
+    tests: usize,
+    cases: Vec<(Expr, Vec<Ast>)>,
+    defaults: Vec<Vec<Ast>>,
+}
+impl Decisions<'_> {
+    fn derived_value(&self, e: &Expr) -> bool {
+        let on_key = |i: &Expr| matches!(&i.kind, ExprKind::Variable(v) if *v == self.key);
+        match &e.kind {
+            ExprKind::Call {
+                name,
+                instance: Some(i),
+                args,
+                ..
+            } => {
+                on_key(i)
+                    && (name == "get_Length" && args.is_empty()
+                        || name == "get_Chars"
+                            && matches!(
+                                args.as_slice(),
+                                [Expr {
+                                    kind: ExprKind::Constant(_),
+                                    ..
+                                }]
+                            ))
+            }
+            ExprKind::Call {
+                name,
+                instance: None,
+                args,
+                ..
+            } => name == "ComputeStringHash" && matches!(args.as_slice(), [k] if on_key(k)),
+            _ => false,
+        }
+    }
+    // Side-effect-free tests on derived values, or the key's null test.
+    fn decision(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Variable(v) => self.derived.contains(v),
+            ExprKind::Constant(_) | ExprKind::Null => true,
+            ExprKind::Binary { left, right, .. } => {
+                let null_test = matches!((&left.kind, &right.kind),
+                    (ExprKind::Variable(v), ExprKind::Null) if *v == self.key);
+                null_test || self.decision(left) && self.decision(right)
+            }
+            ExprKind::Unary { value, .. } | ExprKind::Cast { value, .. } => self.decision(value),
+            _ => self.derived_value(e),
+        }
+    }
+    /// The straight-line block a path reaches: labels skipped, jumps followed, up to its
+    /// `return` or `throw`.
+    fn block(&self, nodes: &[Ast], depth: usize) -> Option<Vec<Ast>> {
+        if depth > 64 {
+            return None;
+        }
+        match nodes {
+            [Ast::Label(_), rest @ ..] => self.block(rest, depth),
+            [Ast::Goto(id), ..] => self.block(self.labels.get(id)?, depth + 1),
+            _ => {
+                let end = nodes
+                    .iter()
+                    .position(|n| matches!(n, Ast::Return(_) | Ast::Throw(_)))?;
+                nodes[..end]
+                    .iter()
+                    .all(|n| matches!(n, Ast::Statement(_)))
+                    .then(|| nodes[..=end].to_vec())
+            }
+        }
+    }
+    // Whether control cannot fall out of the end of `nodes`.
+    fn closed(nodes: &[Ast]) -> bool {
+        match nodes.last() {
+            Some(Ast::Return(_) | Ast::Throw(_) | Ast::Goto(_)) => true,
+            Some(Ast::If { yes, no, .. }) => {
+                !no.is_empty() && Self::closed(yes) && Self::closed(no)
+            }
+            Some(Ast::Switch { arms, default, .. }) => {
+                arms.iter().all(|arm| Self::closed(arm)) && Self::closed(default)
+            }
+            _ => false,
+        }
+    }
+    fn decide(&mut self, nodes: &[Ast], depth: usize) -> bool {
+        if depth > 64 {
+            return false;
+        }
+        match nodes {
+            [Ast::Label(_), rest @ ..] => self.decide(rest, depth),
+            [Ast::Goto(id), ..] => match self.labels.get(id) {
+                Some(target) => self.decide(target, depth + 1),
+                None => false,
+            },
+            [
+                Ast::Statement(Statement::Assign {
+                    target:
+                        Expr {
+                            kind: ExprKind::Variable(v),
+                            ..
+                        },
+                    value,
+                }),
+                rest @ ..,
+            ] if self.derived_value(value) => {
+                self.derived.insert(v.clone());
+                self.decide(rest, depth)
+            }
+            [Ast::If { condition, yes, no }, rest @ ..] => {
+                let otherwise = |this: &mut Self| {
+                    if no.is_empty() {
+                        this.decide(rest, depth + 1)
+                    } else {
+                        this.decide(no, depth + 1)
+                    }
+                };
+                if let Some((key, literal)) = string_literal_test(self.a, condition)
+                    && key == self.key
+                {
+                    let Some(body) = self.block(yes, depth + 1) else {
+                        return false;
+                    };
+                    self.cases.push((literal, body));
+                    return otherwise(self);
+                }
+                if !self.decision(condition) || !Self::closed(yes) {
+                    return false;
+                }
+                self.tests += 1;
+                self.decide(yes, depth + 1) && otherwise(self)
+            }
+            [
+                Ast::Switch {
+                    value,
+                    arms,
+                    default,
+                    labels,
+                },
+                ..,
+            ] if labels.is_empty() && self.decision(value) => {
+                self.tests += 1;
+                arms.iter().all(|arm| self.decide(arm, depth + 1))
+                    && self.decide(default, depth + 1)
+            }
+            _ => match self.block(nodes, depth) {
+                Some(block) => {
+                    self.defaults.push(block);
+                    true
+                }
+                None => false,
+            },
         }
     }
 }
@@ -1903,6 +2237,7 @@ fn nodes(
                 value,
                 arms,
                 default,
+                labels,
             } => {
                 line(
                     out,
@@ -1911,7 +2246,18 @@ fn nodes(
                 );
                 line(out, indent, "{");
                 for (i, arm) in arms.iter().enumerate() {
-                    line(out, indent + 1, &format!("case {i}:"));
+                    match labels.get(i) {
+                        Some(cases) => {
+                            for case in cases {
+                                line(
+                                    out,
+                                    indent + 1,
+                                    &format!("case {}:", expression(a, token, case)?),
+                                );
+                            }
+                        }
+                        None => line(out, indent + 1, &format!("case {i}:")),
+                    }
                     nodes(a, token, arm, out, indent + 2, cfg)?;
                 }
                 line(out, indent + 1, "default:");
@@ -1960,6 +2306,7 @@ fn flat_block(
             value: value.clone(),
             arms: arms.iter().map(edge).collect(),
             default: edge(default),
+            labels: vec![],
         },
         Terminator::Return(v) => Ast::Return(v.clone()),
         Terminator::Throw(v) => Ast::Throw(v.clone()),
@@ -2507,6 +2854,7 @@ pub fn csharp_body(
         let mut read = HashSet::new();
         reads(&owned, &mut read);
         drop_dead_stack_copies(&mut owned, &read);
+        string_switches(a, &mut owned);
         conditionals(a, &returns, &mut owned);
     }
     let ast = owned.as_slice();

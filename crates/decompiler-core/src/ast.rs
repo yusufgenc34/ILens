@@ -30,6 +30,8 @@ pub enum Ast {
         value: Expr,
         arms: Vec<Vec<Ast>>,
         default: Vec<Ast>,
+        /// Case labels of each arm; empty for IL `switch`, whose arms are `case 0..n`.
+        labels: Vec<Vec<Expr>>,
     },
     Return(Option<Expr>),
     Throw(Option<Expr>),
@@ -356,6 +358,7 @@ impl Builder<'_> {
                         value: value.clone(),
                         arms: branches,
                         default: d,
+                        labels: vec![],
                     });
                     return out;
                 }
