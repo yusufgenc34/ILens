@@ -16,7 +16,7 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
   for (const href of links) {const css = await page.request.get(href, {headers: {Accept: 'text/css'}}); expect(css.ok()).toBe(true); expect(css.headers()['content-type']).toContain('text/css')}
   await expect(page.locator('.workspace')).toHaveClass(/(?:^|\s)grid(?:\s|$)/)
   await expect(page.locator('.application')).toHaveCSS('display', 'flex')
-  // The default Dracula code theme colors the workspace chrome too.
+  // The default Dark Modern code theme colors the workspace chrome too.
   await expect(page.locator('.application')).not.toHaveCSS('background-color', 'rgb(10, 10, 10)')
   await expect(page.locator('.application')).toHaveCSS('font-family', /sans-serif/)
   await expect(page.locator('.workspace')).toHaveCSS('display', 'grid')
@@ -48,8 +48,8 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
   await expect(page.getByLabel('C# code viewer')).toContainText('for (')
   await expect(page.locator('.cm-scroller')).toHaveCSS('font-family', /monospace/)
   await expect(page.locator('.cm-gutters')).toBeVisible()
-  // Dracula is the default code theme, independent of the workspace appearance.
-  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(40, 42, 54)')
+  // Dark Modern is the default code theme, independent of the workspace appearance.
+  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(30, 30, 30)')
   await page.screenshot({path: testInfo.outputPath('styled-dark-method.png'), fullPage: true})
   await page.getByRole('tab', {name: 'IL', exact: true}).click()
   await expect(page.getByLabel('IL code viewer')).toContainText('blt.s')
@@ -58,7 +58,7 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
   await page.getByRole('menuitem', {name: 'View', exact: true}).click(); await page.getByRole('menuitemcheckbox', {name: 'Light Appearance'}).click()
   await expect(page.locator('.application')).toHaveClass(/(?:^|\s)light(?:\s|$)/)
   await expect(page.locator('.application')).toHaveCSS('background-color', 'rgb(255, 255, 255)')
-  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(40, 42, 54)')
+  await expect(page.locator('.cm-editor')).toHaveCSS('background-color', 'rgb(30, 30, 30)')
   await expect(page.locator('.workspace')).toHaveCSS('display', 'grid')
   await page.screenshot({path: testInfo.outputPath('styled-light-method.png'), fullPage: true})
   expect(failures).toEqual([])

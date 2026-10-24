@@ -22,7 +22,7 @@ export interface EditorSettings {
 }
 export const editorSettingsKey = 'ilens:editor-settings'
 export const fontSizes = [12, 13, 14, 16, 18] as const
-export const defaultEditorSettings: EditorSettings = {theme: 'dracula', highlighting: true, fontSize: 13, lineNumbers: true, wrap: false, explorerTokens: true, tokenComments: true, hideGenerated: false}
+export const defaultEditorSettings: EditorSettings = {theme: 'dark', highlighting: true, fontSize: 13, lineNumbers: true, wrap: false, explorerTokens: true, tokenComments: true, hideGenerated: false}
 
 // Browser storage is optional and untrusted. Never forward arbitrary CSS into
 // the editor from saved preferences.
@@ -32,7 +32,8 @@ export function parseEditorSettings(raw: string | null): EditorSettings {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {...defaultEditorSettings}
     const saved = value as Record<string, unknown>
     return {
-      theme: editorThemes.some(t => t.id === saved.theme) ? saved.theme as EditorTheme : defaultEditorSettings.theme,
+      // Settings saved before version 2 hold Dracula as the former default, not a choice.
+      theme: editorThemes.some(t => t.id === saved.theme) && !(saved.version !== 2 && saved.theme === 'dracula') ? saved.theme as EditorTheme : defaultEditorSettings.theme,
       highlighting: typeof saved.highlighting === 'boolean' ? saved.highlighting : true,
       fontSize: fontSizes.some(size => size === saved.fontSize) ? saved.fontSize as number : 13,
       lineNumbers: typeof saved.lineNumbers === 'boolean' ? saved.lineNumbers : true,
@@ -83,7 +84,7 @@ export function stripTokenComments<R extends {start: number; end: number}>(text:
   return {text: out, references: references?.filter(r => !removed.some(([start, end]) => r.start >= start && r.end <= end)).map(r => ({...r, start: r.start - shift(r.start), end: r.end - shift(r.start)}))}
 }
 /** The workspace chrome in the code theme's colors, so panels, menus and dialogs match
- * the code view (Dracula's sidebar, borders and accent rather than neutral black).
+ * the code view (the theme's sidebar, borders and accent rather than neutral black).
  * Only dark code themes in the dark appearance; otherwise the neutral tokens apply. */
 export function chromeStyle(theme: EditorTheme, appearance: string): Record<string, string> | undefined {
   if (theme === 'neutral' || appearance !== 'dark') return undefined

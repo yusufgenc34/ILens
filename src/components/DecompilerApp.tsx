@@ -133,7 +133,7 @@ export default function DecompilerApp() {
     try {setOnlineReferences(localStorage.getItem('ilens:framework-downloads') !== 'false'); setTheme((localStorage.getItem('ilens:theme') ?? localStorage.getItem('monoasm:theme')) === 'light' ? 'light' : 'dark'); setEditorSettings(parseEditorSettings(localStorage.getItem(editorSettingsKey) ?? localStorage.getItem('monoasm:editor-settings')))} catch { /* Storage is optional. */ }
     return () => {client.current?.terminate()}
   }, [])
-  useEffect(() => {if (!ready) return; try {localStorage.setItem('ilens:framework-downloads', String(onlineReferences)); localStorage.setItem('ilens:theme', theme); localStorage.setItem(editorSettingsKey, JSON.stringify(editorSettings))} catch { /* Storage is optional. */ }}, [ready, theme, editorSettings, onlineReferences])
+  useEffect(() => {if (!ready) return; try {localStorage.setItem('ilens:framework-downloads', String(onlineReferences)); localStorage.setItem('ilens:theme', theme); localStorage.setItem(editorSettingsKey, JSON.stringify({...editorSettings, version: 2}))} catch { /* Storage is optional. */ }}, [ready, theme, editorSettings, onlineReferences])
   useEffect(() => {
     const keyboard = (e: KeyboardEvent) => {
       if ((e.target as Element | null)?.closest('dialog[open]')) return
