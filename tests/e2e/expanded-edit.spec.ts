@@ -55,7 +55,8 @@ test('MakeArray edits reject a wrong element opcode and produce a verified DLL w
   await expect(page.getByLabel('C# code viewer')).toContainText('43')
 })
 test('array, object, constructor-call and instance edits pass independent whole-assembly ILVerify', async ({page}, testInfo) => {
-  test.setTimeout(120_000)
+  // Four edit/ILVerify round trips in one test: 44s in Chromium, 2m+ in WebKit on Linux.
+  test.setTimeout(300_000)
   const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
   await open(page, 'Editing')
   // Each method gets a real encoded change, exercising growing headers/bodies,
