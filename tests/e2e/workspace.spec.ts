@@ -54,6 +54,7 @@ test('selected folder resolves dependencies locally and enables property navigat
   await page.getByRole('menuitem',{name:'Clear Dependency Folder',exact:true}).click()
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('2')
   await page.getByRole('button',{name:'Close workspace',exact:true}).click()
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(path.resolve('samples/fixtures/ILens.Workspace.dll'))
   await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   await find(page,'DependencyProperty')
@@ -62,6 +63,7 @@ test('selected folder resolves dependencies locally and enables property navigat
 })
 test('Analyze finds cross-assembly field readers and writers', async ({page}, info) => {
   await open(page)
+  await expect(page.getByLabel('Add dependency files')).toBeEnabled()
   await page.getByLabel('Add dependency files').setInputFiles(path.resolve('samples/fixtures/ILens.WorkspaceDependency.dll'))
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('2')
   await page.locator('[role=treeitem][data-kind=assembly][data-assembly-id="2"]').click()
@@ -139,6 +141,7 @@ test('local enum edits produce an independently verified DLL', async ({page},inf
   expect(verified).toContain('Verified')
   await page.getByRole('button',{name:'Close export'}).click()
   await page.getByRole('button',{name:'Close workspace',exact:true}).click()
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(file)
   await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1')
   await find(page,'ChooseMode'); await page.getByRole('tab',{name:'IL',exact:true}).click()

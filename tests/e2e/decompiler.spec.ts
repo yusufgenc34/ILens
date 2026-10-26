@@ -19,6 +19,7 @@ test('real browser WASM: open, navigate, reconstruct, search, dependencies, priv
  await page.getByRole('tab', {name: 'Metadata', exact: true}).click()
  await expect(page.getByLabel('Metadata code viewer')).toContainText('signature_blob')
  await page.getByRole('tab', {name: 'C#', exact: true}).click()
+ await expect(page.getByLabel('Add dependency files')).toBeEnabled()
  await page.getByLabel('Add dependency files').setInputFiles(path.resolve('samples/fixtures/ILens.Dependency.dll'))
  await expect(page.getByLabel('Loaded assemblies')).toHaveText('2')
  await page.getByRole('menuitem', {name: 'Edit', exact: true}).click(); await page.getByRole('menuitem', {name: 'Search Assembly…', exact: true}).click()

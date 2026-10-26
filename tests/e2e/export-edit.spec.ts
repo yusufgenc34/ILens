@@ -58,7 +58,7 @@ test('source archive reports partial reconstruction, includes resources, and can
       else send()
     }
   })
-  await open(page, patterns); await page.getByLabel('Add dependency files').setInputFiles(dependency); await expect(page.getByLabel('Loaded assemblies')).toHaveText('2'); await expect(page.getByRole('button',{name:'Stop analysis'})).toHaveCount(0)
+  await open(page, patterns); await expect(page.getByLabel('Add dependency files')).toBeEnabled(); await page.getByLabel('Add dependency files').setInputFiles(dependency); await expect(page.getByLabel('Loaded assemblies')).toHaveText('2'); await expect(page.getByRole('button',{name:'Stop analysis'})).toHaveCount(0)
   await page.getByRole('menuitem', {name: 'File', exact: true}).click(); await page.getByRole('menuitem', {name: 'Export to Project…', exact: true}).click(); await page.getByRole('checkbox', {name: /ILens.Dependency/}).check()
   const downloads: string[] = []; page.on('download', d => downloads.push(d.suggestedFilename()))
   await page.getByRole('button', {name: 'Export', exact: true}).click(); await page.getByRole('button', {name: 'Cancel export', exact: true}).click()
@@ -104,6 +104,7 @@ test('edits IL with undo, rejects invalid types, validates and reopens a real mo
   const verification = execFileSync('dotnet', ['tool', 'run', 'ilverify', saved, '-r', path.join(runtime![2], runtime![1], '*.dll'), '-s', 'System.Private.CoreLib'], {encoding: 'utf8', timeout: 30_000})
   expect(verification).toContain('Verified')
   await page.getByRole('button', {name: 'Close export'}).click(); await page.getByRole('button', {name: 'Close workspace', exact: true}).click()
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(saved); await expect(page.getByRole('main')).toHaveAttribute('data-assembly-id','1'); await select(page, 'Arithmetic.Twice', /Twice.*Arithmetic.Twice/)
   await expect(page.getByLabel('C# code viewer')).toContainText('return value * 3;')
 })

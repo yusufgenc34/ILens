@@ -50,6 +50,7 @@ test('real worker cleans a pure string helper, verifies/downloads the PE and ope
   await selectMessage(page);await page.getByRole('tab',{name:'IL',exact:true}).click();await expect(page.getByLabel('IL code viewer')).toContainText('Decode')
   expect(sent).toEqual([])
   await page.getByRole('button',{name:'Close workspace',exact:true}).click()
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(saved)
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('1');await selectMessage(page)
   await expect(page.getByLabel('C# code viewer')).toContainText('Hello ILens')

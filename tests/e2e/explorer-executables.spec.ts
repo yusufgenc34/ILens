@@ -12,7 +12,9 @@ async function nativeEnvelope() {
   return {name:'ILens.AutomaticDependencies.exe',mimeType:'application/octet-stream',buffer}
 }
 test('Explorer follows assembly/module/namespace/type/member and property accessor hierarchy',async({page},info)=>{
-  await page.goto('./');await page.getByLabel('Open assembly files').setInputFiles(patterns)
+  await page.goto('./')
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
+  await page.getByLabel('Open assembly files').setInputFiles(patterns)
   await expect(page.getByRole('treeitem',{name:'ILens.Patterns',exact:true})).toHaveAttribute('aria-level','1')
   await expect(page.getByRole('treeitem',{name:'ILens.Patterns.dll',exact:true})).toHaveAttribute('aria-level','2')
   await page.getByRole('treeitem',{name:'ILens.Samples',exact:true}).click()
@@ -42,18 +44,22 @@ test('Explorer follows assembly/module/namespace/type/member and property access
 test('EXE with no CLR metadata opens a matching selected DLL and reports an actionable error otherwise',async({page})=>{
   await page.goto('./')
   const exe=await nativeEnvelope(),dll={name:'ILens.AutomaticDependencies.dll',mimeType:'application/octet-stream',buffer:await readFile('samples/fixtures/ILens.AutomaticDependencies.exe')}
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles([exe,dll])
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('1')
   await expect(page.getByRole('alert')).toHaveCount(0)
   await expect(page.getByRole('treeitem',{name:dll.name,exact:true})).toBeVisible()
   await expect(page.locator('.status-message')).toContainText('companion DLLs opened')
   await page.getByRole('button',{name:'Close workspace'}).click()
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(exe)
   await expect(page.getByRole('alert')).toContainText('If it is a .NET launcher, open its managed DLL')
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('0')
 })
 test('choosing the application folder retries a pending EXE and opens its companion',async({page},info)=>{
-  await page.goto('./');await page.getByLabel('Open assembly files').setInputFiles(await nativeEnvelope())
+  await page.goto('./')
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
+  await page.getByLabel('Open assembly files').setInputFiles(await nativeEnvelope())
   await expect(page.getByRole('alert')).toContainText('has no CLR header')
   const folder=info.outputPath('application');await mkdir(folder,{recursive:true})
   await writeFile(path.join(folder,'ILens.AutomaticDependencies.dll'),await readFile('samples/fixtures/ILens.AutomaticDependencies.exe'))
@@ -66,6 +72,7 @@ test('a genuine SDK ReadyToRun assembly exposes its preserved IL with a read-onl
   const runtimes=execFileSync('dotnet',['--list-runtimes'],{encoding:'utf8'})
   const runtime=runtimes.split('\n').find(line=>line.startsWith('Microsoft.NETCore.App 10.'))!.match(/^Microsoft.NETCore.App (\S+) \[(.+)\]$/)!
   await page.goto('./')
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(path.join(runtime[2],runtime[1],'System.Console.dll'))
   // A real framework ReadyToRun image is far larger than the fixtures; indexing it on a
   // loaded machine takes longer than the shared assertion timeout allows.
@@ -85,6 +92,7 @@ test('native VCL diagnostics do not prescribe a nonexistent companion DLL',async
   await page.goto('./')
   const input=await nativeEnvelope()
   Buffer.from('System.SysUtils\0Vcl.Forms\0TForm\0').copy(input.buffer,0x40)
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles({...input,name:'NativeTool.exe'})
   const alert=page.getByRole('alert')
   await expect(alert).toContainText('Native Windows executable with Delphi/C++Builder VCL markers')
@@ -92,6 +100,7 @@ test('native VCL diagnostics do not prescribe a nonexistent companion DLL',async
   await expect(alert).not.toContainText('select its application folder')
   await expect(page.locator('.status-message')).toContainText('No assembly was opened')
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('0')
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles(patterns)
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('1')
   await expect(alert).toHaveCount(0)
@@ -101,6 +110,7 @@ test('managed EXE with an understated PE directory count opens and retains origi
   const buffer=await readFile('samples/fixtures/ILens.AutomaticDependencies.exe')
   const pe=buffer.readUInt32LE(60);buffer.writeUInt32LE(11,pe+24+92)
   await page.goto('./')
+  await expect(page.getByLabel('Open assembly files')).toBeEnabled()
   await page.getByLabel('Open assembly files').setInputFiles({name:'ProtectedHeader.exe',mimeType:'application/octet-stream',buffer})
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('1')
   await expect(page.getByRole('alert')).toHaveCount(0)
