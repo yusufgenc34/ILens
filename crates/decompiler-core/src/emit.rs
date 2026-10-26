@@ -2819,7 +2819,7 @@ pub struct SourceReference {
 fn source_reference(token: u32, name: &str) -> String {
     format!("\0{token:08X}\u{1}{name}\u{2}")
 }
-fn extract_references(input: &str) -> Result<(String, Vec<SourceReference>)> {
+pub(crate) fn extract_references(input: &str) -> Result<(String, Vec<SourceReference>)> {
     let mut output = String::new();
     let mut refs = Vec::new();
     let mut rest = input;

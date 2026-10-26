@@ -14,6 +14,8 @@ let processing = false
 let exportJob: ReturnType<typeof createExportJob> | ReturnType<typeof createProjectExportJob> | undefined
 let nextJob = 0
 let exportRequest = 0
+let deobfuscationRequest = 0
+let deobfuscationId = 0
 const resolveFramework = createFrameworkResolver()
 const frameworkContexts = new Map<number,AssemblyInfo>()
 const downloads = new Map<number,AbortController>()
@@ -29,6 +31,17 @@ async function initialize() {
 async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
   if (['load', 'loadDependency', 'close', 'dispose', 'applyMethodEdit', 'discardMethodEdit', 'addMember', 'csharpApply'].includes(request.op)) cancelExport()
   switch (request.op) {
+    case 'deobfuscateBegin': {
+      deobfuscationRequest=request.id
+      const result=core.deobfuscate_begin(request.assembly,JSON.stringify(request.options)) as import('../lib/types').DeobfuscationProgress
+      deobfuscationId=result.job;return result
+    }
+    case 'deobfuscateStep': deobfuscationRequest=request.id;deobfuscationId=request.job;return core.deobfuscate_step(request.job)
+    case 'deobfuscateFinish': deobfuscationRequest=request.id;deobfuscationId=request.job;return core.deobfuscate_finish(request.job)
+    case 'functionMap': return core.function_map(request.assembly)
+    case 'deobfuscateCancel': core.deobfuscate_cancel(request.job);return null
+    case 'deobfuscateDownload': return {buffer:core.deobfuscate_download(request.job).buffer}
+    case 'deobfuscateOpen': cancelExport();return core.deobfuscate_open(request.job)
     case 'resolveFrameworkReference': {
       const info=core.get_assembly_info(request.assembly) as Overview
       const reference=(core.get_references(request.assembly) as Reference[]).find(r=>r.token===request.token)
@@ -45,7 +58,7 @@ async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
     }
     case 'beginProjectExport': exportRequest = request.id; cancelExport(); exportJob = createProjectExportJob(core, ++nextJob, request.options); return exportJob.progress()
     case 'getEdits': return core.get_edits(request.assembly)
-    case 'assemblyIds': return core.assembly_ids()
+    case 'assemblyIds': return core.assembly_ids(request.selected)
     case 'assemblyBytes': return {buffer: core.assembly_bytes(request.assembly).buffer}
     case 'csharpSource': return core.csharp_source(request.assembly, request.token)
     case 'csharpApply': return core.csharp_apply(request.assembly, request.token, request.revision, new Uint8Array(request.compiled))
@@ -117,7 +130,7 @@ async function drain() {
   } finally { processing = false; cancelled.clear() }
 }
 scope.onmessage = ({data}: MessageEvent<WorkerMessage>) => {
-  if (data.op === 'cancel') { downloads.get(data.target)?.abort(); if (exportRequest === data.target) cancelExport(); queue = queue.filter(r => r.id !== data.target); cancelled.add(data.target); send({id: data.target, kind: 'error', error: {code: 'cancelled', message: 'Operation cancelled.', detail: 'Worker acknowledged cancellation.'}}); return }
+  if (data.op === 'cancel') { downloads.get(data.target)?.abort(); if (exportRequest === data.target) cancelExport(); if (deobfuscationRequest === data.target && deobfuscationId) engine?.deobfuscate_cancel(deobfuscationId); queue = queue.filter(r => r.id !== data.target); cancelled.add(data.target); send({id: data.target, kind: 'error', error: {code: 'cancelled', message: 'Operation cancelled.', detail: 'Worker acknowledged cancellation.'}}); return }
   if (queue.length >= 128) { send({id: data.id, kind: 'error', error: {code: 'size_limit', message: 'Too many pending operations.', detail: 'Worker queue is limited to 128 requests.'}}); return }
   queue.push(data); void drain()
 }

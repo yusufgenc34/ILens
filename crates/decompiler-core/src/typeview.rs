@@ -64,6 +64,61 @@ impl Writer {
         }
     }
 }
+fn word(unit: u16) -> bool {
+    char::from_u32(u32::from(unit)).is_some_and(|c| c.is_alphanumeric() || c == '_')
+}
+fn find_word(hay: &[u16], needle: &[u16], from: usize) -> Option<usize> {
+    let last = hay.len().checked_sub(needle.len())?;
+    (from..=last).find(|&i| {
+        hay[i..i + needle.len()] == *needle
+            && (i == 0 || !word(hay[i - 1]))
+            && hay.get(i + needle.len()).is_none_or(|u| !word(*u))
+    })
+}
+/// Navigation ranges for `plain`, taken from a marked rendering of the same
+/// declaration. Marked names are matched in order as whole words, so a line that
+/// adds modifiers, `;` or accessor lists still links; anything unmatched stays text.
+/// `own` additionally links the declared name to its own definition.
+pub(crate) fn align(plain: &str, marked: &str, own: Option<(u32, &str)>) -> Vec<SourceReference> {
+    let hay: Vec<u16> = plain.encode_utf16().collect();
+    let mut out = Vec::new();
+    if let Ok((text, refs)) = crate::emit::extract_references(marked) {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut cursor = 0;
+        for r in refs {
+            let Some(name) = units.get(r.start..r.end).filter(|n| !n.is_empty()) else {
+                continue;
+            };
+            if let Some(at) = find_word(&hay, name, cursor) {
+                out.push(SourceReference {
+                    start: at,
+                    end: at + name.len(),
+                    token: r.token,
+                });
+                cursor = at + name.len();
+            }
+        }
+    }
+    if let Some((token, name)) = own {
+        let name: Vec<u16> = crate::assembly::strip_arity(name).encode_utf16().collect();
+        let mut from = 0;
+        while !name.is_empty()
+            && let Some(at) = find_word(&hay, &name, from)
+        {
+            if !out.iter().any(|r| at < r.end && r.start < at + name.len()) {
+                out.push(SourceReference {
+                    start: at,
+                    end: at + name.len(),
+                    token,
+                });
+                break;
+            }
+            from = at + 1;
+        }
+    }
+    out.sort_by_key(|r| r.start);
+    out
+}
 /// dnSpy's `// Token: … RID: … RVA: … File Offset: …` member header.
 pub fn token_comment(a: &Assembly, label: &str, token: u32) -> String {
     let mut text = format!("// {label}Token: 0x{token:08X} RID: {}", token & 0xffffff);
@@ -131,9 +186,21 @@ fn compact_backing_field(a: &Assembly, source: &MemberSource) -> Option<u32> {
     }
 }
 fn attribute_lines(w: &mut Writer, a: &Assembly, depth: usize, token: u32) {
-    for line in attributes::render(a, token) {
-        w.lines(depth, &line);
+    let plain = attributes::render(a, token);
+    let marked = crate::assembly::with_links(|| attributes::render(a, token));
+    for (i, line) in plain.iter().enumerate() {
+        let refs = match marked.get(i).filter(|_| marked.len() == plain.len()) {
+            Some(m) => align(line, m, None),
+            None => vec![],
+        };
+        w.block(depth, line, &refs);
     }
+}
+/// A member declaration line with its signature types and its own name linked.
+fn declaration_line(w: &mut Writer, a: &Assembly, depth: usize, line: &str, source: &MemberSource) {
+    let marked = crate::assembly::with_links(|| a.declaration(source.token)).unwrap_or_default();
+    let own = (!source.name.starts_with('.')).then_some((source.token, source.name.as_str()));
+    w.block(depth, line, &align(line, &marked, own));
 }
 // Conventional C# member order: fields, constructors, properties, events, methods.
 fn rank(source: &MemberSource) -> u8 {
@@ -149,6 +216,8 @@ struct Render<'a> {
     a: &'a Assembly,
     accessor: &'a dyn Fn(u32) -> Option<Accessor>,
     types: Vec<TypeDeclaration>,
+    // Type headers rendered with navigation markers, aligned to the plain headers.
+    marked: std::collections::HashMap<u32, String>,
     out: Writer,
     partial: bool,
     body_bytes: usize,
@@ -169,12 +238,18 @@ impl Render<'_> {
         attribute_lines(&mut self.out, self.a, depth, source.token);
         match (&source.body, source.quality.as_str()) {
             (Some(body), "csharp_like") => {
-                self.out.lines(depth, &source.declaration);
+                declaration_line(&mut self.out, self.a, depth, &source.declaration, source);
                 self.out.block(depth, body, &source.references);
             }
             (_, "annotated_il" | "error") => {
                 self.partial = true;
-                self.out.lines(depth, &format!("// {}", source.declaration));
+                declaration_line(
+                    &mut self.out,
+                    self.a,
+                    depth,
+                    &format!("// {}", source.declaration),
+                    source,
+                );
                 let reason = source
                     .diagnostics
                     .last()
@@ -185,7 +260,13 @@ impl Render<'_> {
                     &format!("// C# reconstruction is unavailable; select the member to read its IL. {reason}"),
                 );
             }
-            _ => self.out.lines(depth, &format!("{};", source.declaration)),
+            _ => declaration_line(
+                &mut self.out,
+                self.a,
+                depth,
+                &format!("{};", source.declaration),
+                source,
+            ),
         }
     }
     fn accessor_body(&mut self, depth: usize, kind: &str, token: u32) {
@@ -247,13 +328,13 @@ impl Render<'_> {
                         .collect();
                     format!("{} {{ {} }}", source.declaration, parts.join(" "))
                 };
-                self.out.lines(depth, &line);
+                declaration_line(&mut self.out, self.a, depth, &line, source);
             }
             23 | 20 => {
                 self.out
                     .lines(depth, &token_comment(self.a, "", source.token));
                 attribute_lines(&mut self.out, self.a, depth, source.token);
-                self.out.lines(depth, &source.declaration);
+                declaration_line(&mut self.out, self.a, depth, &source.declaration, source);
                 self.out.lines(depth, "{");
                 for (kind, token) in &source.accessors {
                     self.accessor_body(depth + 1, kind, *token);
@@ -264,7 +345,7 @@ impl Render<'_> {
                 self.out
                     .lines(depth, &token_comment(self.a, "", source.token));
                 attribute_lines(&mut self.out, self.a, depth, source.token);
-                self.out.lines(depth, &source.declaration);
+                declaration_line(&mut self.out, self.a, depth, &source.declaration, source);
             }
         }
     }
@@ -272,19 +353,23 @@ impl Render<'_> {
         if depth > 48 {
             return Err(Error::limit("Nested type view exceeds 48 levels"));
         }
-        let (token, kind, declaration, members) = {
+        let (token, kind, declaration, members, name) = {
             let t = &self.types[index];
             (
                 t.token,
                 t.kind.clone(),
                 t.declaration.clone(),
                 t.members.clone(),
+                t.name.clone(),
             )
         };
+        let marked = self.marked.get(&token).cloned().unwrap_or_default();
+        let header_refs = |line: &str| align(line, &marked, Some((token, &name)));
         self.out.lines(depth, &token_comment(self.a, "", token));
         attribute_lines(&mut self.out, self.a, depth, token);
         if kind == "delegate" {
-            self.out.lines(depth, &declaration);
+            self.out
+                .block(depth, &declaration, &header_refs(&declaration));
             return Ok(());
         }
         let header = if kind == "module" {
@@ -297,10 +382,11 @@ impl Render<'_> {
             && header.contains(" record ")
             && !self.types.iter().any(|t| t.parent == token)
         {
-            self.out.lines(depth, &format!("{header};"));
+            let line = format!("{header};");
+            self.out.block(depth, &line, &header_refs(&line));
             return Ok(());
         }
-        self.out.lines(depth, &header);
+        self.out.block(depth, &header, &header_refs(&header));
         self.out.lines(depth, "{");
         let mut sources: Vec<MemberSource> =
             members.iter().filter_map(|t| self.source(*t)).collect();
@@ -371,6 +457,9 @@ pub fn type_source(
         .unwrap_or_default();
     let scope = a.short_names(&namespace);
     let types = export::plan(a, Some(token))?;
+    let marked = crate::assembly::with_links(|| export::plan(a, Some(token)))
+        .map(|plan| plan.into_iter().map(|t| (t.token, t.declaration)).collect())
+        .unwrap_or_default();
     let root = types
         .iter()
         .position(|t| t.token == token)
@@ -379,6 +468,7 @@ pub fn type_source(
         a,
         accessor,
         types,
+        marked,
         out: Writer::default(),
         partial: false,
         body_bytes: 0,
@@ -446,6 +536,7 @@ pub fn member_source(
         a,
         accessor,
         types: vec![],
+        marked: Default::default(),
         out: Writer::default(),
         partial: false,
         body_bytes: 0,

@@ -246,6 +246,12 @@ fn arguments(a: &Assembly, constructor: u32, blob: &[u8]) -> Result<String> {
 }
 /// `[Name(args)]` lines for a declaration, in metadata order.
 pub fn render(a: &Assembly, parent: u32) -> Vec<String> {
+    // Names are compared and trimmed below, so they render plain; only the final
+    // attribute name carries a navigation marker when the caller asked for links.
+    let linked = crate::assembly::links_enabled();
+    crate::assembly::without_links(|| render_plain(a, parent, linked))
+}
+fn render_plain(a: &Assembly, parent: u32, linked: bool) -> Vec<String> {
     let mut lines = vec![];
     let flags = match parent >> 24 {
         2 => a
@@ -288,6 +294,11 @@ pub fn render(a: &Assembly, parent: u32) -> Vec<String> {
         let rendered = a
             .blob(attribute.value)
             .and_then(|blob| arguments(a, constructor, blob));
+        let name = if linked {
+            crate::assembly::with_links(|| crate::assembly::link(method.owner, name))
+        } else {
+            name.to_owned()
+        };
         lines.push(match rendered {
             Ok(args) if args.is_empty() => format!("[{name}]"),
             Ok(args) => format!("[{name}({args})]"),

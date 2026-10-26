@@ -88,13 +88,13 @@ export function pathToToken(nodes: TreeNode[], token: number, assembly?: number)
   for (const node of nodes) { if (node.token === token && (assembly === undefined || node.assembly === assembly)) return [node.key]; const path = pathToToken(node.children, token, assembly); if (path) return [node.key, ...path] }
   return null
 }
-export function createWorkspaceTree(assemblies: {id:number; declarations:Declaration[]; overview:Overview}[], options: {hideGenerated?: boolean} = {}): TreeNode[] {
+export function createWorkspaceTree(assemblies: {id:number; derived_from?:number; declarations:Declaration[]; overview:Overview}[], options: {hideGenerated?: boolean} = {}): TreeNode[] {
   const names = new Map<string,number>()
   for (const a of assemblies) names.set(a.overview.info.identity.name,(names.get(a.overview.info.identity.name) ?? 0) + 1)
   return assemblies.map(a => {
     const [root,...children] = createTree(a.declarations,a.overview,options)
     const qualify=(node:TreeNode):TreeNode=>({...node,key:`a:${a.id}:${node.key}`,assembly:a.id,children:node.children.map(qualify)})
     const module:TreeNode={key:'module',name:a.overview.info.module_name || `${root.name}.dll`,kind:'module',token:1,children}
-    return qualify({...root,name:root.name+((names.get(root.name) ?? 0) > 1 ? ` (${a.overview.info.identity.version})` : ''),children:[module]})
+    return qualify({...root,name:root.name+(a.derived_from !== undefined ? ` [cleaned copy #${a.id}]` : (names.get(root.name) ?? 0) > 1 ? ` (${a.overview.info.identity.version})` : ''),children:[module]})
   })
 }

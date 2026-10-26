@@ -33,9 +33,15 @@ pub struct NewParameter {
 pub struct Loaded {
     pub id: u32,
     pub info: AssemblyInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<u32>,
 }
 pub struct Session {
     assemblies: BTreeMap<u32, Assembly>,
+    // Analysis copies retain identity but never participate in dependency binding.
+    derived: BTreeMap<u32, u32>,
+    deobfuscation: Option<crate::deobfuscate::Job>,
+    next_deobfuscation: u32,
     next_id: u32,
     cache: VecDeque<((u32, u32), MethodAnalysis, usize)>,
     cache_bytes: usize,
@@ -54,6 +60,9 @@ impl Default for Session {
     fn default() -> Self {
         Self {
             assemblies: BTreeMap::new(),
+            derived: BTreeMap::new(),
+            deobfuscation: None,
+            next_deobfuscation: 0,
             next_id: 1,
             cache: VecDeque::new(),
             cache_bytes: 0,
@@ -110,18 +119,22 @@ impl Session {
         self.check_input_budget(&bytes)?;
         let mut assembly = Assembly::load(bytes)?;
         assembly.info.reference_assembly |= reference_only;
-        if !expected.matches(&assembly.info.identity) {
+        if !expected.binds_to(&assembly.info.identity) {
             return Ok(None);
         }
         self.insert_assembly(assembly).map(Some)
     }
     fn insert_assembly(&mut self, a: Assembly) -> Result<Loaded> {
         for (id, existing) in &self.assemblies {
+            if self.derived.contains_key(id) {
+                continue;
+            }
             if existing.info.identity.matches(&a.info.identity) {
                 if existing.bytes == a.bytes {
                     return Ok(Loaded {
                         id: *id,
                         info: existing.info.clone(),
+                        derived_from: None,
                     });
                 }
                 return Err(Error::metadata(
@@ -148,7 +161,11 @@ impl Session {
         let info = a.info.clone();
         self.assemblies.insert(id, a);
         self.bump_revision();
-        Ok(Loaded { id, info })
+        Ok(Loaded {
+            id,
+            info,
+            derived_from: None,
+        })
     }
     pub fn assembly(&self, id: u32) -> Result<&Assembly> {
         self.assemblies
@@ -225,7 +242,16 @@ impl Session {
     }
     pub fn references(&self, id: u32) -> Result<Value> {
         let a = self.assembly(id)?;
-        Ok(json!(a.references.iter().map(|r|json!({"token":r.token,"identity":r.identity,"resolved_id":self.assemblies.iter().find(|(_,a)|r.identity.matches(&a.info.identity)).map(|(id,_)|id),"status":if self.assemblies.values().any(|a|r.identity.matches(&a.info.identity)){"resolved"}else{"unresolved"}})).collect::<Vec<_>>()))
+        Ok(json!(a.references.iter().map(|r| {
+            // Exact matches win over framework unification (2.0/3.5 → 4.0).
+            let resolved = self.canonical().find(|(_,a)|r.identity.matches(&a.info.identity)).or_else(|| self.canonical().find(|(_,a)|r.identity.binds_to(&a.info.identity))).map(|(id,_)|id);
+            json!({"token":r.token,"identity":r.identity,"resolved_id":resolved,"status":if resolved.is_some(){"resolved"}else{"unresolved"}})
+        }).collect::<Vec<_>>()))
+    }
+    fn canonical(&self) -> impl Iterator<Item = (&u32, &Assembly)> {
+        self.assemblies
+            .iter()
+            .filter(|(id, _)| !self.derived.contains_key(id))
     }
     pub fn xrefs_page(&self, id: u32, token: u32, start: usize, count: usize) -> Result<Value> {
         let a = self.assembly(id)?;
@@ -278,6 +304,34 @@ impl Session {
                 json!({"declaration":source.text,"references":source.references,"partial":source.partial,"metadata":self.metadata(id,token)?}),
             );
         }
+        if token >> 24 == 0x70 {
+            // A literal on its own says little; list the methods that load it.
+            let usages = self.string_usages(id, token)?;
+            let mut text = a.declaration(token)?;
+            let mut references = Vec::new();
+            text.push_str(&format!(
+                "\n\n// Used by {} method{}:\n",
+                usages.len(),
+                if usages.len() == 1 { "" } else { "s" }
+            ));
+            for (method, name) in &usages {
+                text.push_str("// ");
+                let start = text.encode_utf16().count();
+                text.push_str(name);
+                references.push(crate::emit::SourceReference {
+                    start,
+                    end: text.encode_utf16().count(),
+                    token: *method,
+                });
+                text.push('\n');
+            }
+            if usages.is_empty() {
+                text.push_str("// No ldstr site found in this assembly.\n");
+            }
+            return Ok(
+                json!({"declaration":text,"references":references,"metadata":self.metadata(id,token)?}),
+            );
+        }
         let text = a.declaration(token)?;
         Ok(json!({"declaration":text,"metadata":self.metadata(id,token)?}))
     }
@@ -294,7 +348,8 @@ impl Session {
         let source = self.assemblies.get(&id)?;
         let rid = (token & 0xffffff).checked_sub(1)? as usize;
         match token >> 24 {
-            2 | 4 | 6 => {
+            // Properties and events open their member view like fields and methods.
+            2 | 4 | 6 | 20 | 23 => {
                 source.validate_token(token).ok()?;
                 Some((id, token))
             }
@@ -343,9 +398,12 @@ impl Session {
                         .iter()
                         .find(|r| r.token == scope)?
                         .identity;
-                    self.assemblies
-                        .iter()
+                    self.canonical()
                         .find(|(_, a)| identity.matches(&a.info.identity))
+                        .or_else(|| {
+                            self.canonical()
+                                .find(|(_, a)| identity.binds_to(&a.info.identity))
+                        })
                         .map(|(i, _)| *i)?
                 } else if scope >> 24 == 0 {
                     id
@@ -541,6 +599,7 @@ impl Session {
     }
     pub fn close(&mut self, id: u32) {
         self.assemblies.remove(&id);
+        self.derived.remove(&id);
         self.edits.retain(|(a, _), _| *a != id);
         self.views.borrow_mut().remove(&id);
         self.bump_edit_revision();
@@ -549,6 +608,7 @@ impl Session {
     }
     pub fn dispose(&mut self) {
         self.assemblies.clear();
+        self.derived.clear();
         self.cache.clear();
         self.cache_bytes = 0;
         self.edits.clear();
@@ -556,6 +616,7 @@ impl Session {
         self.bump_edit_revision();
     }
     fn bump_revision(&mut self) {
+        self.deobfuscation = None;
         self.revision = self.revision.wrapping_add(1);
         self.cache.clear();
         self.cache_bytes = 0;
@@ -581,6 +642,154 @@ impl Session {
             ));
         }
         Ok(())
+    }
+    /// The methods whose CIL loads this user string (`ldstr`), so a literal can be
+    /// traced back to where it is used. Reads decoded instructions only.
+    pub fn string_usages(&self, id: u32, token: u32) -> Result<Vec<(u32, String)>> {
+        let a = self.assembly(id)?;
+        if token >> 24 != 0x70 {
+            return Err(Error::metadata("Expected a user-string token"));
+        }
+        let mut found = Vec::new();
+        for index in 0..a.metadata().method_defs.len() {
+            if found.len() >= 500 {
+                break;
+            }
+            let method = 0x0600_0001 + index as u32;
+            let Ok(Some(body)) = a.body(method) else {
+                continue;
+            };
+            if body
+                .instructions
+                .iter()
+                .any(|i| i.opcode == 0x72 && i.token() == Some(token))
+            {
+                found.push((method, a.resolve(method)));
+            }
+        }
+        Ok(found)
+    }
+    /// Every method's call edges, callers, strings and role tags. A deobfuscated
+    /// copy also reports the original (obfuscated) name at each stable token.
+    pub fn function_map(&self, id: u32) -> Result<crate::function_map::FunctionMap> {
+        let a = self.assembly(id)?;
+        let original = self.derived.get(&id).and_then(|o| self.assemblies.get(o));
+        crate::function_map::build(a, original)
+    }
+    pub fn deobfuscate_begin(
+        &mut self,
+        assembly: u32,
+        options: crate::deobfuscate::Options,
+    ) -> Result<crate::deobfuscate::Progress> {
+        self.deobfuscation = None;
+        if self.edits.keys().any(|(id, _)| *id == assembly) {
+            return Err(crate::edit::unsupported(
+                "Save/reopen or discard pending method edits before deobfuscation",
+            ));
+        }
+        self.next_deobfuscation = self
+            .next_deobfuscation
+            .checked_add(1)
+            .ok_or_else(|| Error::limit("Deobfuscation ID space exhausted"))?;
+        let job = crate::deobfuscate::Job::new(
+            self.next_deobfuscation,
+            assembly,
+            self.revision,
+            self.assembly(assembly)?,
+            options,
+        )?;
+        let progress = job.progress();
+        self.deobfuscation = Some(job);
+        Ok(progress)
+    }
+    fn take_deobfuscation(&mut self, id: u32) -> Result<crate::deobfuscate::Job> {
+        // A stale request must not cancel a newer job.
+        if !self
+            .deobfuscation
+            .as_ref()
+            .is_some_and(|j| j.id == id && j.revision == self.revision)
+        {
+            return Err(crate::deobfuscate::cancelled());
+        }
+        self.deobfuscation
+            .take()
+            .ok_or_else(crate::deobfuscate::cancelled)
+    }
+    pub fn deobfuscate_step(&mut self, id: u32) -> Result<crate::deobfuscate::Progress> {
+        let mut job = self.take_deobfuscation(id)?;
+        let progress = job.step(self.assembly(job.assembly)?)?;
+        self.deobfuscation = Some(job);
+        Ok(progress)
+    }
+    pub fn deobfuscate_finish(&mut self, id: u32) -> Result<crate::deobfuscate::Report> {
+        let mut job = self.take_deobfuscation(id)?;
+        let report = job.finish(self.assembly(job.assembly)?)?;
+        self.deobfuscation = Some(job);
+        Ok(report)
+    }
+    pub fn deobfuscate_cancel(&mut self, id: u32) {
+        if self
+            .deobfuscation
+            .as_ref()
+            .is_some_and(|j| id == 0 || j.id == id)
+        {
+            self.deobfuscation = None;
+        }
+    }
+    pub fn deobfuscate_download(&self, id: u32) -> Result<Vec<u8>> {
+        self.deobfuscation
+            .as_ref()
+            .filter(|j| j.id == id && j.revision == self.revision)
+            .and_then(|j| j.output.clone())
+            .ok_or_else(crate::deobfuscate::cancelled)
+    }
+    pub fn deobfuscate_open(&mut self, id: u32) -> Result<Loaded> {
+        let mut job = self.take_deobfuscation(id)?;
+        if let Some(id) = job.opened {
+            let loaded = Loaded {
+                id,
+                info: self.assembly(id)?.info.clone(),
+                derived_from: Some(job.assembly),
+            };
+            self.deobfuscation = Some(job);
+            return Ok(loaded);
+        }
+        let bytes = job.output.as_ref().ok_or_else(|| {
+            crate::edit::unsupported("Finish and validate deobfuscation before opening a copy")
+        })?;
+        // Copies are distinct even for a no-op result; charge their retained bytes.
+        if self.assemblies.len() >= 64
+            || self
+                .assemblies
+                .values()
+                .map(|a| a.bytes.len())
+                .sum::<usize>()
+                + bytes.len()
+                > 128 * 1024 * 1024
+        {
+            return Err(Error::limit(
+                "Opening the analysis copy would exceed workspace limits",
+            ));
+        }
+        let mut a = Assembly::load(bytes.clone())?;
+        a.info.diagnostics.push(format!("Derived analysis copy of workspace assembly {}. Its original identity is retained; this copy is excluded from dependency resolution.",job.assembly));
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or_else(|| Error::limit("Assembly ID space exhausted"))?;
+        let loaded = Loaded {
+            id,
+            info: a.info.clone(),
+            derived_from: Some(job.assembly),
+        };
+        self.assemblies.insert(id, a);
+        self.derived.insert(id, job.assembly);
+        self.bump_revision();
+        job.revision = self.revision;
+        job.opened = Some(id);
+        self.deobfuscation = Some(job);
+        Ok(loaded)
     }
     pub fn open_edit(&self, id: u32, token: u32) -> Result<crate::edit::EditPreview> {
         let externals = self.externals(id);
@@ -620,7 +829,7 @@ impl Session {
         let mut types: BTreeMap<u32, std::collections::HashMap<String, u32>> = BTreeMap::new();
         let mut members: BTreeMap<u32, std::collections::HashMap<(u32, String), Vec<u32>>> =
             BTreeMap::new();
-        for (target_id, target) in &self.assemblies {
+        for (target_id, target) in self.canonical() {
             if *target_id == id {
                 continue;
             }
@@ -670,9 +879,12 @@ impl Session {
                 .iter()
                 .find(|r| r.token == scope)?
                 .identity;
-            self.assemblies
-                .iter()
+            self.canonical()
                 .find(|(i, a)| **i != id && identity.matches(&a.info.identity))
+                .or_else(|| {
+                    self.canonical()
+                        .find(|(i, a)| **i != id && identity.binds_to(&a.info.identity))
+                })
                 .map(|(i, _)| *i)
         };
         let mut resolved = std::collections::HashMap::new();
@@ -816,10 +1028,25 @@ impl Session {
         self.bump_edit_revision();
         self.open_edit(id, token)
     }
-    /// Assembly ids and file bytes the C# compiler references: every loaded assembly
-    /// (read as metadata by the compiler, never run).
+    /// All workspace ids, including derived views.
     pub fn ids(&self) -> Vec<u32> {
         self.assemblies.keys().copied().collect()
+    }
+    /// Compiler references use canonical assemblies and, when selected, the edited
+    /// snapshot instead of its same-identity original. No duplicate definitions.
+    pub fn compiler_ids(&self, selected: Option<u32>) -> Result<Vec<u32>> {
+        let identity = selected
+            .map(|id| self.assembly(id).map(|a| &a.info.identity))
+            .transpose()?;
+        let mut ids: Vec<u32> = self
+            .canonical()
+            .filter(|(_, a)| !identity.is_some_and(|identity| identity.matches(&a.info.identity)))
+            .map(|(id, _)| *id)
+            .collect();
+        if let Some(id) = selected {
+            ids.push(id);
+        }
+        Ok(ids)
     }
     /// The C# skeleton for editing a method, with the line the method starts on.
     pub fn csharp_source(&self, id: u32, token: u32) -> Result<Value> {
@@ -979,7 +1206,7 @@ impl Session {
     pub fn edits_info(&self, id: u32) -> Result<Value> {
         let a = self.assembly(id)?;
         Ok(
-            json!({"revision":self.revision,"edit_revision":self.edit_revision,"methods":self.edits.iter().filter(|((assembly,_),_)|*assembly==id).map(|((_,token),edit)|json!({"token":token,"name":a.resolve(*token),"code_size":edit.code.len()})).collect::<Vec<_>>(),"writer_error":crate::pe_write::capability(a).err()}),
+            json!({"revision":self.revision,"edit_revision":self.edit_revision,"methods":self.edits.iter().filter(|((assembly,_),_)|*assembly==id).map(|((_,token),edit)|json!({"token":token,"name":a.resolve(*token),"code_size":edit.code.len()})).collect::<Vec<_>>(),"writer_error":crate::pe_write::capability(a).err(),"resource_writer_error":crate::pe_write::literal_capability(a).err()}),
         )
     }
     pub fn export_modified(&self, id: u32, revision: u32) -> Result<Vec<u8>> {

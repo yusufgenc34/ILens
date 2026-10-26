@@ -117,7 +117,7 @@ fn same_type(
         (Type::Primitive(l), Type::Primitive(r)) => l == r,
         (Type::Named(l), Type::Named(r)) | (Type::ValueType(l), Type::ValueType(r)) => {
             match (named_identity(a, *l), named_identity(b, *r)) {
-                (Some((li, ln)), Some((ri, rn))) => li.matches(&ri) && ln == rn,
+                (Some((li, ln)), Some((ri, rn))) => li.unifies(&ri) && ln == rn,
                 _ => false,
             }
         }

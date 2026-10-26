@@ -36,6 +36,50 @@ impl Identity {
                 .public_key_token
                 .eq_ignore_ascii_case(&other.public_key_token)
     }
+    /// Whether a reference with this identity binds to `definition`. Besides an exact
+    /// match, CLR 4 unifies .NET Framework 2.0–3.5 assembly references to their 4.0
+    /// versions (same name, key and neutral culture); 4.x references stay exact. Only Microsoft framework keys
+    /// and framework names participate; everything else must match exactly.
+    pub fn binds_to(&self, definition: &Self) -> bool {
+        if self.matches(definition) {
+            return true;
+        }
+        let major = |v: &str| v.split('.').next().and_then(|n| n.parse::<u32>().ok());
+        self.framework()
+            && definition.framework()
+            && self.name.eq_ignore_ascii_case(&definition.name)
+            && self
+                .public_key_token
+                .eq_ignore_ascii_case(&definition.public_key_token)
+            && matches!(major(&self.version), Some(2 | 3))
+            && major(&definition.version) == Some(4)
+    }
+    /// Symmetric form for comparing two references that may name different
+    /// unified framework versions.
+    pub fn unifies(&self, other: &Self) -> bool {
+        self.binds_to(other) || other.binds_to(self)
+    }
+    fn framework(&self) -> bool {
+        let name = self.name.to_ascii_lowercase();
+        self.culture.eq_ignore_ascii_case("neutral")
+            && matches!(
+                self.public_key_token.to_ascii_lowercase().as_str(),
+                "b77a5c561934e089" | "b03f5f7f11d50a3a" | "31bf3856ad364e35"
+            )
+            && (name == "mscorlib"
+                || name == "system"
+                || name.starts_with("system.")
+                || matches!(
+                    name.as_str(),
+                    "microsoft.visualbasic"
+                        | "microsoft.csharp"
+                        | "microsoft.jscript"
+                        | "windowsbase"
+                        | "presentationcore"
+                        | "presentationframework"
+                        | "accessibility"
+                ))
+    }
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct AssemblyInfo {
@@ -704,6 +748,11 @@ impl Assembly {
         }
         let m = self.metadata();
         match token >> 24 {
+            1 | 2 if links() => {
+                // Navigation markers wrap the whole (possibly nested) name once.
+                let plain = without_links(|| self.type_name_depth(token, depth))?;
+                Ok(format!("\0{token:08X}\u{1}{plain}\u{2}"))
+            }
             1 => {
                 let t = row(&m.type_refs, token)?;
                 let name = self.string(t.type_name)?;
@@ -839,7 +888,7 @@ impl Assembly {
     pub fn resolve_full(&self, token: u32) -> String {
         let saved = self.short_names.take();
         let raw = RAW_IDENTIFIERS.with(|raw| raw.replace(false));
-        let name = self.resolve(token);
+        let name = without_links(|| self.resolve(token));
         self.short_names.replace(saved);
         RAW_IDENTIFIERS.with(|cell| cell.set(raw));
         name
@@ -854,6 +903,7 @@ impl Assembly {
         }
         if let Some(name) = self.names.get(&token)
             && self.short_names.borrow().is_none()
+            && !links()
         {
             return Ok(name.clone());
         }
@@ -1522,6 +1572,37 @@ thread_local! {
     // Display views show metadata names as dnSpy does (`<Value>k__BackingField`);
     // exported sources keep escaped, compilable identifiers.
     static RAW_IDENTIFIERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Declaration views wrap type names in `\0TOKEN\u{1}name\u{2}` navigation markers.
+    static LINKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn links() -> bool {
+    LINKS.with(std::cell::Cell::get)
+}
+pub fn links_enabled() -> bool {
+    links()
+}
+fn set_links<T>(on: bool, f: impl FnOnce() -> T) -> T {
+    let saved = LINKS.with(|l| l.replace(on));
+    let value = f();
+    LINKS.with(|l| l.set(saved));
+    value
+}
+/// Renders with type names wrapped in navigation markers. Callers compare the
+/// stripped text against a plain rendering and only keep links where they align.
+pub fn with_links<T>(f: impl FnOnce() -> T) -> T {
+    set_links(true, f)
+}
+/// Plain rendering inside a marked one, for names that are compared or edited.
+pub fn without_links<T>(f: impl FnOnce() -> T) -> T {
+    set_links(false, f)
+}
+/// Wraps `text` in a navigation marker for `token` while links are enabled.
+pub fn link(token: u32, text: &str) -> String {
+    if links() && token & 0xff_ffff != 0 {
+        format!("\0{token:08X}\u{1}{text}\u{2}")
+    } else {
+        text.to_owned()
+    }
 }
 /// The C# operator symbol (or conversion kind) declared by an op_ special name.
 pub fn operator_symbol(name: &str) -> Option<&'static str> {
@@ -1655,5 +1736,46 @@ pub fn substitute(t: &Type, types: &[Type], methods: &[Type]) -> Type {
             args: args.iter().map(|t| substitute(t, types, methods)).collect(),
         },
         _ => t.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Identity;
+    fn id(name: &str, version: &str, token: &str) -> Identity {
+        Identity {
+            name: name.into(),
+            version: version.into(),
+            culture: "neutral".into(),
+            public_key_token: token.into(),
+        }
+    }
+    #[test]
+    fn framework_references_unify_to_4_0_like_clr4() {
+        let ecma = "b77a5c561934e089";
+        let v4 = id("mscorlib", "4.0.0.0", ecma);
+        assert!(id("mscorlib", "2.0.0.0", ecma).binds_to(&v4));
+        assert!(id("System.Windows.Forms", "2.0.0.0", ecma).binds_to(&id(
+            "System.Windows.Forms",
+            "4.0.0.0",
+            ecma
+        )));
+        assert!(id("System.Core", "3.5.0.0", ecma).unifies(&id("System.Core", "4.0.0.0", ecma)));
+        // Never downgrades, never crosses names/keys, and 4.x stays exact
+        // (.NET Core System.Runtime 4.2 must not bind to a Framework facade).
+        assert!(!v4.binds_to(&id("mscorlib", "2.0.0.0", ecma)));
+        assert!(!id("mscorlib", "2.0.0.0", "0000000000000000").binds_to(&id(
+            "mscorlib",
+            "4.0.0.0",
+            "0000000000000000"
+        )));
+        assert!(!id("Company.Lib", "2.0.0.0", ecma).binds_to(&id("Company.Lib", "4.0.0.0", ecma)));
+        let runtime = "b03f5f7f11d50a3a";
+        assert!(!id("System.Runtime", "4.2.2.0", runtime).binds_to(&id(
+            "System.Runtime",
+            "4.0.0.0",
+            runtime
+        )));
+        assert!(!id("System", "2.0.0.0", ecma).binds_to(&id("System", "5.0.0.0", ecma)));
     }
 }

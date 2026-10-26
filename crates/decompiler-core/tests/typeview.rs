@@ -66,3 +66,40 @@ fn explorer_labels_use_short_names_but_full_names_stay_qualified() {
     assert_eq!(fast.display_name, "Fast : Mode");
     assert_eq!(fast.full_name, "ILens.Samples.Mode.Fast");
 }
+#[test]
+fn declarations_attributes_and_member_names_navigate() {
+    let a = Assembly::load(PAT.to_vec()).unwrap();
+    let calculator = token(&a, "Calculator");
+    let view = type_source(&a, calculator, &|t| local_accessor(&a, t)).unwrap();
+    let units: Vec<u16> = view.text.encode_utf16().collect();
+    let linked: Vec<(String, u32)> = view
+        .references
+        .iter()
+        .map(|r| (String::from_utf16_lossy(&units[r.start..r.end]), r.token))
+        .collect();
+    let has = |name: &str, table: u32| linked.iter().any(|(n, t)| n == name && t >> 24 == table);
+    // Header: the type itself and its interface; the attribute type; member types.
+    assert!(
+        linked.contains(&("Calculator".into(), calculator)),
+        "{linked:?}"
+    );
+    assert!(has("ICalculator", 2), "{linked:?}");
+    assert!(has("Example", 2), "{linked:?}");
+    assert!(has("EventHandler", 1), "{linked:?}");
+    // Declared members link to their own definitions.
+    assert!(
+        has("Value", 0x17) && has("Changed", 0x14) && has("Add", 6),
+        "{linked:?}"
+    );
+    // Ranges never overlap and the visible text is unchanged by linking.
+    let mut sorted = view.references.clone();
+    sorted.sort_by_key(|r| r.start);
+    assert!(sorted.windows(2).all(|w| w[0].end <= w[1].start));
+    assert!(!view.text.contains('\0') && !view.text.contains('\u{1}'));
+    let plain = decompiler_core::assembly::without_links(|| {
+        type_source(&a, calculator, &|t| local_accessor(&a, t))
+            .unwrap()
+            .text
+    });
+    assert_eq!(view.text, plain);
+}

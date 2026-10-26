@@ -5,7 +5,7 @@ import {crc32} from '../lib/zip'
 export interface PackageEntry {name:string; dataLimit:number; offset:number; compressed:number; size:number; method:number; crc:number; flags:number}
 const maxPackage = 32 * 1024 * 1024
 const maxEntry = 8 * 1024 * 1024
-export async function readBounded(stream: ReadableStream<Uint8Array>, limit: number, signal: AbortSignal): Promise<Uint8Array<ArrayBuffer>> {
+export async function readBounded(stream: ReadableStream<Uint8Array>, limit: number, signal: AbortSignal, onChunk?: (size: number) => void): Promise<Uint8Array<ArrayBuffer>> {
   const reader = stream.getReader(), chunks: Uint8Array[] = []; let size = 0
   try {
     for (;;) {
@@ -16,6 +16,7 @@ export async function readBounded(stream: ReadableStream<Uint8Array>, limit: num
       size += value.length
       if (size > limit) throw new Error('Dependency package exceeds the download or extraction limit.')
       chunks.push(value)
+      onChunk?.(size)
     }
   } catch (error) {await reader.cancel().catch(() => {}); throw error}
   finally {reader.releaseLock()}

@@ -6,9 +6,9 @@ Use the versions in `.nvmrc` and `rust-toolchain.toml`. Start with the [README](
 
 Keep parsing, analysis, transformations, and rendering separate. The Rust core accepts byte buffers and must remain compatible with `wasm32-unknown-unknown`. Browser analysis belongs in the worker; the Rari server only provides the application shell and assets.
 
-Never execute analyzed assemblies or send their contents to a server. A malformed input should produce a structured error. Unsupported C# reconstruction should preserve the IL view and explain the limitation.
+Never load analyzed assemblies into a CLR/native runtime or send their contents to a server. Interpretation is limited to the documented pure-CIL value model and closed scalar expressions in recognized resource-string profiles; neither may gain a host-call, reflection or initializer execution fallback. See [deobfuscation](docs/deobfuscation.md). A malformed input should produce a structured error. Unsupported C# reconstruction should preserve the IL view and explain the limitation.
 
-For compiler changes, add a small C# fixture or a focused regression case that demonstrates the behavior. Use source you can redistribute. Fixture assemblies are compiled for inspection, never executed by the test suite. Regenerate the existing fixtures with `npm run fixtures` when their source changes.
+For compiler changes, add a small C# fixture or a focused regression case that demonstrates the behavior. Use source you can redistribute. Fixture assemblies are compiled for inspection and static verification, never invoked through a runtime by the test suite. Interpreter tests evaluate only the documented bounded model. Negative I/O and initializer fixtures must stay inert. Synthetic obfuscation patterns are algorithm tests, not evidence of support for a commercial tool or protection version. Regenerate the existing fixtures with `npm run fixtures` when their source changes.
 
 For interface changes, verify the production build in the browser and update screenshots when the visible behavior changes. Match the existing neutral workspace appearance; editor colors are controlled by settings.
 

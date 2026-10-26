@@ -2,6 +2,14 @@ use goblin::pe::{PE, debug::IMAGE_DEBUG_TYPE_REPRO};
 
 const FIXTURES: &[(&str, &[u8])] = &[
     (
+        "Resource strings",
+        include_bytes!("../../../samples/fixtures/ILens.ResourceStrings.dll"),
+    ),
+    (
+        "Deobfuscation",
+        include_bytes!("../../../samples/fixtures/ILens.Deobfuscation.dll"),
+    ),
+    (
         "Automatic EXE",
         include_bytes!("../../../samples/fixtures/ILens.AutomaticDependencies.exe"),
     ),
@@ -48,6 +56,10 @@ const FIXTURES: &[(&str, &[u8])] = &[
     (
         "WorkspaceDependency",
         include_bytes!("../../../samples/fixtures/ILens.WorkspaceDependency.dll"),
+    ),
+    (
+        "Proxies",
+        include_bytes!("../../../samples/fixtures/ILens.Proxies.dll"),
     ),
 ];
 

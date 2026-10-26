@@ -13,7 +13,7 @@ export const tourSteps: TourStep[] = [
   {title: 'Welcome to ILens', body: 'A quick tour of the workspace, using the example assembly. It takes about a minute; press Esc to leave at any time.'},
   {target: '.explorer-pane', title: 'Assembly Explorer', body: 'Assemblies, namespaces, types and members, as in dnSpy. Right-click an item for its actions: Edit Method (C#), Edit IL, Add Method, Analyze and more.'},
   {target: '[role=tablist][aria-label="Code view"]', title: 'Views', body: 'Switch the selected item between reconstructed C#, original IL, its metadata rows and the raw bytes.'},
-  {target: '.viewer-container', title: 'Code', body: 'Ctrl/⌘-click a name to go to its definition. Ctrl/⌘ F searches the code, and each opened item gets its own tab above.'},
+  {target: '.viewer-container', title: 'Code', body: 'Click an underlined name to go to its definition. Ctrl/⌘ F searches the code, and each opened item gets its own tab above.'},
   {target: '.inspector-pane', title: 'Inspector', body: 'Token, target framework, protection scan and the references of the selected item. Missing dependencies can be added here.'},
   {target: '[aria-label="Main toolbar"]', title: 'Toolbar', body: 'Back and forward, open, save the modified module, search everything (Ctrl/⌘ K), and edit the selected method in IL or C#.'},
   {target: '[aria-label="Application menu"]', title: 'Menus', body: 'File has Save Module and Export to Project, View and Window open the hex editor, metadata tables, search and analyzer. Help restarts this tour.'},

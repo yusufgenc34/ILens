@@ -56,6 +56,17 @@ describe('framework resolution policy',()=>{
     for(const invalid of [{...identity,name:'Company.Private'},{...identity,name:'https://example.com/dll'},{...identity,public_key_token:''},{...identity,culture:'de'}]) expect(frameworkPackage(info(),invalid)).toBeNull()
     expect(frameworkPackage(info('.NETCoreApp,Version=v999.0'),identity)).toBeNull()
   })
+  it('handles framework profiles, unlisted 4.x versions and assemblies without TargetFramework',()=>{
+    const mscorlib={...identity,name:'mscorlib',version:'4.0.0.0',public_key_token:'b77a5c561934e089'}
+    // Client profile apps still reference full-framework assemblies (System.Web.Services).
+    expect(frameworkPackage(info('.NETFramework,Version=v4.0,Profile=Client'),mscorlib)).toEqual({id:'microsoft.netframework.referenceassemblies.net40',version:'1.0.3',directory:'build/.NETFramework/v4.0/'})
+    expect(frameworkPackage(info('.NETFramework,Version=v4.0.3'),mscorlib)?.id).toBe('microsoft.netframework.referenceassemblies.net48')
+    const undeclared=(runtime:string)=>({identity,runtime,target_framework:{moniker:null,status:'not_declared'}} as unknown as AssemblyInfo)
+    expect(frameworkPackage(undeclared('v4.0.30319'),mscorlib)?.directory).toBe('build/.NETFramework/v4.8/')
+    expect(frameworkPackage(undeclared('v2.0.50727'),{...mscorlib,version:'2.0.0.0'})?.directory).toBe('build/.NETFramework/v3.5/')
+    expect(frameworkPackage(undeclared('v4.0.30319'),{...identity,name:'Company.Private'})).toBeNull()
+    expect(frameworkPackage(info('.NETFramework,Version=v4.0,Profile=../x'),mscorlib)).toBeNull()
+  })
   it('loads exact identities, reuses bounded package cache and clears it on disposal',async()=>{
     const fetcher=vi.fn(async()=>new Response(stored())),resolve=createFrameworkResolver(fetcher as typeof fetch),load=vi.fn((_bytes:Uint8Array,_identity:Identity)=>({id:2,info:info()} as Loaded))
     const result=await resolve(info(),identity,signal(),load,vi.fn())

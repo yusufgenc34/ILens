@@ -12,10 +12,23 @@ copyFileSync('samples/bin/ILens.Example.dll', 'samples/fixtures/ILens.Example.dl
 copyFileSync('samples/fixtures/ILens.Example.dll', 'public/samples/ILens.Example.dll')
 
 // Additional write-verification fixtures; compiled for inspection, never executed.
+const deobfuscation = spawnSync('dotnet', ['build', 'samples/Deobfuscation', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
+if (deobfuscation.status !== 0) process.exit(deobfuscation.status ?? 1)
+copyFileSync('samples/bin/ILens.Deobfuscation.dll', 'samples/fixtures/ILens.Deobfuscation.dll')
+
+const proxies = spawnSync('dotnet', ['build', 'samples/Proxies', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
+if (proxies.status !== 0) process.exit(proxies.status ?? 1)
+copyFileSync('samples/bin/ILens.Proxies.dll', 'samples/fixtures/ILens.Proxies.dll')
+
 const editing = spawnSync('dotnet', ['build', 'samples/Editing', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
 if (editing.status !== 0) process.exit(editing.status ?? 1)
 copyFileSync('samples/bin/ILens.Editing.dll', 'samples/fixtures/ILens.Editing.dll')
 
+
+// Fixed-offset string rewriting with EH and compiler-generated Field-RVA storage.
+const resourceStrings = spawnSync('dotnet', ['build', 'samples/ResourceStrings', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
+if (resourceStrings.status !== 0) process.exit(resourceStrings.status ?? 1)
+copyFileSync('samples/bin/ILens.ResourceStrings.dll', 'samples/fixtures/ILens.ResourceStrings.dll')
 
 // C# language constructs for reconstruction tests; compiled only, never executed.
 const language = spawnSync('dotnet', ['build', 'samples/Language', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})

@@ -4,7 +4,20 @@ export interface Identity { name: string; version: string; culture: string; publ
 export interface FrameworkInfo { display_name: string; moniker: string | null; version: string | null; source: string | null; status: 'declared' | 'not_declared' | 'invalid' | 'ambiguous' | 'incomplete' }
 export interface ObfuscationInfo { status: 'markers_found' | 'possible' | 'no_markers' | 'inconclusive'; scan_complete: boolean; evidence: {kind: string; tool: string | null; confidence: 'marker' | 'heuristic'; detail: string; token: number | null}[] }
 export interface AssemblyInfo { module_name?: string; ready_to_run?: boolean; reference_assembly?: boolean; identity: Identity; runtime: string; target_framework: FrameworkInfo; obfuscation: ObfuscationInfo; size: number; machine: string; type_count: number; method_count: number; diagnostics: string[] }
-export interface Loaded { id: number; info: AssemblyInfo }
+export interface Loaded { id: number; info: AssemblyInfo; derived_from?: number }
+export type FunctionTag = 'entry'|'constructor'|'static-constructor'|'accessor'|'event-handler'|'pinvoke'|'abstract'|'virtual'|'static'|'unreferenced'
+export interface MappedFunction {token:number; name:string; owner:number; owner_name:string; signature:string; tags:FunctionTag[]; size:number; instructions:number; calls:number[]; called_by:number[]; strings:string[]; string_count:number; original_name?:string; error?:string}
+export interface TypeLink {token:number; name:string}
+export interface MappedType {token:number; name:string; full_name:string; namespace:string; kind:string; members:number; base?:TypeLink; interfaces:TypeLink[]; uses:TypeLink[]; nested_in?:number}
+export interface FunctionMap {functions:MappedFunction[]; types:MappedType[]; externals:Record<string,string>; edges:number; truncated:boolean; entry_point:number}
+export interface DeobfuscationOptions {constants:boolean; branches:boolean; strings:boolean; resource_strings:boolean; rename:boolean; proxies:boolean}
+export interface DeobfuscationCounts {constants:number; branches:number; strings:number; unreachable_instructions:number; renamed:number; proxies:number}
+export interface DeobfuscationProgress {job:number; completed:number; total:number; changed_methods:number; phase:string; done:boolean}
+export interface DeobfuscationReport {
+  outcome:'pending'|'no_changes'|'changed'|'partial'; options:DeobfuscationOptions; changed_methods:number;
+  counts:DeobfuscationCounts; skipped_methods:number; unresolved_calls:number; evaluation_steps:number; notices:string[];
+  methods:{token:number; status:'unchanged'|'changed'|'skipped'; counts:DeobfuscationCounts; reasons:string[]}[]
+}
 export interface TypeLink { token: number; name: string }
 export interface Declaration { token: number; parent: number; kind: string; name: string; display_name?: string; accessor_of?: number | null; namespace: string; full_name: string; flags: number; base?: TypeLink; interfaces?: TypeLink[] }
 export interface HeaderField { name: string; offset: number; size: number; value: string; info: string }
@@ -27,6 +40,13 @@ export interface TypeView { declaration: string; metadata: Record<string, unknow
 export interface Overview { info: AssemblyInfo; pe: Record<string, unknown>; streams: {name: string; offset: number; size: number}[]; tables: {name: string; id: number; rows: number}[]; references: Reference[]; resources: {token: number; name: string; embedded: boolean; offset: number; flags: number}[] }
 export interface ResourcePreview {size: number; kind: string; text: string | null; hex: string; entries: {index:number; name:string; kind:string; size:number; value:string | null}[]; diagnostic: string | null}
 export interface Operations {
+  functionMap:{input:{assembly:number}; output:FunctionMap}
+  deobfuscateBegin:{input:{assembly:number; options:DeobfuscationOptions}; output:DeobfuscationProgress}
+  deobfuscateStep:{input:{job:number}; output:DeobfuscationProgress}
+  deobfuscateFinish:{input:{job:number}; output:DeobfuscationReport}
+  deobfuscateCancel:{input:{job:number}; output:null}
+  deobfuscateDownload:{input:{job:number}; output:{buffer:ArrayBuffer}}
+  deobfuscateOpen:{input:{job:number}; output:Loaded}
   resolveFrameworkReference: {input:{assembly:number; token:number}; output:Loaded & {package: FrameworkPackage}}
   getResourcePreview: {input: {assembly:number; token:number; entry:number}; output:ResourcePreview}
   getResourceBytes: {input: {assembly:number; token:number; entry:number}; output:{buffer:ArrayBuffer}}
@@ -40,7 +60,7 @@ export interface Operations {
   applyMethodEdit: {input: {assembly: number; token: number; revision: number; instructions: EditableInstruction[]; locals?: string[]; regions?: EditRegion[]}; output: EditPreview}
   discardMethodEdit: {input: {assembly: number; token: number; revision: number}; output: EditPreview}
   getEdits: {input: {assembly: number}; output: EditsInfo}
-  assemblyIds: {input: Record<string, never>; output: number[]}
+  assemblyIds: {input: {selected?:number}; output: number[]}
   assemblyBytes: {input: {assembly: number}; output: {buffer: ArrayBuffer}}
   csharpSource: {input: {assembly: number; token: number}; output: {method: string; before: string; after: string; line: number}}
   csharpApply: {input: {assembly: number; token: number; revision: number; compiled: ArrayBuffer}; output: {preview: EditPreview; reloaded: boolean; info: AssemblyInfo}}
@@ -78,7 +98,7 @@ export interface EditPreview {token: number; revision: number; instructions: Edi
 export interface NewMemberRequest {kind: 'field' | 'method'; name: string; type: string; access: 'public' | 'internal' | 'protected' | 'private'; static: boolean; parameters: {name: string; type: string}[]}
 /** One page of a metadata table; cells that index a table carry the token. */
 export interface TableRows {table: number; columns: string[]; total: number; start: number; rows: {row: number; token: number; cells: {text: string; token?: number}[]}[]}
-export interface EditsInfo {revision: number; edit_revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null}
+export interface EditsInfo {revision: number; edit_revision: number; methods: {token: number; name: string; code_size: number}[]; writer_error: Diagnostic | null; resource_writer_error?: Diagnostic | null}
 export type Operation = keyof Operations
 export type Request = { [K in Operation]: {id: number; op: K} & Operations[K]['input'] }[Operation]
 export type Response = { id: number; kind: 'success'; result: unknown } | {id: number; kind: 'error'; error: Diagnostic} | {id: number; kind: 'fatal'; error: Diagnostic} | {id: number; kind: 'progress'; message: string}

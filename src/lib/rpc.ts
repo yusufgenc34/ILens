@@ -21,7 +21,9 @@ export class DecompilerClient {
     worker.onmessage = ({data}) => {
       if (data.kind === 'fatal') {this.fail(data.error); return}
       const pending = this.pending.get(data.id)
-      if (data.kind === 'progress') {if (pending) this.onProgress?.(data.message); return}
+      // A progress message proves the worker is not stuck in synchronous WASM, so it
+      // renews the active watchdog (e.g. a long NuGet download that keeps streaming).
+      if (data.kind === 'progress') {if (data.id === this.active) this.arm(); if (pending) this.onProgress?.(data.message); return}
       if (pending) {
         this.pending.delete(data.id); pending.cleanup()
         if (data.kind === 'error') pending.reject(data.error)
@@ -60,11 +62,15 @@ export class DecompilerClient {
       this.active = id
       // Only execution time counts. Queued navigation and export steps do not
       // consume each other's deadline, and cancellation cannot disable isolation.
-      this.timer = setTimeout(() => this.fail({code: 'size_limit', message: 'Analysis exceeded 30 seconds. The worker was stopped; reopen your assemblies to continue.', detail: 'Hard watchdog terminated the WASM worker and released its memory.'}), 30_000)
+      this.arm()
       try {pending.send()}
       catch (error) {clearTimeout(this.timer); this.active = null; this.pending.delete(id); pending.cleanup(); pending.reject({code: 'worker_error', message: 'The operation could not be sent.', detail: String(error)}); continue}
       return
     }
+  }
+  private arm() {
+    clearTimeout(this.timer)
+    this.timer = setTimeout(() => this.fail({code: 'size_limit', message: 'Analysis exceeded 30 seconds. The worker was stopped; reopen your assemblies to continue.', detail: 'Hard watchdog terminated the WASM worker and released its memory.'}), 30_000)
   }
   private fail(error: Diagnostic) {this.terminate(error); this.onFatal?.(error)}
   terminate(error = cancelled()) {

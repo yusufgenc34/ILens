@@ -61,3 +61,11 @@ it('cancelling an active call cannot disable the hard watchdog', async () => {
   const pending = client.call('getTree', {assembly: 1}, {signal: controller.signal}); const rejected = expect(pending).rejects.toMatchObject({code: 'cancelled'})
   controller.abort(); await rejected; await vi.advanceTimersByTimeAsync(30_001); expect(worker.terminated).toBe(true)
 })
+it('progress from the active operation renews its watchdog; silence still terminates', async () => {
+  vi.useFakeTimers(); const worker = new FakeWorker(); const client = new DecompilerClient(worker)
+  const download = client.call('resolveFrameworkReference', {assembly: 1, token: 0x23000001})
+  for (let i = 0; i < 4; i++) {await vi.advanceTimersByTimeAsync(25_000); worker.respond({id: 1, kind: 'progress', message: `Downloading ${i}`} as never)}
+  expect(worker.terminated).toBe(false)
+  const rejected = expect(download).rejects.toMatchObject({code: 'size_limit'})
+  await vi.advanceTimersByTimeAsync(30_001); await rejected; expect(worker.terminated).toBe(true)
+})

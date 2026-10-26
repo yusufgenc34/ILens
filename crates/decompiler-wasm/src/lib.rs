@@ -138,6 +138,32 @@ impl Decompiler {
     pub fn close(&mut self, id: u32) {
         self.session.close(id);
     }
+    pub fn function_map(&self, id: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.function_map(id).map_err(error)?)
+    }
+    pub fn deobfuscate_begin(&mut self, id: u32, options: &str) -> Result<JsValue, JsValue> {
+        if options.len() > 1024 {
+            return Err(error(Error::limit("Deobfuscation options exceed 1 KiB")));
+        }
+        let options =
+            serde_json::from_str(options).map_err(|e| error(Error::metadata(e.to_string())))?;
+        js(&self.session.deobfuscate_begin(id, options).map_err(error)?)
+    }
+    pub fn deobfuscate_step(&mut self, id: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.deobfuscate_step(id).map_err(error)?)
+    }
+    pub fn deobfuscate_finish(&mut self, id: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.deobfuscate_finish(id).map_err(error)?)
+    }
+    pub fn deobfuscate_cancel(&mut self, id: u32) {
+        self.session.deobfuscate_cancel(id);
+    }
+    pub fn deobfuscate_download(&self, id: u32) -> Result<Vec<u8>, JsValue> {
+        self.session.deobfuscate_download(id).map_err(error)
+    }
+    pub fn deobfuscate_open(&mut self, id: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.deobfuscate_open(id).map_err(error)?)
+    }
     pub fn dispose(&mut self) {
         self.session.dispose();
     }
@@ -299,8 +325,8 @@ impl Decompiler {
             .map_err(error)?;
         Ok(bytes)
     }
-    pub fn assembly_ids(&self) -> Result<JsValue, JsValue> {
-        js(&self.session.ids())
+    pub fn assembly_ids(&self, selected: Option<u32>) -> Result<JsValue, JsValue> {
+        js(&self.session.compiler_ids(selected).map_err(error)?)
     }
     pub fn assembly_bytes(&self, id: u32) -> Result<Vec<u8>, JsValue> {
         Ok(self.session.assembly(id).map_err(error)?.bytes.clone())

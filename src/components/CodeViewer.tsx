@@ -32,14 +32,17 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
     const view = new EditorView({parent: host.current, state: EditorState.create({extensions: [
       EditorState.readOnly.of(true), EditorView.editable.of(false), drawSelection(), bracketMatching(),
       keymap.of([{key:'F12', run:view => {const reference = referenceAt(view.state.selection.main.head); if (!reference || !referenceNavigate.current) return false; referenceNavigate.current(reference.token); return true}}, ...searchKeymap, ...defaultKeymap]),
-      hoverTooltip((_view, position) => {const reference = referenceAt(position); if (!reference) return null; return {pos:reference.start, end:reference.end, create:() => {const dom = document.createElement('div'); dom.className = 'px-2 py-1 text-xs'; dom.textContent = `Go to definition · 0x${reference.token.toString(16).toUpperCase().padStart(8,'0')} · Ctrl/⌘-click or F12`; return {dom}}}}), search({top: true}), highlightSelectionMatches(),
+      hoverTooltip((_view, position) => {const reference = referenceAt(position); if (!reference) return null; return {pos:reference.start, end:reference.end, create:() => {const dom = document.createElement('div'); dom.className = 'px-2 py-1 text-xs'; dom.textContent = `Go to definition · 0x${reference.token.toString(16).toUpperCase().padStart(8,'0')} · click or F12`; return {dom}}}}), search({top: true}), highlightSelectionMatches(),
       options.of([]),
       EditorView.domEventHandlers({click(event, view) {
-        if (!navigate.current || (!event.ctrlKey && !event.metaKey)) return false
+        const modified = event.ctrlKey || event.metaKey
         const position = view.posAtCoords({x: event.clientX, y: event.clientY})
         if (position === null) return false
+        // References open on a plain click, as in dnSpy; dragging to select text or
+        // extending a selection with Shift never navigates.
         const reference = referenceAt(position)
-        if (reference && referenceNavigate.current) {referenceNavigate.current(reference.token); return true}
+        if (reference && referenceNavigate.current && !event.shiftKey && !event.altKey && (modified || view.state.selection.main.empty)) {referenceNavigate.current(reference.token); return true}
+        if (!navigate.current || !modified) return false
         const line = view.state.doc.lineAt(position)
         const match = [...line.text.matchAll(/0x[0-9a-fA-F]{8}/g)].find(m => position - line.from >= m.index! && position - line.from <= m.index! + m[0].length)
         if (!match) return false
@@ -95,7 +98,7 @@ export default function CodeViewer({text, language, theme, settings, onNavigate,
       language === 'C#' ? csharpLanguage : il,
       ...(settings.highlighting ? [syntaxHighlighting(highlighting)] : []),
       ...(settings.lineNumbers ? [lineNumbers(), highlightActiveLineGutter()] : []),
-      EditorView.decorations.of(Decoration.set((references ?? []).filter(r => r.start >= 0 && r.end > r.start && r.end <= (editor.current?.state.doc.length ?? 0)).map(r => Decoration.mark({class:'cursor-pointer underline decoration-dotted decoration-muted-foreground/40 underline-offset-2'}).range(r.start,r.end)), true)),
+      EditorView.decorations.of(Decoration.set((references ?? []).filter(r => r.start >= 0 && r.end > r.start && r.end <= (editor.current?.state.doc.length ?? 0)).map(r => Decoration.mark({class:'cursor-pointer underline decoration-dotted decoration-muted-foreground/40 underline-offset-2 hover:decoration-solid hover:decoration-current'}).range(r.start,r.end)), true)),
       highlightActiveLine(), ...(settings.wrap ? [EditorView.lineWrapping] : []),
       EditorView.theme({
         '&': {height: '100%', fontSize: `${settings.fontSize}px`, color: p.foreground, backgroundColor: p.background, colorScheme: p.dark ? 'dark' : 'light'},

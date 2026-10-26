@@ -170,7 +170,7 @@ fn marker(name: &str, payload: Option<&str>) -> Option<&'static str> {
         _ => None,
     }
 }
-fn hidden_character(c: char) -> bool {
+pub(crate) fn hidden_character(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
 }

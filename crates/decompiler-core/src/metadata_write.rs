@@ -94,15 +94,30 @@ pub fn rebuild(metadata: &[u8], replaced: &[(&str, Vec<u8>)]) -> Result<Vec<u8>>
         r.take((4 - r.pos % 4) % 4)?;
         streams.push(StreamHeader { offset, size, name });
     }
-    let headers_end = r.pos;
+    let mut headers_end = r.pos;
+    let mut seen = std::collections::BTreeSet::new();
     for (name, _) in replaced {
+        if !seen.insert(*name) {
+            return Err(Error::metadata("Duplicate replacement stream"));
+        }
         if !streams.iter().any(|s| s.name == name.as_bytes()) {
-            return Err(Error::metadata(format!(
-                "The assembly has no {name} stream"
-            )));
+            // Protected assemblies can omit #US entirely. Creating it does not
+            // change table widths or any existing heap offset/token.
+            if *name != "#US" || streams.len() >= 32 {
+                return Err(Error::metadata(format!(
+                    "Cannot add metadata stream {name}"
+                )));
+            }
+            headers_end += 8 + (name.len() + 1).next_multiple_of(4);
+            streams.push(StreamHeader {
+                offset: 0,
+                size: 0,
+                name: name.as_bytes().to_vec(),
+            });
         }
     }
     let mut out = metadata[..headers_at].to_vec();
+    out[headers_at - 2..headers_at].copy_from_slice(&(streams.len() as u16).to_le_bytes());
     let mut data = Vec::new();
     let mut layout = Vec::with_capacity(count);
     for s in &streams {

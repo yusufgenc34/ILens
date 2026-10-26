@@ -31,7 +31,7 @@ export default function CSharpEditDialog({client, assembly, token, name, setting
     setPhase('compiling'); setError(null); setDiagnostics([])
     try {
       setStatus('Loading the C# compiler (downloaded once)…')
-      const ids = await client.call('assemblyIds', {})
+      const ids = await client.call('assemblyIds', {selected:assembly})
       const references = await Promise.all(ids.map(async id => ({name: `assembly${id}.dll`, buffer: (await client.call('assemblyBytes', {assembly: id})).buffer})))
       setStatus('Compiling…')
       const {result, buffer} = await compileCSharp(source.before + text.current + source.after, references)

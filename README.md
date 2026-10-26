@@ -4,7 +4,7 @@
 
 A browser-based .NET assembly explorer and decompiler. Open a managed DLL or EXE, browse its types and members, inspect CIL, and reconstruct readable C# for supported methods.
 
-ILens uses **Rari, React, and TypeScript** for the interface and a **Rust WebAssembly core** inside a browser worker for static analysis. Assembly contents stay in the browser and are never executed.
+ILens uses **Rari, React, and TypeScript** for the interface and a **Rust WebAssembly core** inside a browser worker for static analysis. Assembly contents stay in the browser and are never loaded into a CLR or native runtime. Optional deobfuscation can interpret a small, bounded subset of pure CIL in ILens's own value model; see [its scope and limits](docs/deobfuscation.md).
 
 This is an early decompiler release. Reconstructed code is not the original source; unsupported patterns fall back to annotated IL.
 
@@ -22,6 +22,7 @@ This is an early decompiler release. Reconstructed code is not the original sour
 - Embedded resource inspection with text, hex, PNG previews and `.resources` v2 entry downloads.
 - Declared .NET target and CLR metadata versions displayed separately.
 - Obfuscator marker inspection with evidence and clearly labeled naming heuristics.
+- Experimental deobfuscation: generic constants/branches, optional pure string helpers, and static resource-string decoding for one legacy Eazfuscator-compatible layout. Includes per-method reports, cancellation, verified downloads and separate analysis copies; this is not a complete de4dot port.
 - Tailwind-based dark and light appearance, six code themes, syntax highlighting controls, and saved editor preferences.
 - Bounds-checked parsing, structured diagnostics, cancellation, and explicit workspace cleanup.
 - Project export with a Visual Studio solution, per-assembly C# projects, namespace folders, resources and project references.
@@ -50,6 +51,7 @@ The first build installs the matching `wasm-bindgen-cli` and compiles the WASM c
 5. Choose Edit > Settings to customize the code viewer.
 6. Choose File > Export to Project to download a solution with one project per selected assembly. Use File > Save Code for individual source downloads.
 7. Open the IL tab on a supported method and choose Edit IL, validate/apply changes, then File > Save Module to download the modified assembly.
+8. Choose File > Deobfuscate Assembly for the initial generic cleanup passes. String evaluation is opt-in. Review the report, then download the result or open a separate copy alongside the original. Try `samples/fixtures/ILens.Deobfuscation.dll` to see two supported string calls resolve; the other fixture methods demonstrate explicit limitations.
 
 Use `Ctrl/Cmd K` for metadata search, `Ctrl/Cmd F` inside the editor, and `Ctrl/Cmd`-click an underlined C# member or an IL metadata token to navigate. F12 follows a C# reference at the cursor; `Alt+Left` / `Alt+Right` walk navigation history. The bookmark button and View > Bookmarks keep useful declarations within the current workspace. Refreshing clears assemblies, folder access, tabs and bookmarks; editor preferences are retained.
 
@@ -228,7 +230,7 @@ For potential .NET launchers without CLR metadata, ILens tries a same-named DLL 
 
 WebCIL, PDB loading, type forwarding, and multi-module resolution are not implemented. Missing dependencies do not prevent inspection. Resolution checks loaded assemblies and the explicitly selected dependency folder first. Opening an assembly automatically downloads supported missing .NET references from fixed Microsoft NuGet reference packs when enabled; other packages are not guessed or fetched. Reference packs provide API metadata rather than method implementations. ILens does not scan system directories. See [workspace inspection](docs/workspace-inspection.md) for matching rules and limits.
 
-Obfuscation detection recognizes selected metadata markers and naming heuristics. It is not a universal detector or deobfuscator; missing markers do not prove a file is unobfuscated. See [inspection rules](docs/assembly-inspection.md).
+Obfuscation detection recognizes selected metadata markers and naming heuristics. It is not a universal detector; missing markers do not prove a file is unobfuscated. Detection does not imply that a protection can be removed. The experimental deobfuscation path supports documented generic passes and one legacy resource-string profile on supported unsigned PE layouts. It retains declarations and names and leaves unresolved methods/calls intact. It does not unpack arbitrary binaries or remove every protection from a named obfuscator. See [inspection rules](docs/assembly-inspection.md) and [deobfuscation scope](docs/deobfuscation.md).
 
 Source exports can be partial; generated solutions and projects are not guaranteed to compile, although every repository sample's export does. Unsupported constructs such as `fixed` statements stay in IL with a stated reason. IL editing covers static and instance methods, constructors and type initializers, generic methods and members of generic types, local structs, ref/out parameters and managed pointers, multidimensional arrays, try/catch/finally/fault regions, new `ldstr` literals and locals, and external classes, structs and enums when their assembly is loaded. Filter clauses, methods returning managed pointers, explicit-layout and generic structs remain read-only; new types cannot be added yet, so C# edits that need lambdas, iterators or async are refused. Raw hex patches are checked for parseability but bypass IL verification. Binary output is restricted to supported unsigned x86/x64 managed PE layouts. See [export and editing support](docs/export-edit.md) for exact limits.
 
@@ -239,6 +241,7 @@ Browser tests run in desktop Chromium, Firefox and WebKit (Safari's engine), and
 - [Changelog](CHANGELOG.md)
 - [Source export and IL editing](docs/export-edit.md)
 - [IL write verification](docs/il-verification.md)
+- [Initial deobfuscation: workflow, limits and safety](docs/deobfuscation.md)
 - [Design note: editing methods in C#](docs/csharp-editing.md)
 - [Source export and assembly editing roadmap](docs/roadmap.md)
 - [Architecture and worker API](docs/architecture.md)
@@ -267,6 +270,7 @@ Browser tests run in desktop Chromium, Firefox and WebKit (Safari's engine), and
 | [wasm-bindgen](https://wasm-bindgen.github.io/wasm-bindgen/) | Rust/JavaScript bindings and WASM memory ownership |
 | [Tailwind CSS](https://tailwindcss.com/docs/installation/using-vite) | Utility-based interface styling, semantic theme tokens and Vite compilation |
 | [CodeMirror](https://codemirror.net/) | Read-only code views, highlighting, and editor search |
+| [de4dot](https://github.com/de4dot/de4dot) | Research reference for legacy protection formats; no de4dot code or runtime is included. [Scope and licensing notes](docs/deobfuscation.md#reference-and-licensing) |
 | [dnSpy](https://github.com/dnSpy/dnSpy) | Workflow reference for source export and IL editing; its code is not embedded |
 | [ILVerify](https://github.com/dotnet/runtime/tree/main/src/coreclr/tools/ILVerify) | Independent static verification of test fixture outputs; a test-only tool |
 | [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT) | ZIP32 archive format reference |
