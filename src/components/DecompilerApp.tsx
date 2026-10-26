@@ -22,6 +22,7 @@ import SettingsDialog from './SettingsDialog'
 import ExportDialog from './ExportDialog'
 import DeobfuscateDialog from './DeobfuscateDialog'
 import FunctionMapper from './FunctionMapper'
+import PackedAssemblies from './PackedAssemblies'
 import ProjectExportDialog from './ProjectExportDialog'
 import AppMenuBar from './AppMenuBar'
 import ILEditorDialog from './ILEditorDialog'
@@ -69,6 +70,7 @@ export default function DecompilerApp() {
   const [deobfuscateOpen, setDeobfuscateOpen] = useState(false)
   const [deobfuscateAuto, setDeobfuscateAuto] = useState<number | null>(null)
   const [functionMapOpen, setFunctionMapOpen] = useState(false)
+  const [packedOpen, setPackedOpen] = useState(false)
   // A one-click cleanup requested while dependencies load; it starts once the
   // workspace is stable, because each loaded dependency would cancel a running job.
   const [pendingFix, setPendingFix] = useState<number | null>(null)
@@ -607,6 +609,7 @@ export default function DecompilerApp() {
         {label: pendingFix !== null ? 'Deobfuscate (de4dot-style) · queued' : 'Deobfuscate (de4dot-style)', disabled: !active || pendingFix !== null, run: () => {if (active) fixAssembly(active.id)}},
         {label: 'Deobfuscation Options…', disabled: !active || loadingFiles, run: () => setDeobfuscateOpen(true)}, null,
         {label: 'Function Mapper…', disabled: !active || loadingFiles, run: () => setFunctionMapOpen(true)},
+        {label: 'Packed Assemblies…', disabled: !active || loadingFiles, run: () => setPackedOpen(true)},
       ]},
       {label: 'Window', actions: navigation.tabs.length ? [
         ...navigation.tabs.slice(-12).map(tab => ({label: documentLabel(tab), checked: currentLocation !== null && locationKey(tab) === locationKey(currentLocation), run: () => navigate(tab)})), null,
@@ -701,6 +704,7 @@ export default function DecompilerApp() {
     {tourOpen && <Tour steps={tourSteps} onClose={() => setTourOpen(false)} />}
     {projectOpen && primary && <ProjectExportDialog client={getClient()} assemblies={assemblies} primary={primary} onClose={() => setProjectOpen(false)} />}
     {functionMapOpen && active && <FunctionMapper key={active.id} client={getClient()} assembly={active.id} filename={active.filename} cached={functionMaps.current.get(active.id) ?? null} onLoaded={map => functionMaps.current.set(active.id, map)} onOpen={token => {setFunctionMapOpen(false); navigate({assembly: active.id, token, view: 'C#'})}} onClose={() => setFunctionMapOpen(false)} />}
+    {packedOpen && active && <PackedAssemblies key={active.id} client={getClient()} assembly={active.id} filename={active.filename} onOpened={cleanedOpened} onClose={()=>setPackedOpen(false)} />}
     {deobfuscateOpen && active && <DeobfuscateDialog key={active.id} client={getClient()} assembly={active.id} filename={active.filename} autoStart={deobfuscateAuto === active.id} onOpened={cleanedOpened} onClose={()=>{setDeobfuscateOpen(false); setDeobfuscateAuto(null)}} />}
     {exportOpen && active && <ExportDialog key={`${active.id}-${exportOpen}`} mode={exportOpen} client={getClient()} assembly={active.id} info={active.info} filename={active.filename} member={activeDeclaration} method={busy || methodAssembly !== active.id ? null : method} onClose={() => setExportOpen(null)} />}
     {csharpEdit && <CSharpEditDialog key={`${csharpEdit.assembly}-${csharpEdit.token}`} client={getClient()} assembly={csharpEdit.assembly} token={csharpEdit.token} name={csharpEdit.name} settings={editorSettings} theme={theme} onClose={() => setCsharpEdit(null)} onApplied={reloaded => {

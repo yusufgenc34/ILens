@@ -82,6 +82,7 @@ async function dispatch(core: Decompiler, request: Request): Promise<unknown> {
     case 'load': if (request.buffer.byteLength > 64 * 1024 * 1024) throw {code: 'size_limit', message: 'Assemblies must be 64 MiB or smaller.', detail: 'Input size checked before copying into WASM.'}; return core.load_assembly(new Uint8Array(request.buffer))
     case 'loadDependency': if (request.buffer.byteLength > 64 * 1024 * 1024) throw {code: 'size_limit', message: 'Dependency exceeds 64 MiB.', detail: 'Rejected before copying into WASM.'}; return core.load_dependency(new Uint8Array(request.buffer), JSON.stringify(request.identity))
     case 'analyzeReferences': return core.analyze_references(request.assembly, request.token, request.source, request.cursor, request.outgoing)
+    case 'embeddedPayloads': return core.embedded_payloads(request.assembly)
     case 'getResourcePreview': return core.resource_preview(request.assembly, request.token, request.entry)
     case 'getResourceBytes': return {buffer:core.resource_bytes(request.assembly, request.token, request.entry).buffer}
     case 'getTree': return core.get_tree(request.assembly)

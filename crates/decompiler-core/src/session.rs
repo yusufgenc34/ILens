@@ -318,15 +318,18 @@ impl Session {
                 text.push_str("// ");
                 let start = text.encode_utf16().count();
                 text.push_str(name);
-                references.push(crate::emit::SourceReference {
-                    start,
-                    end: text.encode_utf16().count(),
-                    token: *method,
-                });
+                // Only sites in this assembly can be opened from here; the rest are listed.
+                if let Some(method) = method {
+                    references.push(crate::emit::SourceReference {
+                        start,
+                        end: text.encode_utf16().count(),
+                        token: *method,
+                    });
+                }
                 text.push('\n');
             }
             if usages.is_empty() {
-                text.push_str("// No ldstr site found in this assembly.\n");
+                text.push_str("// No ldstr site found in the loaded assemblies.\n");
             }
             return Ok(
                 json!({"declaration":text,"references":references,"metadata":self.metadata(id,token)?}),
@@ -645,15 +648,19 @@ impl Session {
     }
     /// The methods whose CIL loads this user string (`ldstr`), so a literal can be
     /// traced back to where it is used. Reads decoded instructions only.
-    pub fn string_usages(&self, id: u32, token: u32) -> Result<Vec<(u32, String)>> {
+    /// Methods that load this literal. Sites in the assembly the token belongs to carry
+    /// their method token and are navigable; sites in other loaded assemblies are matched
+    /// by text, since a `#US` token means nothing outside its own module.
+    pub fn string_usages(&self, id: u32, token: u32) -> Result<Vec<(Option<u32>, String)>> {
         let a = self.assembly(id)?;
         if token >> 24 != 0x70 {
             return Err(Error::metadata("Expected a user-string token"));
         }
+        let text = a.user_string(token).ok();
         let mut found = Vec::new();
         for index in 0..a.metadata().method_defs.len() {
             if found.len() >= 500 {
-                break;
+                return Ok(found);
             }
             let method = 0x0600_0001 + index as u32;
             let Ok(Some(body)) = a.body(method) else {
@@ -664,7 +671,58 @@ impl Session {
                 .iter()
                 .any(|i| i.opcode == 0x72 && i.token() == Some(token))
             {
-                found.push((method, a.resolve(method)));
+                found.push((Some(method), a.resolve(method)));
+            }
+        }
+        let Some(text) = text else { return Ok(found) };
+        for (&other, b) in &self.assemblies {
+            if other == id || self.derived.get(&other).is_some_and(|o| *o == id) {
+                continue;
+            }
+            // Walk the other module's `#US` heap once for the tokens that hold this
+            // text, rather than resolving a literal per instruction.
+            let heap = b.metadata().user_strings.data();
+            let mut tokens = std::collections::HashSet::new();
+            let mut offset = 1;
+            while offset < heap.len() && tokens.len() < 1024 {
+                let mut reader = crate::reader::Reader::new(&heap[offset..]);
+                let Ok(len) = reader.compressed() else { break };
+                let header = reader.pos;
+                let Some(end) = offset.checked_add(header + len as usize) else {
+                    break;
+                };
+                if end > heap.len() {
+                    break;
+                }
+                if len > 0
+                    && b.user_string(0x7000_0000 | offset as u32)
+                        .is_ok_and(|s| s == text)
+                {
+                    tokens.insert(0x7000_0000 | offset as u32);
+                }
+                offset = end.max(offset + 1);
+            }
+            if tokens.is_empty() {
+                continue;
+            }
+            for index in 0..b.metadata().method_defs.len() {
+                if found.len() >= 500 {
+                    return Ok(found);
+                }
+                let method = 0x0600_0001 + index as u32;
+                let Ok(Some(body)) = b.body(method) else {
+                    continue;
+                };
+                if body
+                    .instructions
+                    .iter()
+                    .any(|i| i.opcode == 0x72 && i.token().is_some_and(|t| tokens.contains(&t)))
+                {
+                    found.push((
+                        None,
+                        format!("{} · {}", b.info.identity.name, b.resolve(method)),
+                    ));
+                }
             }
         }
         Ok(found)
@@ -675,6 +733,9 @@ impl Session {
         let a = self.assembly(id)?;
         let original = self.derived.get(&id).and_then(|o| self.assemblies.get(o));
         crate::function_map::build(a, original)
+    }
+    pub fn embedded_payloads(&self, id: u32) -> Result<crate::embedded::Payloads> {
+        crate::embedded::payloads(self.assembly(id)?)
     }
     pub fn deobfuscate_begin(
         &mut self,

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Optimize>true</Optimize>
+    <AssemblyName>ILens.Packed</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- A repository-owned fixture carried as a payload, the way a packer stores one. -->
+    <EmbeddedResource Include="../fixtures/ILens.Example.dll" LogicalName="ILens.Packed.Payload.dll" />
+    <EmbeddedResource Include="Scrambled.bin" LogicalName="ILens.Packed.Scrambled.bin" />
+  </ItemGroup>
+</Project>

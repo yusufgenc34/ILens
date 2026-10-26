@@ -10,6 +10,8 @@ export interface MappedFunction {token:number; name:string; owner:number; owner_
 export interface TypeLink {token:number; name:string}
 export interface MappedType {token:number; name:string; full_name:string; namespace:string; kind:string; members:number; base?:TypeLink; interfaces:TypeLink[]; uses:TypeLink[]; nested_in?:number}
 export interface FunctionMap {functions:MappedFunction[]; types:MappedType[]; externals:Record<string,string>; edges:number; truncated:boolean; entry_point:number}
+export interface EmbeddedAssembly {token:number; entry:number; name:string; identity:string; runtime:string; size:number; methods:number; types:number}
+export interface EmbeddedPayloads {assemblies:EmbeddedAssembly[]; unrecognized:string[]; truncated:boolean}
 export interface DeobfuscationOptions {constants:boolean; branches:boolean; strings:boolean; resource_strings:boolean; control_flow:boolean; anti_debug:boolean; rename:boolean; proxies:boolean}
 export interface DeobfuscationCounts {constants:number; branches:number; strings:number; unreachable_instructions:number; flattened:number; debugger_checks:number; renamed:number; proxies:number}
 export interface DeobfuscationProgress {job:number; completed:number; total:number; changed_methods:number; phase:string; done:boolean}
@@ -40,6 +42,7 @@ export interface TypeView { declaration: string; metadata: Record<string, unknow
 export interface Overview { info: AssemblyInfo; pe: Record<string, unknown>; streams: {name: string; offset: number; size: number}[]; tables: {name: string; id: number; rows: number}[]; references: Reference[]; resources: {token: number; name: string; embedded: boolean; offset: number; flags: number}[] }
 export interface ResourcePreview {size: number; kind: string; text: string | null; hex: string; entries: {index:number; name:string; kind:string; size:number; value:string | null}[]; diagnostic: string | null}
 export interface Operations {
+  embeddedPayloads:{input:{assembly:number}; output:EmbeddedPayloads}
   functionMap:{input:{assembly:number}; output:FunctionMap}
   deobfuscateBegin:{input:{assembly:number; options:DeobfuscationOptions}; output:DeobfuscationProgress}
   deobfuscateStep:{input:{job:number}; output:DeobfuscationProgress}

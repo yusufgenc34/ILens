@@ -13,6 +13,7 @@ pub mod decompile;
 pub mod deobfuscate;
 pub mod detect;
 pub mod edit;
+pub mod embedded;
 pub mod emit;
 pub mod emulate;
 pub mod error;

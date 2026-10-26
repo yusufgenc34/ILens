@@ -394,3 +394,13 @@ fn parentheses_follow_csharp_precedence_and_associativity() {
     };
     assert_eq!(render(&negated), "x == y");
 }
+#[test]
+fn unordered_float_comparisons_read_as_the_negated_opposite_comparison() {
+    let a = fixture();
+    // `.un` float comparisons are true when either operand is NaN. Reinterpreting the
+    // bits as an unsigned integer would be wrong, so they negate the opposite test.
+    assert!(source(&a, "NotGreaterOrEqual").contains("return !(a >= b);"));
+    assert!(source(&a, "NotLess").contains("return !(a < b);"));
+    // C# `!=` is already unordered-true, so `bne.un` needs no rewriting.
+    assert!(source(&a, "Differs").contains("return a != b;"));
+}

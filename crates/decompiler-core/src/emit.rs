@@ -450,6 +450,20 @@ fn render(a: &Assembly, context: u32, e: &Expr) -> Result<(String, u8)> {
             if reference_test {
                 return Ok((format!("{l} != {r}"), binary_precedence("!=")));
             }
+            // On floating-point operands the `.un` opcodes mean "or unordered": they
+            // are true when either side is NaN, which is exactly the negation of the
+            // opposite ordered comparison. C# `!=` is already unordered-true.
+            let floating =
+                |t: &Type| matches!(t, Type::Primitive(n) if n == "float" || n == "double");
+            if *unsigned && floating(&left.ty) && floating(&right.ty) {
+                return Ok(match op.as_str() {
+                    ">" => (format!("!({l} <= {r})"), UNARY),
+                    "<" => (format!("!({l} >= {r})"), UNARY),
+                    ">=" => (format!("!({l} < {r})"), UNARY),
+                    "<=" => (format!("!({l} > {r})"), UNARY),
+                    _ => (format!("{l} {op} {r}"), precedence),
+                });
+            }
             if *unsigned {
                 if op == "!=" && left.ty.is_reference() && right.ty.is_reference() {
                 } else {

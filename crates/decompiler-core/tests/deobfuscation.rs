@@ -737,6 +737,7 @@ fn proxy_unwrapping_redirects_forwarders_and_preserves_real_calls() {
     );
 }
 const PACKED: &[u8] = include_bytes!("../../../samples/fixtures/ILens.ArrayStrings.dll");
+const PACKED_HOST: &[u8] = include_bytes!("../../../samples/fixtures/ILens.Packed.dll");
 #[test]
 fn array_backed_decoders_resolve_through_the_same_size_literal_writer() {
     let (a, report, _) = run(PACKED, options());
@@ -933,4 +934,34 @@ fn debugger_queries_are_answered_as_if_no_debugger_is_attached() {
         ops.ends_with(&["ldarg.0".to_string(), "ret".to_string()]),
         "{ops:?}"
     );
+}
+#[test]
+fn string_usage_lists_loading_methods_across_the_workspace() {
+    let mut session = Session::default();
+    let id = session.load(INPUT.to_vec()).unwrap().id;
+    let a = session.assembly(id).unwrap();
+    // The literal `ExternalCall` loads; its own module's sites are navigable.
+    let body = a.body(token(a, "ExternalCall")).unwrap().unwrap();
+    let literal = body
+        .instructions
+        .iter()
+        .find(|i| i.name == "ldstr")
+        .unwrap()
+        .token()
+        .unwrap();
+    let usages = session.string_usages(id, literal).unwrap();
+    assert_eq!(usages.len(), 1, "{usages:?}");
+    assert_eq!(
+        usages[0].0,
+        Some(token(session.assembly(id).unwrap(), "ExternalCall"))
+    );
+    // Another assembly that uses the same literal is matched by text, not by token.
+    let other = session.load(PACKED_HOST.to_vec()).unwrap().id;
+    let usages = session.string_usages(id, literal).unwrap();
+    assert_eq!(usages.len(), 2, "{usages:?}");
+    assert_eq!(usages[1].0, None);
+    assert!(usages[1].1.contains("ILens.Packed · "), "{usages:?}");
+    assert!(usages[1].1.contains("Shared"), "{usages:?}");
+    session.close(other);
+    assert_eq!(session.string_usages(id, literal).unwrap().len(), 1);
 }

@@ -44,4 +44,10 @@ public sealed class FormValues
         catch { return values; }
         return values;
     }
+
+    // CIL compiles these to the `.un` comparison opcodes, which are true when either
+    // operand is NaN. They must read as the negated opposite comparison, not as a cast.
+    public static bool NotGreaterOrEqual(double a, double b) => !(a >= b);
+    public static bool NotLess(float a, float b) => !(a < b);
+    public static bool Differs(double a, double b) => a != b;
 }

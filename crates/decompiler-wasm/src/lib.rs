@@ -141,6 +141,9 @@ impl Decompiler {
     pub fn function_map(&self, id: u32) -> Result<JsValue, JsValue> {
         js(&self.session.function_map(id).map_err(error)?)
     }
+    pub fn embedded_payloads(&self, id: u32) -> Result<JsValue, JsValue> {
+        js(&self.session.embedded_payloads(id).map_err(error)?)
+    }
     pub fn deobfuscate_begin(&mut self, id: u32, options: &str) -> Result<JsValue, JsValue> {
         if options.len() > 1024 {
             return Err(error(Error::limit("Deobfuscation options exceed 1 KiB")));

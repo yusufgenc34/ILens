@@ -11,6 +11,11 @@ if (example.status !== 0) process.exit(example.status ?? 1)
 copyFileSync('samples/bin/ILens.Example.dll', 'samples/fixtures/ILens.Example.dll')
 copyFileSync('samples/fixtures/ILens.Example.dll', 'public/samples/ILens.Example.dll')
 
+// A packer shape: a managed payload carried in an embedded resource.
+const packed = spawnSync('dotnet', ['build', 'samples/Packed', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
+if (packed.status !== 0) process.exit(packed.status ?? 1)
+copyFileSync('samples/bin/ILens.Packed.dll', 'samples/fixtures/ILens.Packed.dll')
+
 // Additional write-verification fixtures; compiled for inspection, never executed.
 const deobfuscation = spawnSync('dotnet', ['build', 'samples/Deobfuscation', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
 if (deobfuscation.status !== 0) process.exit(deobfuscation.status ?? 1)
