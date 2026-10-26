@@ -427,6 +427,8 @@ fn rename_only() -> Options {
         branches: false,
         strings: false,
         resource_strings: false,
+        control_flow: false,
+        anti_debug: false,
         rename: true,
         proxies: false,
     }
@@ -657,6 +659,8 @@ fn proxy_unwrapping_redirects_forwarders_and_preserves_real_calls() {
         branches: false,
         strings: false,
         resource_strings: false,
+        control_flow: false,
+        anti_debug: false,
         rename: false,
         proxies: true,
     };
@@ -820,4 +824,113 @@ fn array_and_encoding_model_rejects_unsupported_shapes() {
         .call(token(&a, "Decode"), vec![Value::I32(0)])
         .unwrap_err();
     assert!(e.0.contains("allocation"), "{e}");
+}
+#[test]
+fn switch_dispatchers_resolve_to_direct_branches_where_the_state_is_a_literal() {
+    let options = Options {
+        control_flow: true,
+        constants: false,
+        branches: false,
+        ..Options::default()
+    };
+    let (a, report, _) = run(INPUT, options);
+    let opcodes = |name: &str| {
+        a.body(token(&a, name))
+            .unwrap()
+            .unwrap()
+            .instructions
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    };
+    // Each literal state transition becomes one branch, and the dispatcher it fed is
+    // then unreachable and removed with it.
+    let flattened = opcodes("Flattened");
+    assert_eq!(report.counts.flattened, 3);
+    assert!(!flattened.contains(&"switch".to_string()), "{flattened:?}");
+    assert!(
+        !flattened.iter().any(|o| o.starts_with("stloc")),
+        "{flattened:?}"
+    );
+    assert!(report.counts.unreachable_instructions > 0);
+    // A state computed from the argument is not resolvable, so nothing is touched.
+    let computed = opcodes("ComputedState");
+    assert!(computed.contains(&"switch".to_string()), "{computed:?}");
+    let original = Assembly::load(INPUT.to_vec()).unwrap();
+    assert_eq!(
+        computed,
+        original
+            .body(token(&original, "ComputedState"))
+            .unwrap()
+            .unwrap()
+            .instructions
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    );
+}
+#[test]
+fn debugger_queries_are_answered_as_if_no_debugger_is_attached() {
+    let options = Options {
+        anti_debug: true,
+        constants: false,
+        branches: false,
+        ..Options::default()
+    };
+    let (a, report, bytes) = run(INPUT, options);
+    // A same-size patch: no metadata is rebuilt and no byte moves.
+    assert_eq!(bytes.len(), INPUT.len());
+    assert_eq!(report.counts.debugger_checks, 2);
+    let original = Assembly::load(INPUT.to_vec()).unwrap();
+    let before = original.body(token(&original, "Guarded")).unwrap().unwrap();
+    let after = a.body(token(&a, "Guarded")).unwrap().unwrap();
+    assert_eq!(before.code_size, after.code_size);
+    // Every original instruction boundary survives, so branch targets still resolve.
+    let kept: Vec<_> = after.instructions.iter().map(|i| i.offset).collect();
+    assert!(before.instructions.iter().all(|i| kept.contains(&i.offset)));
+    // IsAttached reads false and Break() is gone; nothing else about the method moved.
+    let ops: Vec<_> = after.instructions.iter().map(|i| i.name.as_str()).collect();
+    assert_eq!(
+        ops,
+        [
+            "nop",
+            "nop",
+            "nop",
+            "nop",
+            "ldc.i4.0",
+            "brfalse.s",
+            "ldc.i4.m1",
+            "ret",
+            "nop",
+            "nop",
+            "nop",
+            "nop",
+            "nop",
+            "ldarg.0",
+            "ret"
+        ]
+    );
+    // Running the constant and branch passes afterwards folds the guard away entirely.
+    let (folded, _, _) = run(
+        &bytes,
+        Options {
+            constants: true,
+            branches: true,
+            ..Options::default()
+        },
+    );
+    let ops: Vec<_> = folded
+        .body(token(&folded, "Guarded"))
+        .unwrap()
+        .unwrap()
+        .instructions
+        .iter()
+        .map(|i| i.name.clone())
+        .collect();
+    // The guarded `return -1` is unreachable once the query reads false, so it goes.
+    assert!(!ops.iter().any(|o| o == "ldc.i4.m1"), "{ops:?}");
+    assert!(
+        ops.ends_with(&["ldarg.0".to_string(), "ret".to_string()]),
+        "{ops:?}"
+    );
 }

@@ -27,6 +27,47 @@ public static class Patterns
     public static int Arithmetic(int value) => value + 1;
     public static int Branch(int value) => value == 7 ? 42 : -1;
     public static string LoneSurrogate() => Decode("\ud800", 0);
+    // Anti-debug guards. The copy is read with no debugger attached, so that is the
+    // answer these queries get; the guard method itself is kept.
+    public static int Guarded(int value)
+    {
+        if (System.Diagnostics.Debugger.IsAttached) return -1;
+        System.Diagnostics.Debugger.Break();
+        return value;
+    }
+    // A switch dispatcher over a state local: the shape control-flow flattening leaves
+    // behind. Every state transition here is a literal, so each one has one real target.
+    public static int Flattened(int value)
+    {
+        int state = 0;
+        while (true)
+        {
+            switch (state)
+            {
+                case 0: value += 1; state = 2; continue;
+                case 1: return value;
+                case 2: value *= 3; state = 1; continue;
+                default: return -1;
+            }
+        }
+    }
+    // The same shape, but the state is computed from the argument, so the dispatcher
+    // cannot be resolved away and has to survive untouched.
+    public static int ComputedState(int value)
+    {
+        int state = value & 3;
+        while (true)
+        {
+            switch (state)
+            {
+                case 0: return value;
+                case 1: state = value & 2; continue;
+                case 2: state = value & 1; continue;
+                case 3: state = value >> 8; continue;
+                default: return -1;
+            }
+        }
+    }
 }
 public static class WithInitializer
 {

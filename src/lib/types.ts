@@ -10,8 +10,8 @@ export interface MappedFunction {token:number; name:string; owner:number; owner_
 export interface TypeLink {token:number; name:string}
 export interface MappedType {token:number; name:string; full_name:string; namespace:string; kind:string; members:number; base?:TypeLink; interfaces:TypeLink[]; uses:TypeLink[]; nested_in?:number}
 export interface FunctionMap {functions:MappedFunction[]; types:MappedType[]; externals:Record<string,string>; edges:number; truncated:boolean; entry_point:number}
-export interface DeobfuscationOptions {constants:boolean; branches:boolean; strings:boolean; resource_strings:boolean; rename:boolean; proxies:boolean}
-export interface DeobfuscationCounts {constants:number; branches:number; strings:number; unreachable_instructions:number; renamed:number; proxies:number}
+export interface DeobfuscationOptions {constants:boolean; branches:boolean; strings:boolean; resource_strings:boolean; control_flow:boolean; anti_debug:boolean; rename:boolean; proxies:boolean}
+export interface DeobfuscationCounts {constants:number; branches:number; strings:number; unreachable_instructions:number; flattened:number; debugger_checks:number; renamed:number; proxies:number}
 export interface DeobfuscationProgress {job:number; completed:number; total:number; changed_methods:number; phase:string; done:boolean}
 export interface DeobfuscationReport {
   outcome:'pending'|'no_changes'|'changed'|'partial'; options:DeobfuscationOptions; changed_methods:number;

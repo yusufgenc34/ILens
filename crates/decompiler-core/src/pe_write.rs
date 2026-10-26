@@ -1580,6 +1580,22 @@ pub(crate) fn write_proxies(a: &Assembly) -> Result<(Vec<u8>, usize)> {
     if table.is_empty() {
         return Ok((a.bytes.clone(), 0));
     }
+    write_same_size_calls(a, "Proxy", |token| {
+        table.resolve(token).map(|(opcode, target)| {
+            let mut bytes = [opcode as u8, 0, 0, 0, 0];
+            bytes[1..].copy_from_slice(&target.to_le_bytes());
+            bytes
+        })
+    })
+}
+/// Replaces whole 5-byte `call` sites with 5 replacement bytes, so every instruction
+/// offset, exception region and method RVA in the image stays exactly where it was.
+/// Every byte outside a proved call site is checked to be unchanged afterwards.
+fn write_same_size_calls(
+    a: &Assembly,
+    label: &str,
+    replacement: impl Fn(u32) -> Option<[u8; 5]>,
+) -> Result<(Vec<u8>, usize)> {
     // Reject layouts the same-size writer does not support (ReadyToRun, recovered CLI,
     // and unproven Field-RVA storage), mirroring the literal writer.
     preflight(a, true)?;
@@ -1601,15 +1617,14 @@ pub(crate) fn write_proxies(a: &Assembly) -> Result<(Vec<u8>, usize)> {
             if instruction.opcode != 0x28 || instruction.size != 5 {
                 continue;
             }
-            let Some((opcode, target)) = instruction.token().and_then(|t| table.resolve(t)) else {
+            let Some(bytes) = instruction.token().and_then(&replacement) else {
                 continue;
             };
             let at = code_start + instruction.offset as usize;
             if at + 5 > a.bytes.len() {
-                return Err(unsupported("Proxy call site outside the image"));
+                return Err(unsupported(format!("{label} call site outside the image")));
             }
-            out[at] = opcode as u8;
-            out[at + 1..at + 5].copy_from_slice(&target.to_le_bytes());
+            out[at..at + 5].copy_from_slice(&bytes);
             patches.push(at..at + 5);
         }
     }
@@ -1617,22 +1632,24 @@ pub(crate) fn write_proxies(a: &Assembly) -> Result<(Vec<u8>, usize)> {
         return Ok((a.bytes.clone(), 0));
     }
     if patches.len() > 500_000 {
-        return Err(Error::limit("At most 500,000 proxy call sites"));
+        return Err(Error::limit(format!("At most 500,000 {label} call sites")));
     }
     // Every byte outside a proved call-site range must be identical to the input.
     patches.sort_by_key(|r| r.start);
     let mut cursor = 0;
     for r in &patches {
         if r.start < cursor {
-            return Err(unsupported("Overlapping proxy call sites"));
+            return Err(unsupported(format!("Overlapping {label} call sites")));
         }
         if r.start > cursor && out[cursor..r.start] != a.bytes[cursor..r.start] {
-            return Err(unsupported("Proxy patch changed preserved bytes"));
+            return Err(unsupported(format!(
+                "{label} patch changed preserved bytes"
+            )));
         }
         cursor = r.end;
     }
     if out[cursor..] != a.bytes[cursor..] {
-        return Err(unsupported("Proxy patch changed preserved tail"));
+        return Err(unsupported(format!("{label} patch changed preserved tail")));
     }
     // Reparse and confirm identity, entry point and that each site now decodes to its
     // target with the same instruction size (offsets and EH therefore unchanged).
@@ -1641,9 +1658,9 @@ pub(crate) fn write_proxies(a: &Assembly) -> Result<(Vec<u8>, usize)> {
         || parsed.image.entry_point != a.image.entry_point
         || parsed.image.cli_flags != a.image.cli_flags
     {
-        return Err(unsupported(
-            "Proxy output changed assembly identity/entry point",
-        ));
+        return Err(unsupported(format!(
+            "{label} output changed assembly identity/entry point"
+        )));
     }
     let count = patches.len();
     for (index, row) in a.metadata().method_defs.iter().enumerate() {
@@ -1663,12 +1680,32 @@ pub(crate) fn write_proxies(a: &Assembly) -> Result<(Vec<u8>, usize)> {
             || before.local_signature != after.local_signature
             || serde_json::to_vec(&before.exceptions).ok()
                 != serde_json::to_vec(&after.exceptions).ok()
-            || before.instructions.len() != after.instructions.len()
         {
-            return Err(unsupported("Proxy patch changed method layout or EH"));
+            return Err(unsupported(format!(
+                "{label} patch changed method layout or EH"
+            )));
+        }
+        // Every original instruction boundary must survive, so every branch target and
+        // exception offset still names an instruction. A replacement may decode into
+        // more instructions than it replaced (five `nop`s for one `call`, say).
+        let kept: std::collections::BTreeSet<_> =
+            after.instructions.iter().map(|i| i.offset).collect();
+        if !before.instructions.iter().all(|i| kept.contains(&i.offset)) {
+            return Err(unsupported(format!(
+                "{label} patch moved an instruction boundary"
+            )));
         }
     }
     Ok((out, count))
+}
+/// Rewrites debugger queries so the copy reads as it runs without a debugger attached:
+/// `Debugger.IsAttached`/`IsLogging()` become `false` and `Debugger.Break()` disappears.
+pub(crate) fn write_debugger_checks(a: &Assembly) -> Result<(Vec<u8>, usize)> {
+    let checks = crate::deobfuscate::guard::debugger_members(a);
+    if checks.is_empty() {
+        return Ok((a.bytes.clone(), 0));
+    }
+    write_same_size_calls(a, "Debugger check", |token| checks.get(&token).copied())
 }
 pub(crate) fn write_literals(a: &Assembly, patches: &[LiteralPatch]) -> Result<Vec<u8>> {
     let layout = preflight(a, true)?;

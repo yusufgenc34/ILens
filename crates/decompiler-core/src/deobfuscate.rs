@@ -1,6 +1,8 @@
 //! Incremental generic transformations and recognized static resource-string profiles.
 //! No executable unpacking, token remapping, initializer execution or member deletion.
 pub(crate) mod eaz;
+pub(crate) mod flow;
+pub(crate) mod guard;
 pub(crate) mod proxy;
 pub(crate) mod rename;
 use crate::{
@@ -22,6 +24,10 @@ pub struct Options {
     #[serde(default)]
     pub resource_strings: bool,
     #[serde(default)]
+    pub control_flow: bool,
+    #[serde(default)]
+    pub anti_debug: bool,
+    #[serde(default)]
     pub rename: bool,
     #[serde(default)]
     pub proxies: bool,
@@ -33,6 +39,8 @@ impl Default for Options {
             branches: true,
             strings: false,
             resource_strings: false,
+            control_flow: false,
+            anti_debug: false,
             rename: false,
             proxies: false,
         }
@@ -44,12 +52,14 @@ pub struct Counts {
     pub branches: usize,
     pub strings: usize,
     pub unreachable_instructions: usize,
+    pub flattened: usize,
+    pub debugger_checks: usize,
     pub renamed: usize,
     pub proxies: usize,
 }
 impl Counts {
     fn changed(&self) -> bool {
-        self.constants + self.branches + self.strings + self.proxies > 0
+        self.constants + self.branches + self.strings + self.proxies + self.flattened > 0
     }
 }
 #[derive(Debug, Clone, Serialize)]
@@ -112,8 +122,14 @@ impl Job {
         a: &Assembly,
         mut options: Options,
     ) -> Result<Self> {
-        let generic = options.constants || options.branches || options.strings;
-        if !generic && !options.resource_strings && !options.rename && !options.proxies {
+        let generic =
+            options.constants || options.branches || options.strings || options.control_flow;
+        if !generic
+            && !options.resource_strings
+            && !options.rename
+            && !options.proxies
+            && !options.anti_debug
+        {
             return Err(edit::unsupported("Select at least one transformation"));
         }
         let mut resource = if options.resource_strings {
@@ -131,7 +147,7 @@ impl Job {
                 skipped_notice = Some("The recognized string decoder has no remaining call sites; generic transforms were used instead.".to_string());
             }
         }
-        let methods = if resource.is_some() || options.proxies || !generic {
+        let methods = if resource.is_some() || options.proxies || options.anti_debug || !generic {
             16_384
         } else {
             4096
@@ -147,7 +163,7 @@ impl Job {
             ));
         }
         // Proxy unwrapping and resource strings only need the same-size (literal) writer.
-        if resource.is_some() || options.proxies || !generic {
+        if resource.is_some() || options.proxies || options.anti_debug || !generic {
             crate::pe_write::literal_capability(a)?;
         }
         let mut literal_strings = false;
@@ -156,10 +172,10 @@ impl Job {
             // layout the general IL writer cannot handle (Field-RVA arrays, for one);
             // only the whole-method IL transforms are dropped.
             literal_strings = options.strings;
-            if !options.rename && !options.proxies && !literal_strings {
+            if !options.rename && !options.proxies && !options.anti_debug && !literal_strings {
                 return Err(e);
             }
-            (options.constants, options.branches) = (false, false);
+            (options.constants, options.branches, options.control_flow) = (false, false, false);
             options.strings = literal_strings;
             if literal_strings {
                 crate::pe_write::literal_capability(a)?;
@@ -177,6 +193,12 @@ impl Job {
         }
         if options.rename {
             notices.push("Obfuscated type, member, parameter and generic-parameter names are replaced with synthetic names. Overrides keep matching names; reflection, serialization or resource lookups by string may no longer match.".into());
+        }
+        if options.anti_debug {
+            notices.push("Debugger queries are answered as they are when no debugger is attached (`Debugger.IsAttached`/`IsLogging()` become false, `Debugger.Break()` is dropped). Guard methods themselves are kept.".into());
+        }
+        if options.control_flow {
+            notices.push("Switch-dispatcher control flow is de-flattened only where a state transition stores a literal in the same basic block; any other transition leaves its dispatcher in place.".into());
         }
         if options.proxies {
             notices.push("Proxy/indirect call unwrapping redirects calls to pure forwarder methods straight to their target, preserving instruction offsets and exception regions. Forwarder definitions are kept.".into());
@@ -251,7 +273,8 @@ impl Job {
                 // read bodies, so they use the larger whole-image budget.
                 let generic_rows = self.report.options.constants
                     || self.report.options.branches
-                    || self.report.options.strings;
+                    || self.report.options.strings
+                    || self.report.options.control_flow;
                 let max_instructions =
                     if self.resource.is_some() || self.literal_strings || !generic_rows {
                         2_000_000
@@ -321,7 +344,9 @@ impl Job {
                 } else if !(self.report.options.constants
                     || self.report.options.branches
                     || self.report.options.strings
-                    || self.report.options.proxies)
+                    || self.report.options.control_flow
+                    || self.report.options.proxies
+                    || self.report.options.anti_debug)
                 {
                     // Rename-only job: names are handled when the output is written.
                 } else if body.instructions.len() > emulate::MAX_INSTRUCTIONS
@@ -409,6 +434,9 @@ impl Job {
                             "Deobfuscation job exceeded one million evaluation steps",
                         ));
                     }
+                    if self.report.options.control_flow {
+                        result.counts.flattened = flow::unflatten(&mut rows);
+                    }
                     if self.report.options.branches {
                         thread_branches(&mut rows, &mut result.counts);
                     }
@@ -461,6 +489,7 @@ impl Job {
         self.report.counts.branches += result.counts.branches;
         self.report.counts.strings += result.counts.strings;
         self.report.counts.unreachable_instructions += result.counts.unreachable_instructions;
+        self.report.counts.flattened += result.counts.flattened;
         self.report.skipped_methods += usize::from(result.status == "skipped");
         self.report.methods.push(result);
         self.cursor += 1;
@@ -484,6 +513,13 @@ impl Job {
             } else {
                 crate::pe_write::write(a, &self.edits)?
             };
+            // Debugger queries are answered first, so the constant/branch passes of a
+            // later run see a plain `false` where the guard used to ask.
+            let bytes = if self.report.options.anti_debug {
+                self.neutralize_debugger_checks(a, bytes)?
+            } else {
+                bytes
+            };
             // Proxy unwrapping is a same-size patch applied on top of whatever the
             // string/IL passes produced; it preserves offsets and exception regions.
             let bytes = if self.report.options.proxies {
@@ -498,6 +534,7 @@ impl Job {
             };
             let unchanged = self.edits.is_empty()
                 && self.literals.is_empty()
+                && self.report.counts.debugger_checks == 0
                 && self.report.counts.proxies == 0
                 && self.report.counts.renamed == 0;
             self.report.outcome = if unchanged {
@@ -616,6 +653,33 @@ impl Job {
             ));
         }
         Ok(())
+    }
+    /// Answers the modeled debugger queries in place; a failure keeps the input bytes.
+    fn neutralize_debugger_checks(&mut self, a: &Assembly, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        let owned;
+        let base = if bytes == a.bytes {
+            a
+        } else {
+            owned = Assembly::load(bytes.clone())?;
+            &owned
+        };
+        match crate::pe_write::write_debugger_checks(base) {
+            Ok((output, count)) => {
+                self.report.counts.debugger_checks = count;
+                if count > 0 {
+                    self.report
+                        .notices
+                        .push(format!("Answered {count} debugger queries."));
+                }
+                Ok(output)
+            }
+            Err(e) => {
+                self.report
+                    .notices
+                    .push(format!("Debugger-query cleanup skipped: {}", e.detail));
+                Ok(bytes)
+            }
+        }
     }
     /// Unwraps proxy/forwarder calls on top of the already written bytes. Forwarders
     /// are re-detected from the current image (tokens are stable) and call sites are

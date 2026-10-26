@@ -20,6 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             branches: false,
             strings: false,
             resource_strings: true,
+            control_flow: false,
+            anti_debug: true,
             rename: true,
             proxies: true,
         },
