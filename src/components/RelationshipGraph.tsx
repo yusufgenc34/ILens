@@ -137,7 +137,9 @@ export default function RelationshipGraph({map,onOpen}:{map:FunctionMap;onOpen:(
       for(const l of links){
         const a=p.get(l.from)!,b=p.get(l.to)!
         let dx=a.x-b.x,dy=a.y-b.y;const d=Math.hypot(dx,dy)||0.01
-        const att=(d*d/k)*Math.min(0.5+l.weight*0.2,2.5);dx=dx/d*att;dy=dy/d*att
+        // A type's own functions sit tightly around it; call edges pull by how many.
+        const pull=l.kind==='contains'?3:Math.min(0.5+l.weight*0.2,2.5)
+        const att=(d*d/k)*pull;dx=dx/d*att;dy=dy/d*att
         const da=disp.get(l.from)!,db=disp.get(l.to)!
         da.x-=dx;da.y-=dy;db.x+=dx;db.y+=dy
       }

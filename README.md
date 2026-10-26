@@ -22,7 +22,10 @@ This is an early decompiler release. Reconstructed code is not the original sour
 - Embedded resource inspection with text, hex, PNG previews and `.resources` v2 entry downloads.
 - Declared .NET target and CLR metadata versions displayed separately.
 - Obfuscator marker inspection with evidence and clearly labeled naming heuristics.
-- Experimental deobfuscation: generic constants/branches, optional pure string helpers, and static resource-string decoding for one legacy Eazfuscator-compatible layout. Includes per-method reports, cancellation, verified downloads and separate analysis copies; this is not a complete de4dot port.
+- Experimental deobfuscation: generic constants/branches, symbol renaming, proxy/forwarder unwrapping, switch-dispatcher straightening, debugger checks answered as "not attached", optional pure string helpers including array- and Base64-backed decoders, and static resource-string decoding for one legacy Eazfuscator-compatible layout. Includes per-method reports, cancellation, verified downloads and separate analysis copies; this is not a complete de4dot port.
+- A relationship map of every type and call in an assembly, with click-to-focus, search over names, signatures and string literals, and `unused` for functions nothing calls.
+- Packed assemblies carried in embedded resources are listed and opened into the workspace; they are parsed, never decompressed or executed.
+- "Where is this string used": selecting a literal lists every method across the workspace whose CIL loads it.
 - Tailwind-based dark and light appearance, six code themes, syntax highlighting controls, and saved editor preferences.
 - Bounds-checked parsing, structured diagnostics, cancellation, and explicit workspace cleanup.
 - Project export with a Visual Studio solution, per-assembly C# projects, namespace folders, resources and project references.
@@ -51,7 +54,8 @@ The first build installs the matching `wasm-bindgen-cli` and compiles the WASM c
 5. Choose Edit > Settings to customize the code viewer.
 6. Choose File > Export to Project to download a solution with one project per selected assembly. Use File > Save Code for individual source downloads.
 7. Open the IL tab on a supported method and choose Edit IL, validate/apply changes, then File > Save Module to download the modified assembly.
-8. Choose File > Deobfuscate Assembly for the initial generic cleanup passes. String evaluation is opt-in. Review the report, then download the result or open a separate copy alongside the original. Try `samples/fixtures/ILens.Deobfuscation.dll` to see two supported string calls resolve; the other fixture methods demonstrate explicit limitations.
+8. Choose Extras > Deobfuscate (de4dot-style), or Fix it on the obfuscation warning, to run the default cleanup passes. String evaluation is opt-in. Review the report, then download the result or open a separate copy alongside the original. Try `samples/fixtures/ILens.Deobfuscation.dll` to see two supported string calls resolve; the other fixture methods demonstrate explicit limitations.
+9. Choose Extras > Function Mapper… for the relationship map, and Extras > Packed Assemblies… to open a payload stored in this file's resources.
 
 Use `Ctrl/Cmd K` for metadata search, `Ctrl/Cmd F` inside the editor, and `Ctrl/Cmd`-click an underlined C# member or an IL metadata token to navigate. F12 follows a C# reference at the cursor; `Alt+Left` / `Alt+Right` walk navigation history. The bookmark button and View > Bookmarks keep useful declarations within the current workspace. Refreshing clears assemblies, folder access, tabs and bookmarks; editor preferences are retained.
 
@@ -119,6 +123,14 @@ These images show the running application analyzing the compiled C# fixture incl
 ### Original IL
 
 ![Decoded CIL with instruction offsets and resolved metadata](docs/screenshots/il.png)
+
+### Relationship map
+
+![The relationship map focused on one type, with its own functions around it](docs/screenshots/relationship-map.png)
+
+### Deobfuscation report
+
+![The deobfuscation report with per-pass counts and the notices that qualify them](docs/screenshots/deobfuscation-report.png)
 
 ### Editor settings
 

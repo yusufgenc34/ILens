@@ -29,7 +29,7 @@ test('the mapper is only a map and shows every type, including unconnected ones'
   expect(errors).toEqual([])
 })
 
-test('clicking a type focuses it and shows its own functions', async ({page}) => {
+test('clicking a type focuses it and shows its own functions', async ({page}, info) => {
   const mapper = await open(page, 'samples/fixtures/ILens.Patterns.dll')
   const graph = mapper.getByRole('img', {name: 'Assembly relationship map'})
   const calculator = graph.getByRole('button', {name: 'Calculator (class)', exact: true})
@@ -41,6 +41,7 @@ test('clicking a type focuses it and shows its own functions', async ({page}) =>
   await expect(mapper.getByText('Focused on')).toBeVisible()
   await expect(graph.getByRole('button', {name: 'function Add', exact: true})).toBeVisible()
   await expect(graph.getByRole('button', {name: 'Mode (enum)', exact: true})).toHaveCount(0)
+  await page.screenshot({path: info.outputPath('relationship-map.png'), animations: 'disabled'})
   await mapper.getByRole('button', {name: 'Show whole map', exact: true}).click()
   await expect(graph.getByRole('button', {name: 'Mode (enum)', exact: true})).toBeVisible()
   await calculator.dblclick()
