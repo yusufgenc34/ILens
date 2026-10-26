@@ -103,6 +103,8 @@ pub struct Job {
     /// Same-size replacement of any static `string(int)` decoder the evaluator resolves,
     /// used where the general IL writer cannot rewrite whole methods.
     literal_strings: bool,
+    /// Same-size de-flattening, used for the same reason.
+    literal_flow: bool,
     literals: Vec<crate::pe_write::LiteralPatch>,
     pub report: Report,
     pub output: Option<Vec<u8>>,
@@ -167,17 +169,24 @@ impl Job {
             crate::pe_write::literal_capability(a)?;
         }
         let mut literal_strings = false;
+        let mut literal_flow = false;
         if generic && let Err(e) = crate::pe_write::capability(a) {
             // Renaming, proxy unwrapping and same-size string replacement survive a
             // layout the general IL writer cannot handle (Field-RVA arrays, for one);
             // only the whole-method IL transforms are dropped.
             literal_strings = options.strings;
-            if !options.rename && !options.proxies && !options.anti_debug && !literal_strings {
+            literal_flow = options.control_flow;
+            if !options.rename
+                && !options.proxies
+                && !options.anti_debug
+                && !literal_strings
+                && !literal_flow
+            {
                 return Err(e);
             }
-            (options.constants, options.branches, options.control_flow) = (false, false, false);
+            (options.constants, options.branches) = (false, false);
             options.strings = literal_strings;
-            if literal_strings {
+            if literal_strings || literal_flow {
                 crate::pe_write::literal_capability(a)?;
             }
             skipped_notice = Some(format!("Generic IL transforms skipped: {}", e.detail));
@@ -216,6 +225,7 @@ impl Job {
             retained: 0,
             resource,
             literal_strings,
+            literal_flow,
             literals: vec![],
             edits: BTreeMap::new(),
             output: None,
@@ -344,7 +354,7 @@ impl Job {
                 } else if !(self.report.options.constants
                     || self.report.options.branches
                     || self.report.options.strings
-                    || self.report.options.control_flow
+                    || (self.report.options.control_flow && !self.literal_flow)
                     || self.report.options.proxies
                     || self.report.options.anti_debug)
                 {
@@ -434,7 +444,7 @@ impl Job {
                             "Deobfuscation job exceeded one million evaluation steps",
                         ));
                     }
-                    if self.report.options.control_flow {
+                    if self.report.options.control_flow && !self.literal_flow {
                         result.counts.flattened = flow::unflatten(&mut rows);
                     }
                     if self.report.options.branches {
@@ -513,6 +523,13 @@ impl Job {
             } else {
                 crate::pe_write::write(a, &self.edits)?
             };
+            // Where whole-method rewriting is unavailable, de-flattening is a same-size
+            // patch on the written bytes, like the other fallbacks.
+            let bytes = if self.literal_flow {
+                self.straighten_flow(a, bytes)?
+            } else {
+                bytes
+            };
             // Debugger queries are answered first, so the constant/branch passes of a
             // later run see a plain `false` where the guard used to ask.
             let bytes = if self.report.options.anti_debug {
@@ -534,6 +551,7 @@ impl Job {
             };
             let unchanged = self.edits.is_empty()
                 && self.literals.is_empty()
+                && self.report.counts.flattened == 0
                 && self.report.counts.debugger_checks == 0
                 && self.report.counts.proxies == 0
                 && self.report.counts.renamed == 0;
@@ -653,6 +671,33 @@ impl Job {
             ));
         }
         Ok(())
+    }
+    /// Straightens switch dispatchers in place; a failure keeps the input bytes.
+    fn straighten_flow(&mut self, a: &Assembly, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        let owned;
+        let base = if bytes == a.bytes {
+            a
+        } else {
+            owned = Assembly::load(bytes.clone())?;
+            &owned
+        };
+        match crate::pe_write::write_flattened(base) {
+            Ok((output, count)) => {
+                self.report.counts.flattened = count;
+                if count > 0 {
+                    self.report
+                        .notices
+                        .push(format!("Straightened {count} control-flow steps."));
+                }
+                Ok(output)
+            }
+            Err(e) => {
+                self.report
+                    .notices
+                    .push(format!("Control-flow straightening skipped: {}", e.detail));
+                Ok(bytes)
+            }
+        }
     }
     /// Answers the modeled debugger queries in place; a failure keeps the input bytes.
     fn neutralize_debugger_checks(&mut self, a: &Assembly, bytes: Vec<u8>) -> Result<Vec<u8>> {

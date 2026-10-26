@@ -8,7 +8,7 @@
 //! Nothing is inferred about the state value: only stores whose literal sits
 //! immediately before them, in the same basic block, are resolved. Any other store
 //! leaves the local live and the dispatcher reachable and untouched.
-use crate::{cil_encode::EditableInstruction, emulate};
+use crate::{cil_encode::EditableInstruction, deobfuscate::eaz::constant, emulate};
 use std::collections::{HashMap, HashSet};
 
 /// The local a `ldloc`/`stloc`/`ldloca` row addresses, in any of its encodings.
@@ -126,4 +126,122 @@ pub(crate) fn unflatten(rows: &mut [EditableInstruction]) -> usize {
         rows[*index].operand = target.clone();
     }
     rewrites.len()
+}
+
+/// The same de-flattening against a decoded body, as in-place byte patches
+/// `(code offset, replacement bytes)`. Only the literal, the store and the existing
+/// branch's displacement are touched; the branch keeps its opcode and its width, so no
+/// instruction moves and no exception region shifts. Used where whole-method rewriting
+/// is unavailable, which is most protected assemblies.
+pub(crate) fn patches(body: &crate::cil::MethodBody) -> Vec<(u32, Vec<u8>)> {
+    use crate::cil::{Instruction, Operand};
+    /// The local a `ldloc`/`stloc`/`ldloca` instruction addresses, in any encoding.
+    fn addressed(i: &Instruction) -> Option<(&'static str, u32)> {
+        let (kind, rest) = ["ldloca", "ldloc", "stloc"]
+            .into_iter()
+            .find_map(|k| i.name.strip_prefix(k).map(|rest| (k, rest)))?;
+        let index = match (rest, &i.operand) {
+            ("" | ".s", Operand::Variable(n)) => u32::from(*n),
+            ("" | ".s", _) => return None,
+            _ => rest.strip_prefix('.')?.parse().ok()?,
+        };
+        Some((kind, index))
+    }
+    let at = |offset: u32| {
+        body.instructions
+            .binary_search_by_key(&offset, |i| i.offset)
+            .ok()
+    };
+    // Dispatchers, by the offset of their `ldloc`: (state local, case targets, fallthrough).
+    let mut dispatch = HashMap::new();
+    for (index, i) in body.instructions.iter().enumerate() {
+        let Some(("ldloc", state)) = addressed(i) else {
+            continue;
+        };
+        let (Some(switch), Some(after)) = (
+            body.instructions
+                .get(index + 1)
+                .filter(|r| r.name == "switch"),
+            body.instructions.get(index + 2),
+        ) else {
+            continue;
+        };
+        let mut targets = switch.targets();
+        targets.push(after.offset);
+        dispatch.insert(i.offset, (state, targets));
+    }
+    if dispatch.is_empty() {
+        return vec![];
+    }
+    // A state local may only be read by its dispatchers and never have its address taken.
+    let rejected: HashSet<u32> = body
+        .instructions
+        .iter()
+        .filter_map(|i| match addressed(i) {
+            Some(("ldloca", state)) => Some(state),
+            Some(("ldloc", state)) if !dispatch.contains_key(&i.offset) => Some(state),
+            _ => None,
+        })
+        .collect();
+    let boundaries = crate::pe_write::literal_boundaries(body);
+    let mut out = Vec::new();
+    for (index, store) in body.instructions.iter().enumerate() {
+        let Some(("stloc", state)) = addressed(store) else {
+            continue;
+        };
+        let (Some(source), Some(branch)) = (
+            index.checked_sub(1).and_then(|i| body.instructions.get(i)),
+            body.instructions.get(index + 1),
+        ) else {
+            continue;
+        };
+        // Nothing may enter between the literal and the branch, and nothing may jump at
+        // the branch itself: its target is about to mean something else.
+        if rejected.contains(&state)
+            || !matches!(branch.name.as_str(), "br" | "br.s")
+            || boundaries.contains(&store.offset)
+            || boundaries.contains(&branch.offset)
+            || source.offset + source.size != store.offset
+            || store.offset + store.size != branch.offset
+        {
+            continue;
+        }
+        let Some(value) = constant(source) else {
+            continue;
+        };
+        let Operand::Branch(current) = branch.operand else {
+            continue;
+        };
+        let Some((dispatched, targets)) = dispatch.get(&current) else {
+            continue;
+        };
+        if *dispatched != state || at(current).is_none() {
+            continue;
+        }
+        let target = usize::try_from(value)
+            .ok()
+            .filter(|&v| v < targets.len() - 1)
+            .map_or_else(|| targets[targets.len() - 1], |v| targets[v]);
+        let end = branch.offset + branch.size;
+        let Some(delta) = i64::from(target).checked_sub(i64::from(end)) else {
+            continue;
+        };
+        // The branch keeps its encoding, so the new target must fit the operand it has.
+        let encoded = match (
+            branch.name.as_str(),
+            i8::try_from(delta),
+            i32::try_from(delta),
+        ) {
+            ("br.s", Ok(d), _) => vec![0x2b, d as u8],
+            ("br", _, Ok(d)) => [&[0x38u8][..], &d.to_le_bytes()[..]].concat(),
+            _ => continue,
+        };
+        if encoded.len() as u32 != branch.size {
+            continue;
+        }
+        let mut bytes = vec![0u8; (store.offset + store.size - source.offset) as usize];
+        bytes.extend(encoded);
+        out.push((source.offset, bytes));
+    }
+    out
 }

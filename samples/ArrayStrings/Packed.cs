@@ -27,6 +27,22 @@ public static class Packed
         string.Intern(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(text)));
     // Not a candidate: the argument is not a literal, so no call site is replaced.
     public static string Dynamic(int key) => Decode(key);
+    // A switch dispatcher in an assembly the general IL writer refuses, so the same-size
+    // writer has to straighten it by retargeting the branches that are already there.
+    public static int Flattened(int value)
+    {
+        int state = 0;
+        while (true)
+        {
+            switch (state)
+            {
+                case 0: value += 1; state = 2; continue;
+                case 1: return value;
+                case 2: value *= 3; state = 1; continue;
+                default: return -1;
+            }
+        }
+    }
     // Not a candidate: a non-interned result would change string reference identity.
     public static string Fresh() => System.Text.Encoding.UTF8.GetString(new byte[] { 0x61 });
 }

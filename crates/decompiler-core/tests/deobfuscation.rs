@@ -965,3 +965,58 @@ fn string_usage_lists_loading_methods_across_the_workspace() {
     session.close(other);
     assert_eq!(session.string_usages(id, literal).unwrap().len(), 1);
 }
+#[test]
+fn switch_dispatchers_also_straighten_where_whole_method_rewriting_is_unavailable() {
+    let options = Options {
+        control_flow: true,
+        constants: false,
+        branches: false,
+        ..Options::default()
+    };
+    let (a, report, bytes) = run(PACKED, options);
+    // A Field-RVA layout rules the general IL writer out, so this is a same-size patch.
+    assert_eq!(bytes.len(), PACKED.len());
+    assert_eq!(report.counts.flattened, 2);
+    let original = Assembly::load(PACKED.to_vec()).unwrap();
+    let before = original
+        .body(token(&original, "Flattened"))
+        .unwrap()
+        .unwrap();
+    let after = a.body(token(&a, "Flattened")).unwrap().unwrap();
+    assert_eq!(before.code_size, after.code_size);
+    assert_eq!(
+        before
+            .instructions
+            .iter()
+            .map(|i| i.offset)
+            .collect::<Vec<_>>(),
+        after
+            .instructions
+            .iter()
+            .map(|i| i.offset)
+            .collect::<Vec<_>>()
+    );
+    // Each literal transition now branches straight at the case the dispatcher chose,
+    // and its `ldc.i4`/`stloc` pair is gone. The dispatcher itself stays: removing it
+    // would move instructions, which this writer must not do.
+    let branch = |from: &str| {
+        let index = after
+            .instructions
+            .iter()
+            .position(|i| i.offset == u32::from_str_radix(from, 16).unwrap())
+            .unwrap();
+        after.instructions[index].targets().first().copied()
+    };
+    // `state = 2; continue;` reaches case 2 at IL_0021 directly.
+    assert_eq!(branch("1D"), Some(0x21));
+    // `state = 1; continue;` reaches case 1 at IL_001F directly.
+    assert_eq!(branch("28"), Some(0x1F));
+    for offset in [0x1b, 0x1c, 0x26, 0x27] {
+        let instruction = after
+            .instructions
+            .iter()
+            .find(|i| i.offset == offset)
+            .unwrap();
+        assert_eq!(instruction.name, "nop", "IL_{offset:04X}");
+    }
+}

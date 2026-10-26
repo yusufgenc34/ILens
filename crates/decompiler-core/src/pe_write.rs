@@ -1628,6 +1628,16 @@ fn write_same_size_calls(
             patches.push(at..at + 5);
         }
     }
+    finish_same_size(a, label, out, patches)
+}
+/// Confirms a same-size patch set: nothing outside a proved range changed, the output
+/// reparses with the same identity, and every original instruction boundary survives.
+fn finish_same_size(
+    a: &Assembly,
+    label: &str,
+    out: Vec<u8>,
+    mut patches: Vec<Range<usize>>,
+) -> Result<(Vec<u8>, usize)> {
     if patches.is_empty() {
         return Ok((a.bytes.clone(), 0));
     }
@@ -1697,6 +1707,37 @@ fn write_same_size_calls(
         }
     }
     Ok((out, count))
+}
+/// Straightens switch dispatchers in place. Where a state transition stores a literal
+/// and then branches to its dispatcher, the literal and the store become `nop`s and the
+/// existing branch is retargeted at the block the dispatcher would have chosen. Only the
+/// branch's displacement changes, so the instruction keeps its width and nothing moves.
+pub(crate) fn write_flattened(a: &Assembly) -> Result<(Vec<u8>, usize)> {
+    preflight(a, true)?;
+    let mut patches: Vec<Range<usize>> = Vec::new();
+    let mut out = a.bytes.clone();
+    for (index, row) in a.metadata().method_defs.iter().enumerate() {
+        if row.rva == 0 {
+            continue;
+        }
+        let token = 0x0600_0001 + index as u32;
+        let Some(body) = a.body(token)? else { continue };
+        let code_start = body.file_offset
+            + if a.bytes[body.file_offset] & 3 == 2 {
+                1
+            } else {
+                12
+            };
+        for (at, bytes) in crate::deobfuscate::flow::patches(&body) {
+            let start = code_start + at as usize;
+            if start + bytes.len() > a.bytes.len() {
+                return Err(unsupported("Control-flow patch outside the image"));
+            }
+            out[start..start + bytes.len()].copy_from_slice(&bytes);
+            patches.push(start..start + bytes.len());
+        }
+    }
+    finish_same_size(a, "Control-flow", out, patches)
 }
 /// Rewrites debugger queries so the copy reads as it runs without a debugger attached:
 /// `Debugger.IsAttached`/`IsLogging()` become `false` and `Debugger.Break()` disappears.
