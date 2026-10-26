@@ -70,7 +70,7 @@ test('a genuine SDK ReadyToRun assembly exposes its preserved IL with a read-onl
   // A real framework ReadyToRun image is far larger than the fixtures; indexing it on a
   // loaded machine takes longer than the shared assertion timeout allows.
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('1',{timeout:30_000})
-  await page.getByLabel('Assembly warnings').locator('summary').click()
+  await page.getByLabel('Assembly warnings').locator('summary strong').click()
   await expect(page.getByLabel('Assembly warnings')).toContainText('ReadyToRun image')
   await page.keyboard.press('ControlOrMeta+k');await page.getByLabel('Search members and strings').fill('get_IsOutputRedirected')
   await page.locator('.search-results > button').filter({has:page.locator('strong',{hasText:/^get_IsOutputRedirected$/})}).click()
@@ -104,7 +104,7 @@ test('managed EXE with an understated PE directory count opens and retains origi
   await page.getByLabel('Open assembly files').setInputFiles({name:'ProtectedHeader.exe',mimeType:'application/octet-stream',buffer})
   await expect(page.getByLabel('Loaded assemblies')).toHaveText('1')
   await expect(page.getByRole('alert')).toHaveCount(0)
-  await page.getByLabel('Assembly warnings').locator('summary').click()
+  await page.getByLabel('Assembly warnings').locator('summary strong').click()
   await expect(page.getByLabel('Assembly warnings')).toContainText('PE directory count omits the CLR entry')
   await page.keyboard.press('ControlOrMeta+k');await page.getByLabel('Search members and strings').fill('Main')
   await page.locator('.search-results > button').filter({has:page.locator('strong',{hasText:/^Main$/})}).click()

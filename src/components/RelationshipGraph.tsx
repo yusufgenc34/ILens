@@ -32,6 +32,10 @@ export default function RelationshipGraph({map,onOpen}:{map:FunctionMap;onOpen:(
   const [expanded,setExpanded]=useState<Set<number>>(new Set())
   const [focus,setFocus]=useState<number|null>(null)
   const [query,setQuery]=useState('')
+  // A click focuses, which rebuilds the map; hold it back so the second click of
+  // a double-click still lands on the same node instead of on what replaced it.
+  const pendingFocus=useRef<ReturnType<typeof setTimeout>|undefined>(undefined)
+  useEffect(()=>()=>clearTimeout(pendingFocus.current),[])
 
   const functionsByOwner=useMemo(()=>{
     const by=new Map<number,MappedFunction[]>()
@@ -185,9 +189,11 @@ export default function RelationshipGraph({map,onOpen}:{map:FunctionMap;onOpen:(
     setView(v=>({x:s.x-(s.x-v.x)*f,y:s.y-(s.y-v.y)*f,w:v.w*f,h:v.h*f}))
   }
   const activate=(node:GNode)=>{
+    clearTimeout(pendingFocus.current)
     setFocus(node.id)
     if(node.type)setExpanded(prev=>new Set(prev).add(node.id))
   }
+  const open=(id:number)=>{clearTimeout(pendingFocus.current);onOpen(id)}
   const showAll=()=>{setFocus(null);setExpanded(new Set());setQuery('')}
   const focusLabel=focus===null?null:typeByToken.get(focus)?.name??map.functions.find(f=>f.token===focus)?.name??null
 
@@ -229,9 +235,9 @@ export default function RelationshipGraph({map,onOpen}:{map:FunctionMap;onOpen:(
             transform={`translate(${p.x-w/2},${p.y-h/2})`}
             className="cursor-pointer [&:focus-visible_rect]:stroke-[var(--ring)]"
             onPointerDown={e=>{e.stopPropagation();down(e,node.id)}}
-            onClick={e=>{e.stopPropagation();if(!drag.current?.moved)activate(node)}}
+            onClick={e=>{e.stopPropagation();if(drag.current?.moved)return;clearTimeout(pendingFocus.current);pendingFocus.current=setTimeout(()=>activate(node),250)}}
             onKeyDown={e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();activate(node)}}}
-            onDoubleClick={e=>{e.stopPropagation();onOpen(node.id)}}>
+            onDoubleClick={e=>{e.stopPropagation();open(node.id)}}>
             <title>{node.type?`${node.label} · ${node.sub} · click to focus, double-click to open`:`${node.label} · ${node.sub} · double-click to open`}</title>
             <rect width={w} height={h} rx={node.type?7:5} className={node.type?'fill-[var(--surface-raised)]':'fill-[var(--popover)]'}
               stroke={sel?'var(--ring)':'var(--border)'} strokeWidth={sel?2.5:1}/>

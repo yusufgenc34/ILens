@@ -87,7 +87,7 @@ test('framework versions and obfuscation warnings come from the selected assembl
   await page.getByRole('treeitem',{name:'ILens.InspectionMarkers',exact:true}).click()
   const warnings = page.getByRole('region', {name: 'Assembly warnings'})
   await expect(warnings).toContainText('Obfuscation markers detected')
-  await warnings.locator('summary').click()
+  await warnings.locator('summary strong').click()
   for (const tool of ['ConfuserEx', 'Dotfuscator', 'Babel Obfuscator', 'SmartAssembly']) await expect(warnings.locator('summary')).toContainText(tool)
   await expect(warnings).toContainText('fixture marker')
   await expect(warnings).toContainText('not prove which tool')
