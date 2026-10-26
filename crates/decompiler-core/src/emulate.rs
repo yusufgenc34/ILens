@@ -19,7 +19,19 @@ pub enum Value {
     I32(i32),
     String(Rc<Vec<u16>>, bool), // true: literal or explicit String.Intern
     Chars(Rc<RefCell<Vec<u16>>>),
+    Bytes(Rc<RefCell<Vec<u8>>>),
+    /// `ldtoken <field>`, only ever consumed by `RuntimeHelpers.InitializeArray`.
+    FieldHandle(u32),
+    /// One of the modeled `System.Text.Encoding` singletons, never a real instance.
+    Encoding(Encoding),
     Null,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Encoding {
+    Utf8,
+    Unicode,
+    BigEndianUnicode,
+    Ascii,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stop(pub String);
@@ -102,6 +114,51 @@ fn chars(value: Value) -> Result<Rc<RefCell<Vec<u16>>>> {
         Err(stop("Expected non-null char array"))
     }
 }
+fn bytes(value: Value) -> Result<Rc<RefCell<Vec<u8>>>> {
+    if let Value::Bytes(s) = value {
+        Ok(s)
+    } else {
+        Err(stop("Expected non-null byte array"))
+    }
+}
+impl Encoding {
+    /// Decodes without a replacement fallback: anything malformed stops evaluation
+    /// instead of silently producing the runtime's U+FFFD substitutions.
+    fn decode(self, data: &[u8]) -> Result<Vec<u16>> {
+        let pairs = |wide: fn([u8; 2]) -> u16| {
+            if !data.len().is_multiple_of(2) {
+                return Err(stop(
+                    "Encoded byte count is not a whole number of UTF-16 units",
+                ));
+            }
+            Ok(data
+                .chunks_exact(2)
+                .map(|b| wide([b[0], b[1]]))
+                .collect::<Vec<u16>>())
+        };
+        match self {
+            Self::Unicode => pairs(u16::from_le_bytes),
+            Self::BigEndianUnicode => pairs(u16::from_be_bytes),
+            Self::Ascii => data
+                .iter()
+                .map(|&b| {
+                    if b < 0x80 {
+                        Ok(u16::from(b))
+                    } else {
+                        Err(stop(
+                            "Non-ASCII byte would decode to a replacement character",
+                        ))
+                    }
+                })
+                .collect(),
+            Self::Utf8 => {
+                let text = std::str::from_utf8(data)
+                    .map_err(|_| stop("Invalid UTF-8 would decode to replacement characters"))?;
+                Ok(text.encode_utf16().collect())
+            }
+        }
+    }
+}
 fn string(value: Value) -> Result<Rc<Vec<u16>>> {
     if let Value::String(s, _) = value {
         Ok(s)
@@ -161,21 +218,8 @@ pub fn constant(op: &str, operand: &str) -> Option<i32> {
             .filter(|n| (0..=8).contains(n)),
     }
 }
-fn fits(value: &Value, ty: &Type) -> bool {
-    match (value, ty) {
-        (Value::I32(v), Type::Primitive(n)) => match n.as_str() {
-            "int" | "uint" => true,
-            "bool" => matches!(*v, 0 | 1),
-            "char" | "ushort" => u16::try_from(*v).is_ok(),
-            "short" => i16::try_from(*v).is_ok(),
-            "byte" => u8::try_from(*v).is_ok(),
-            "sbyte" => i8::try_from(*v).is_ok(),
-            _ => false,
-        },
-        (Value::String(..) | Value::Null, Type::Primitive(n)) => n == "string",
-        (Value::Chars(_) | Value::Null, Type::Array(t, 1)) => **t == Type::primitive("char"),
-        _ => false,
-    }
+fn element(ty: &Type, names: &[&str]) -> bool {
+    matches!(ty, Type::Array(t, 1) if matches!(&**t, Type::Primitive(n) if names.contains(&n.as_str())))
 }
 
 pub struct Evaluator<'a> {
@@ -232,6 +276,54 @@ impl<'a> Evaluator<'a> {
     pub fn call(&mut self, token: u32, args: Vec<Value>) -> Result<Value> {
         self.run(token, args, 0)
     }
+    fn fits(&self, value: &Value, ty: &Type) -> bool {
+        match (value, ty) {
+            (Value::I32(v), Type::Primitive(n)) => match n.as_str() {
+                "int" | "uint" => true,
+                "bool" => matches!(*v, 0 | 1),
+                "char" | "ushort" => u16::try_from(*v).is_ok(),
+                "short" => i16::try_from(*v).is_ok(),
+                "byte" => u8::try_from(*v).is_ok(),
+                "sbyte" => i8::try_from(*v).is_ok(),
+                _ => false,
+            },
+            (Value::String(..) | Value::Null, Type::Primitive(n)) => n == "string",
+            (Value::Chars(_) | Value::Null, t) => element(t, &["char"]),
+            (Value::Bytes(_), t) => element(t, &["byte", "sbyte"]),
+            // Only the modeled singletons; there is no general object model.
+            (Value::Encoding(_), Type::Named(t)) => self.core_type(*t, "System.Text.Encoding"),
+            _ => false,
+        }
+    }
+    /// The static bytes behind a Field-RVA field, the storage `InitializeArray` copies from.
+    fn field_data(&mut self, token: u32, len: usize) -> Result<Vec<u8>> {
+        if token >> 24 != 4 {
+            return Err(stop("Array initialization requires a field of this module"));
+        }
+        let index = token & 0xffffff;
+        let field = self
+            .a
+            .metadata()
+            .fields
+            .get(index.saturating_sub(1) as usize)
+            .ok_or_else(|| stop("Invalid array-initialization field"))?;
+        if field.flags & 0x110 != 0x110 {
+            return Err(stop(
+                "Array initialization requires a static field with HasFieldRVA",
+            ));
+        }
+        let rva = self
+            .a
+            .metadata()
+            .field_rvas
+            .iter()
+            .find(|r| r.field == index)
+            .ok_or_else(|| stop("Array-initialization field has no Field-RVA storage"))?
+            .rva;
+        self.budget.allocate(len + 64)?;
+        let range = self.a.image.range(&self.a.bytes, rva, len)?;
+        Ok(self.a.bytes[range].to_vec())
+    }
     fn run(&mut self, token: u32, mut args: Vec<Value>, depth: usize) -> Result<Value> {
         self.budget.tick()?;
         if depth >= 8 {
@@ -266,7 +358,7 @@ impl<'a> Evaluator<'a> {
             ));
         }
         for (v, t) in args.iter().zip(&method.signature.parameters) {
-            if !fits(v, t) {
+            if !self.fits(v, t) {
                 return Err(stop("Unsupported helper argument type"));
             }
             let len = match v {
@@ -336,9 +428,9 @@ impl<'a> Evaluator<'a> {
             .map(|t| {
                 if !body.init_locals {
                     None
-                } else if fits(&Value::I32(0), t) {
+                } else if self.fits(&Value::I32(0), t) {
                     Some(Value::I32(0))
-                } else if fits(&Value::Null, t) {
+                } else if self.fits(&Value::Null, t) {
                     Some(Value::Null)
                 } else {
                     None
@@ -398,7 +490,7 @@ impl<'a> Evaluator<'a> {
                         .parameters
                         .get(index)
                         .ok_or_else(|| stop("Invalid argument index"))?;
-                    if !fits(&value, ty) {
+                    if !self.fits(&value, ty) {
                         return Err(stop("Argument type mismatch"));
                     }
                     args[index] = value;
@@ -414,7 +506,7 @@ impl<'a> Evaluator<'a> {
                     let ty = types
                         .get(index)
                         .ok_or_else(|| stop("Invalid local index"))?;
-                    if !fits(&v, ty) {
+                    if !self.fits(&v, ty) {
                         return Err(stop("Local type mismatch"));
                     }
                     locals[index] = Some(v);
@@ -478,37 +570,77 @@ impl<'a> Evaluator<'a> {
                     )?,
                 ),
                 "newarr" => {
-                    if !self.core_type(instruction.token().unwrap_or(0), "System.Char") {
-                        return Err(stop("Only char arrays are supported"));
+                    let element = instruction.token().unwrap_or(0);
+                    let wide = self.core_type(element, "System.Char");
+                    if !wide
+                        && !self.core_type(element, "System.Byte")
+                        && !self.core_type(element, "System.SByte")
+                    {
+                        return Err(stop("Only char, byte and sbyte arrays are supported"));
                     }
                     let n = integer(pop(&mut stack)?)?;
                     if n < 0 {
                         return Err(stop("Negative array length"));
                     }
                     self.budget.units(n as usize)?;
-                    stack.push(Value::Chars(Rc::new(RefCell::new(vec![0; n as usize]))));
+                    stack.push(if wide {
+                        Value::Chars(Rc::new(RefCell::new(vec![0; n as usize])))
+                    } else {
+                        Value::Bytes(Rc::new(RefCell::new(vec![0; n as usize])))
+                    });
                 }
+                // Only ever consumed by the modeled `InitializeArray`; it is not a usable handle.
+                "ldtoken" => stack.push(Value::FieldHandle(
+                    instruction.token().ok_or_else(|| stop("Missing token"))?,
+                )),
                 "ldlen" => {
-                    let array = chars(pop(&mut stack)?)?;
-                    stack.push(Value::I32(array.borrow().len() as i32));
+                    let n = match pop(&mut stack)? {
+                        Value::Chars(a) => a.borrow().len(),
+                        Value::Bytes(a) => a.borrow().len(),
+                        _ => return Err(stop("Expected non-null array")),
+                    };
+                    stack.push(Value::I32(n as i32));
                 }
-                "ldelem.u2" => {
+                "ldelem.u2" | "ldelem.u1" | "ldelem.i1" => {
                     let index = integer(pop(&mut stack)?)? as usize;
-                    let array = chars(pop(&mut stack)?)?;
-                    let value = *array
-                        .borrow()
-                        .get(index)
-                        .ok_or_else(|| stop("Array index would throw"))?;
-                    stack.push(Value::I32(i32::from(value)));
+                    let array = pop(&mut stack)?;
+                    let at = |len: usize| {
+                        (index < len)
+                            .then_some(index)
+                            .ok_or_else(|| stop("Array index would throw"))
+                    };
+                    stack.push(Value::I32(match (op, array) {
+                        ("ldelem.u2", Value::Chars(a)) => {
+                            let a = a.borrow();
+                            i32::from(a[at(a.len())?])
+                        }
+                        ("ldelem.u1", Value::Bytes(a)) => {
+                            let a = a.borrow();
+                            i32::from(a[at(a.len())?])
+                        }
+                        ("ldelem.i1", Value::Bytes(a)) => {
+                            let a = a.borrow();
+                            i32::from(a[at(a.len())?] as i8)
+                        }
+                        _ => return Err(stop("Element load does not match the array type")),
+                    }));
                 }
-                "stelem.i2" => {
+                "stelem.i2" | "stelem.i1" => {
                     let value = integer(pop(&mut stack)?)?;
                     let index = integer(pop(&mut stack)?)? as usize;
-                    let array = chars(pop(&mut stack)?)?;
-                    *array
-                        .borrow_mut()
-                        .get_mut(index)
-                        .ok_or_else(|| stop("Array index would throw"))? = value as u16;
+                    match (op, pop(&mut stack)?) {
+                        ("stelem.i2", Value::Chars(a)) => {
+                            *a.borrow_mut()
+                                .get_mut(index)
+                                .ok_or_else(|| stop("Array index would throw"))? = value as u16;
+                        }
+                        ("stelem.i1", Value::Bytes(a)) => {
+                            *a.borrow_mut()
+                                .get_mut(index)
+                                .ok_or_else(|| stop("Array index would throw"))? = value as u8;
+                        }
+                        _ => return Err(stop("Element store does not match the array type")),
+                    }
                 }
                 "call" | "callvirt" | "newobj" => {
                     let token = instruction
@@ -522,15 +654,24 @@ impl<'a> Evaluator<'a> {
                     }
                     let values = stack.split_off(stack.len() - count);
                     let value = if token >> 24 == 6 && op == "call" {
-                        self.run(token, values, depth + 1)?
+                        Some(self.run(token, values, depth + 1)?)
                     } else {
                         self.bcl(token, op, values)?
                     };
-                    stack.push(value);
+                    // `InitializeArray` is the one modeled void call; everything else
+                    // yields the value its signature promises.
+                    match (
+                        value,
+                        called.signature.return_type.is_void() && op != "newobj",
+                    ) {
+                        (Some(v), false) => stack.push(v),
+                        (None, true) => {}
+                        _ => return Err(stop("Modeled call did not match its return type")),
+                    }
                 }
                 "ret" => {
                     let result = pop(&mut stack)?;
-                    if !stack.is_empty() || !fits(&result, &method.signature.return_type) {
+                    if !stack.is_empty() || !self.fits(&result, &method.signature.return_type) {
                         return Err(stop("Invalid helper return type or stack"));
                     }
                     return Ok(result);
@@ -581,17 +722,19 @@ impl<'a> Evaluator<'a> {
                 )
         })
     }
-    fn bcl(&mut self, token: u32, op: &str, mut args: Vec<Value>) -> Result<Value> {
+    fn bcl(&mut self, token: u32, op: &str, mut args: Vec<Value>) -> Result<Option<Value>> {
         let m = self.a.method_ref(token)?;
         let sig = &m.signature;
         if token >> 24 != 10
-            || !self.core_type(m.owner, "System.String")
             || sig.generic_count != 0
             || sig.explicit_this
             || sig.convention != 0
             || sig.vararg_at.is_some()
         {
             return Err(stop("External call is outside the pure BCL allowlist"));
+        }
+        if !self.core_type(m.owner, "System.String") {
+            return self.bcl_data(m.owner, &m.name, sig, op, args);
         }
         let p = |name| Type::primitive(name);
         let array = Type::Array(Box::new(p("char")), 1);
@@ -606,27 +749,29 @@ impl<'a> Evaluator<'a> {
                 let a = chars(args.remove(0))?;
                 self.budget.units(a.borrow().len())?;
                 let units = a.borrow().clone();
-                Ok(Value::String(Rc::new(units), false))
+                Ok(Some(Value::String(Rc::new(units), false)))
             }
             ("ToCharArray", true, [], r, "call" | "callvirt") if *r == array => {
                 let s = string(args.remove(0))?;
                 self.budget.units(s.len())?;
-                Ok(Value::Chars(Rc::new(RefCell::new(s.as_ref().clone()))))
+                Ok(Some(Value::Chars(Rc::new(RefCell::new(
+                    s.as_ref().clone(),
+                )))))
             }
             ("get_Length", true, [], r, "call" | "callvirt") if *r == p("int") => {
-                Ok(Value::I32(string(args.remove(0))?.len() as i32))
+                Ok(Some(Value::I32(string(args.remove(0))?.len() as i32)))
             }
             ("get_Chars", true, [t], r, "call" | "callvirt")
                 if *t == p("int") && *r == p("char") =>
             {
                 let s = string(args.remove(0))?;
                 let i = integer(args.remove(0))? as usize;
-                Ok(Value::I32(i32::from(
+                Ok(Some(Value::I32(i32::from(
                     *s.get(i).ok_or_else(|| stop("String index would throw"))?,
-                )))
+                ))))
             }
             ("Intern", false, [t], r, "call") if *t == p("string") && *r == p("string") => {
-                Ok(Value::String(string(args.remove(0))?, true))
+                Ok(Some(Value::String(string(args.remove(0))?, true)))
             }
             ("Concat", false, [t, u], r, "call")
                 if *t == p("string") && *u == p("string") && *r == p("string") =>
@@ -641,14 +786,151 @@ impl<'a> Evaluator<'a> {
                 let a = units(args.remove(0))?;
                 let b = units(args.remove(0))?;
                 self.budget.units(a.len() + b.len())?;
-                Ok(Value::String(
+                Ok(Some(Value::String(
                     Rc::new([a.as_slice(), b.as_slice()].concat()),
                     false,
-                ))
+                )))
             }
             _ => Err(stop(
                 "External call signature is outside the pure BCL allowlist",
             )),
         }
     }
+    /// The array/encoding half of the allowlist: static storage copied into an array,
+    /// Base64 text decoded to bytes, and the modeled `Encoding` singletons decoding
+    /// bytes back to text. These are value operations, not calls into a runtime.
+    fn bcl_data(
+        &mut self,
+        owner: u32,
+        name: &str,
+        sig: &crate::signature::MethodSignature,
+        op: &str,
+        mut args: Vec<Value>,
+    ) -> Result<Option<Value>> {
+        let p = |name| Type::primitive(name);
+        let bytes_type = |t: &Type| element(t, &["byte", "sbyte"]);
+        if self.core_type(owner, "System.Runtime.CompilerServices.RuntimeHelpers") {
+            let [Type::Named(array), Type::ValueType(handle)] = sig.parameters.as_slice() else {
+                return Err(stop("Unsupported RuntimeHelpers signature"));
+            };
+            if name != "InitializeArray"
+                || op != "call"
+                || sig.has_this
+                || !sig.return_type.is_void()
+                || !self.core_type(*array, "System.Array")
+                || !self.core_type(*handle, "System.RuntimeFieldHandle")
+            {
+                return Err(stop("Only RuntimeHelpers.InitializeArray is modeled"));
+            }
+            let Value::FieldHandle(field) = args.remove(1) else {
+                return Err(stop("InitializeArray needs a field handle from ldtoken"));
+            };
+            match args.remove(0) {
+                Value::Bytes(a) => {
+                    let data = self.field_data(field, a.borrow().len())?;
+                    a.borrow_mut().copy_from_slice(&data);
+                }
+                Value::Chars(a) => {
+                    let len = a.borrow().len();
+                    let data = self.field_data(field, len * 2)?;
+                    let units: Vec<u16> = data
+                        .chunks_exact(2)
+                        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                        .collect();
+                    a.borrow_mut().copy_from_slice(&units);
+                }
+                _ => return Err(stop("InitializeArray needs a char or byte array")),
+            }
+            return Ok(None);
+        }
+        if self.core_type(owner, "System.Convert") {
+            if name != "FromBase64String"
+                || op != "call"
+                || sig.has_this
+                || sig.parameters.as_slice() != [p("string")]
+                || !bytes_type(&sig.return_type)
+            {
+                return Err(stop("Only Convert.FromBase64String is modeled"));
+            }
+            let text = string(args.remove(0))?;
+            let text = String::from_utf16(&text)
+                .map_err(|_| stop("Base64 input is not well-formed UTF-16"))?;
+            let data = base64(&text)?;
+            self.budget.allocate(data.len() + 64)?;
+            return Ok(Some(Value::Bytes(Rc::new(RefCell::new(data)))));
+        }
+        if self.core_type(owner, "System.Text.Encoding") {
+            let kind = match (name, sig.has_this, sig.parameters.as_slice(), op) {
+                ("get_UTF8", false, [], "call") => Some(Encoding::Utf8),
+                ("get_Unicode", false, [], "call") => Some(Encoding::Unicode),
+                ("get_BigEndianUnicode", false, [], "call") => Some(Encoding::BigEndianUnicode),
+                ("get_ASCII", false, [], "call") => Some(Encoding::Ascii),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return match &sig.return_type {
+                    Type::Named(t) if self.core_type(*t, "System.Text.Encoding") => {
+                        Ok(Some(Value::Encoding(kind)))
+                    }
+                    _ => Err(stop("Unsupported Encoding property type")),
+                };
+            }
+            if name != "GetString"
+                || !sig.has_this
+                || sig.parameters.len() != 1
+                || !bytes_type(&sig.parameters[0])
+                || sig.return_type != p("string")
+            {
+                return Err(stop(
+                    "Only Encoding.GetString(byte[]) on a modeled encoding is supported",
+                ));
+            }
+            let Value::Encoding(kind) = args.remove(0) else {
+                return Err(stop(
+                    "GetString needs one of the modeled Encoding singletons",
+                ));
+            };
+            let data = bytes(args.remove(0))?;
+            let data = data.borrow();
+            self.budget.units(data.len())?;
+            return Ok(Some(Value::String(Rc::new(kind.decode(&data)?), false)));
+        }
+        Err(stop("External call is outside the pure BCL allowlist"))
+    }
+}
+/// Strict RFC 4648 Base64: no whitespace, no missing padding, no trailing bits.
+fn base64(text: &str) -> Result<Vec<u8>> {
+    let bad = || stop("Base64 input is not well-formed");
+    if !text.len().is_multiple_of(4) || text.len() > MAX_UNITS {
+        return Err(bad());
+    }
+    let digit = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let data = text.as_bytes();
+    let mut out = Vec::with_capacity(data.len() / 4 * 3);
+    for quad in data.chunks_exact(4) {
+        let pad = quad.iter().rev().take_while(|&&c| c == b'=').count();
+        if pad > 2 || quad[..4 - pad].iter().any(|&c| digit(c).is_none()) {
+            return Err(bad());
+        }
+        let mut n = 0u32;
+        for (i, &c) in quad.iter().enumerate() {
+            n |= u32::from(digit(c).unwrap_or(0)) << (18 - 6 * i);
+        }
+        out.extend_from_slice(&n.to_be_bytes()[1..4 - pad]);
+        // Padding may only appear in the final quad, and its unused bits must be zero.
+        if pad > 0
+            && (!std::ptr::eq(quad.as_ptr(), data[data.len() - 4..].as_ptr())
+                || n & ((1 << (8 * pad)) - 1) != 0)
+        {
+            return Err(bad());
+        }
+    }
+    Ok(out)
 }

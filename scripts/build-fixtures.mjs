@@ -20,6 +20,11 @@ const proxies = spawnSync('dotnet', ['build', 'samples/Proxies', '-c', 'Release'
 if (proxies.status !== 0) process.exit(proxies.status ?? 1)
 copyFileSync('samples/bin/ILens.Proxies.dll', 'samples/fixtures/ILens.Proxies.dll')
 
+// Array-backed decoders; the Field-RVA layout forces the same-size literal writer.
+const arrayStrings = spawnSync('dotnet', ['build', 'samples/ArrayStrings', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
+if (arrayStrings.status !== 0) process.exit(arrayStrings.status ?? 1)
+copyFileSync('samples/bin/ILens.ArrayStrings.dll', 'samples/fixtures/ILens.ArrayStrings.dll')
+
 const editing = spawnSync('dotnet', ['build', 'samples/Editing', '-c', 'Release', '-o', 'samples/bin'], {stdio: 'inherit'})
 if (editing.status !== 0) process.exit(editing.status ?? 1)
 copyFileSync('samples/bin/ILens.Editing.dll', 'samples/fixtures/ILens.Editing.dll')

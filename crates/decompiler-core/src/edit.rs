@@ -1100,6 +1100,32 @@ fn transfer(
             let id = types.token(operand(i)?)?;
             stack.push(types.stack(id));
         }
+        // ldtoken yields an opaque runtime handle. The handle's own type must already
+        // be referenced by this assembly; nothing new is added to its metadata.
+        0xd0 => {
+            let token = operand(i)?;
+            let handle = match token >> 24 {
+                0x04 => {
+                    types.a.field_ref(token)?;
+                    "RuntimeFieldHandle"
+                }
+                0x06 => {
+                    types.a.method_ref(token)?;
+                    "RuntimeMethodHandle"
+                }
+                0x01 | 0x02 | 0x1b => {
+                    types.token(token)?;
+                    "RuntimeTypeHandle"
+                }
+                _ => {
+                    return Err(unsupported(
+                        "ldtoken is supported for this module's fields and methods and for types",
+                    ));
+                }
+            };
+            let id = types.handle_type(handle)?;
+            stack.push(types.stack(id));
+        }
         _ => {
             return Err(unsupported(format!(
                 "Write validation for {} is not implemented",

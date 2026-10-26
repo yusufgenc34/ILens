@@ -353,6 +353,29 @@ impl<'a> Types<'a> {
         }
         self.token(token)
     }
+    /// The opaque runtime handle `ldtoken` yields. Only the three CLI handle types are
+    /// admitted, and only where this assembly already references one from a core
+    /// assembly; nothing is added to its metadata.
+    pub fn handle_type(&mut self, name: &str) -> Result<TypeId> {
+        self.spend()?;
+        let a = self.a;
+        let count = a.metadata().type_refs.len().min(1 << 20) as u32;
+        // core_name proves the System namespace and a core assembly reference.
+        let token = (1..=count)
+            .map(|row| 0x01000000 | row)
+            .find(|&t| self.core_name(t).ok().flatten().as_deref() == Some(name))
+            .ok_or_else(|| {
+                unsupported(format!(
+                    "System.{name} is not referenced from a core assembly here"
+                ))
+            })?;
+        if let Some(id) = self.tokens.get(&token) {
+            return Ok(*id);
+        }
+        let id = self.intern(Value::Struct(token))?;
+        self.tokens.insert(token, id);
+        Ok(id)
+    }
     fn token_depth(&mut self, token: u32, depth: usize) -> Result<TypeId> {
         self.spend()?;
         if depth > 48 {
@@ -540,6 +563,11 @@ impl<'a> Types<'a> {
                     && self.assignable(a, b, depth + 1)?
             }
             (Value::Class(a), Value::Class(b)) => self.derives(a, b)?,
+            // Every array derives from System.Array by the CLI specification; this is
+            // not an inference about an external hierarchy.
+            (Value::Array(_) | Value::MultiArray(..), Value::Class(b)) => {
+                self.core_name(b)?.as_deref() == Some("Array")
+            }
             _ => false,
         })
     }

@@ -1494,17 +1494,23 @@ pub(crate) fn literal_boundaries(body: &cil::MethodBody) -> BTreeSet<u32> {
         }))
         .collect()
 }
+/// The one argument a literal replacement may consume: an int constant, or a user
+/// string when the helper takes a string.
+pub(crate) fn literal_argument(i: &cil::Instruction, strings: bool) -> bool {
+    crate::deobfuscate::eaz::constant(i).is_some() || strings && i.opcode == 0x72 && i.size == 5
+}
 pub(crate) fn literal_site(
     body: &cil::MethodBody,
     index: usize,
     boundaries: &BTreeSet<u32>,
+    strings: bool,
 ) -> bool {
     if index == 0 || index >= body.instructions.len() {
         return false;
     }
     let arg = &body.instructions[index - 1];
     let call = &body.instructions[index];
-    if crate::deobfuscate::eaz::constant(arg).is_none()
+    if !literal_argument(arg, strings)
         || call.opcode != 0x28
         || call.size != 5
         || arg.offset + arg.size != call.offset
@@ -1730,7 +1736,10 @@ pub(crate) fn write_literals(a: &Assembly, patches: &[LiteralPatch]) -> Result<V
                 .instructions
                 .binary_search_by_key(&patch.call_offset, |i| i.offset)
                 .map_err(|_| unsupported("Missing string call"))?;
-            if !literal_site(&body, index, &boundaries)
+            let m = a.method_ref(patch.helper)?;
+            let parameters = m.signature.parameters.as_slice();
+            let takes_string = parameters == [crate::signature::Type::primitive("string")];
+            if !literal_site(&body, index, &boundaries, takes_string)
                 || body.instructions[index - 1].offset != patch.argument_offset
                 || body.instructions[index].token() != Some(patch.helper)
                 || !seen.insert(patch.call_offset)
@@ -1739,15 +1748,14 @@ pub(crate) fn write_literals(a: &Assembly, patches: &[LiteralPatch]) -> Result<V
                     "Literal replacement crosses a branch/EH/prefix boundary or is stale",
                 ));
             }
-            let m = a.method_ref(patch.helper)?;
             if patch.helper >> 24 != 6
                 || m.signature.has_this
                 || m.signature.generic_count != 0
                 || m.signature.return_type != crate::signature::Type::primitive("string")
-                || m.signature.parameters != [crate::signature::Type::primitive("int")]
+                || !(takes_string || parameters == [crate::signature::Type::primitive("int")])
             {
                 return Err(unsupported(
-                    "Literal replacement requires static string(int)",
+                    "Literal replacement requires static string(int) or string(string)",
                 ));
             }
             let token = if let Some(t) = strings.get(&patch.text) {
@@ -1953,10 +1961,20 @@ mod literal_tests {
             catch_type: None,
             filter_start: None,
         });
-        assert!(!literal_site(&body, index, &literal_boundaries(&body)));
+        assert!(!literal_site(
+            &body,
+            index,
+            &literal_boundaries(&body),
+            false
+        ));
         body.exceptions.clear();
         body.instructions.last_mut().unwrap().operand = cil::Operand::Branch(target);
-        assert!(!literal_site(&body, index, &literal_boundaries(&body)));
+        assert!(!literal_site(
+            &body,
+            index,
+            &literal_boundaries(&body),
+            false
+        ));
     }
     #[test]
     fn field_storage_aliases_and_unknown_layouts_are_rejected() {

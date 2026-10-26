@@ -732,3 +732,92 @@ fn proxy_unwrapping_redirects_forwarders_and_preserves_real_calls() {
             .any(|n| n.name == "Forward" && n.token >> 24 == 6)
     );
 }
+const PACKED: &[u8] = include_bytes!("../../../samples/fixtures/ILens.ArrayStrings.dll");
+#[test]
+fn array_backed_decoders_resolve_through_the_same_size_literal_writer() {
+    let (a, report, _) = run(PACKED, options());
+    // A Field-RVA layout rules the general IL writer out; the literal writer carries it.
+    assert!(
+        report
+            .notices
+            .iter()
+            .any(|n| n.contains("Generic IL transforms skipped")),
+        "{:?}",
+        report.notices
+    );
+    let text = |name: &str| {
+        let body = a.body(token(&a, name)).unwrap().unwrap();
+        body.instructions
+            .iter()
+            .find(|i| i.name == "ldstr")
+            .map(|i| a.user_string(i.token().unwrap()).unwrap())
+    };
+    // Static storage copied in by InitializeArray, XOR-decoded, then UTF-8 decoded.
+    assert_eq!(text("Greeting").as_deref(), Some("Hello ILens"));
+    assert_eq!(text("Shifted").as_deref(), Some("Idmmn!HMdor"));
+    // The same shape with a char[] initializer and Base64 text.
+    assert_eq!(text("Wide").as_deref(), Some("ILens wide"));
+    assert_eq!(text("Base64").as_deref(), Some("Hello ILens"));
+    // A key that produces invalid UTF-8 must stop rather than emit replacements.
+    assert_eq!(text("Malformed"), None);
+    // A nonliteral argument and a non-interned result are both left as calls.
+    assert_eq!(text("Dynamic"), None);
+    assert_eq!(text("Fresh"), None);
+    let reason = |name: &str| {
+        report
+            .methods
+            .iter()
+            .find(|m| m.token == token(&a, name))
+            .map(|m| m.reasons.join(" "))
+            .unwrap_or_default()
+    };
+    assert!(
+        reason("Malformed").contains("UTF-8"),
+        "{}",
+        reason("Malformed")
+    );
+    assert_eq!(report.counts.strings, 4);
+    // Offsets, exception regions and Field-RVA data are preserved byte for byte.
+    let original = Assembly::load(PACKED.to_vec()).unwrap();
+    for name in ["Greeting", "Decode", "Widen"] {
+        let before = original.body(token(&original, name)).unwrap().unwrap();
+        let after = a.body(token(&a, name)).unwrap().unwrap();
+        assert_eq!(before.code_size, after.code_size);
+        assert_eq!(before.max_stack, after.max_stack);
+        assert_eq!(
+            before
+                .instructions
+                .iter()
+                .map(|i| i.offset)
+                .collect::<Vec<_>>(),
+            after
+                .instructions
+                .iter()
+                .map(|i| i.offset)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+#[test]
+fn array_and_encoding_model_rejects_unsupported_shapes() {
+    let a = Assembly::load(PACKED.to_vec()).unwrap();
+    // Base64 is strict: no whitespace, no missing padding, no non-zero trailing bits.
+    for bad in ["SGVsbG8gSUxlbnM", "SGVsbG8 gSUxlbnM=", "SGVsbG8gSUxlbnO="] {
+        let e = Evaluator::new(&a, Budget::default())
+            .call(
+                token(&a, "FromBase64"),
+                vec![Value::String(Rc::new(bad.encode_utf16().collect()), true)],
+            )
+            .unwrap_err();
+        assert!(e.0.contains("Base64"), "{bad}: {e}");
+    }
+    let Value::String(units, _) = value(&a, "Decode", vec![Value::I32(0)]) else {
+        panic!()
+    };
+    assert_eq!(String::from_utf16(&units).unwrap(), "Hello ILens");
+    // Field-RVA reads are accounted for like any other evaluation allocation.
+    let e = Evaluator::new(&a, Budget::new(20_000, 16))
+        .call(token(&a, "Decode"), vec![Value::I32(0)])
+        .unwrap_err();
+    assert!(e.0.contains("allocation"), "{e}");
+}

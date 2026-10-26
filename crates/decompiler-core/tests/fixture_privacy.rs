@@ -61,6 +61,10 @@ const FIXTURES: &[(&str, &[u8])] = &[
         "Proxies",
         include_bytes!("../../../samples/fixtures/ILens.Proxies.dll"),
     ),
+    (
+        "ArrayStrings",
+        include_bytes!("../../../samples/fixtures/ILens.ArrayStrings.dll"),
+    ),
 ];
 
 #[test]

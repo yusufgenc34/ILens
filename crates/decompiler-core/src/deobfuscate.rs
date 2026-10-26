@@ -90,6 +90,9 @@ pub struct Job {
     retained: usize,
     edits: BTreeMap<u32, ValidatedEdit>,
     resource: Option<eaz::Profile>,
+    /// Same-size replacement of any static `string(int)` decoder the evaluator resolves,
+    /// used where the general IL writer cannot rewrite whole methods.
+    literal_strings: bool,
     literals: Vec<crate::pe_write::LiteralPatch>,
     pub report: Report,
     pub output: Option<Vec<u8>>,
@@ -147,13 +150,20 @@ impl Job {
         if resource.is_some() || options.proxies || !generic {
             crate::pe_write::literal_capability(a)?;
         }
+        let mut literal_strings = false;
         if generic && let Err(e) = crate::pe_write::capability(a) {
-            // Renaming and proxy unwrapping survive a layout the general IL writer
-            // cannot handle; only the whole-method IL transforms are dropped.
-            if !options.rename && !options.proxies {
+            // Renaming, proxy unwrapping and same-size string replacement survive a
+            // layout the general IL writer cannot handle (Field-RVA arrays, for one);
+            // only the whole-method IL transforms are dropped.
+            literal_strings = options.strings;
+            if !options.rename && !options.proxies && !literal_strings {
                 return Err(e);
             }
-            (options.constants, options.branches, options.strings) = (false, false, false);
+            (options.constants, options.branches) = (false, false);
+            options.strings = literal_strings;
+            if literal_strings {
+                crate::pe_write::literal_capability(a)?;
+            }
             skipped_notice = Some(format!("Generic IL transforms skipped: {}", e.detail));
         }
         let mut notices=vec!["Generic transforms only. No obfuscator family is claimed as fully supported.".into(),"Declarations, names, tokens, resources and initializers are retained. Unsupported methods/calls remain unchanged.".into(),"Changed methods pass the strict writer checks. This is not a proof of whole-program behavioral equivalence; review the output before use.".into()];
@@ -183,6 +193,7 @@ impl Job {
             instructions: 0,
             retained: 0,
             resource,
+            literal_strings,
             literals: vec![],
             edits: BTreeMap::new(),
             output: None,
@@ -241,11 +252,12 @@ impl Job {
                 let generic_rows = self.report.options.constants
                     || self.report.options.branches
                     || self.report.options.strings;
-                let max_instructions = if self.resource.is_some() || !generic_rows {
-                    2_000_000
-                } else {
-                    200_000
-                };
+                let max_instructions =
+                    if self.resource.is_some() || self.literal_strings || !generic_rows {
+                        2_000_000
+                    } else {
+                        200_000
+                    };
                 if self.instructions > max_instructions {
                     return Err(Error::limit(format!(
                         "Deobfuscation input exceeds {max_instructions} decoded instructions"
@@ -257,7 +269,7 @@ impl Job {
                         if call.opcode != 0x28 || call.token() != Some(profile.helper) {
                             continue;
                         }
-                        if !crate::pe_write::literal_site(&body, index, &boundaries) {
+                        if !crate::pe_write::literal_site(&body, index, &boundaries, false) {
                             self.report.unresolved_calls += 1;
                             note(
                                 &mut result.reasons,
@@ -298,6 +310,11 @@ impl Job {
                             }
                         }
                     }
+                    if result.status == "changed" {
+                        self.report.changed_methods += 1;
+                    }
+                } else if self.literal_strings {
+                    self.decode_literals(a, token, &body, &mut result)?;
                     if result.status == "changed" {
                         self.report.changed_methods += 1;
                     }
@@ -447,7 +464,7 @@ impl Job {
         self.report.skipped_methods += usize::from(result.status == "skipped");
         self.report.methods.push(result);
         self.cursor += 1;
-        if self.resource.is_none() {
+        if self.resource.is_none() && !self.literal_strings {
             self.report.changed_methods = self.edits.len();
         }
         Ok(self.progress())
@@ -460,7 +477,7 @@ impl Job {
         }
         if self.output.is_none() {
             // The existing writer independently revalidates edits and reparses its output.
-            let bytes = if self.resource.is_some() {
+            let bytes = if self.resource.is_some() || self.literal_strings {
                 crate::pe_write::write_literals(a, &self.literals)?
             } else if self.edits.is_empty() {
                 a.bytes.clone()
@@ -501,6 +518,105 @@ impl Job {
     }
 }
 impl Job {
+    /// Replaces `ldc.i4 K; call static string Helper(int)` with the evaluated literal,
+    /// in place and without moving any instruction. The evaluator decides what is
+    /// resolvable; this only chooses the sites it is offered.
+    fn decode_literals(
+        &mut self,
+        a: &Assembly,
+        token: u32,
+        body: &crate::cil::MethodBody,
+        result: &mut MethodReport,
+    ) -> Result<()> {
+        let boundaries = crate::pe_write::literal_boundaries(body);
+        let mut evaluator = Evaluator::new(a, Budget::default());
+        let mut attempts = 0;
+        for (index, call) in body.instructions.iter().enumerate() {
+            if call.opcode != 0x28 {
+                continue;
+            }
+            let Some(helper) = call.token().filter(|t| t >> 24 == 6 && *t != token) else {
+                continue;
+            };
+            let Ok(method) = a.method_ref(helper) else {
+                continue;
+            };
+            let takes_string =
+                method.signature.parameters == [crate::signature::Type::primitive("string")];
+            if method.signature.has_this
+                || method.signature.generic_count != 0
+                || method.signature.return_type != crate::signature::Type::primitive("string")
+                || !(takes_string
+                    || method.signature.parameters == [crate::signature::Type::primitive("int")])
+                || !crate::pe_write::literal_site(body, index, &boundaries, takes_string)
+            {
+                continue;
+            }
+            if attempts >= 16 {
+                note(
+                    &mut result.reasons,
+                    "At most 16 string-helper candidates are evaluated per method",
+                );
+                self.report.unresolved_calls += 1;
+                continue;
+            }
+            attempts += 1;
+            let argument = &body.instructions[index - 1];
+            let value = if takes_string {
+                evaluator.literal(argument.token().unwrap_or(0))
+            } else {
+                Ok(Value::I32(eaz::constant(argument).ok_or_else(|| {
+                    Error::cil("Expected a literal decoder argument")
+                })?))
+            };
+            let decoded = value
+                .and_then(|value| evaluator.call(helper, vec![value]))
+                .and_then(|value| match value {
+                    Value::String(units, true) => String::from_utf16(&units)
+                        .map_err(|_| emulate::Stop("Unpaired UTF-16 surrogate".into())),
+                    Value::String(_, false) => Err(emulate::Stop(
+                        "Non-interned result retained to avoid changing string reference identity"
+                            .into(),
+                    )),
+                    _ => Err(emulate::Stop("Helper did not return a string".into())),
+                });
+            match decoded {
+                Ok(text) => {
+                    if self.retained + text.len() + 64 > 8 * 1024 * 1024
+                        || self.literals.len() >= 100_000
+                    {
+                        self.report.unresolved_calls += 1;
+                        note(
+                            &mut result.reasons,
+                            "String patches reached the 8 MiB / 100,000 call limit; call retained",
+                        );
+                        continue;
+                    }
+                    self.retained += text.len() + 64;
+                    self.literals.push(crate::pe_write::LiteralPatch {
+                        method: token,
+                        argument_offset: argument.offset,
+                        call_offset: call.offset,
+                        helper,
+                        text,
+                    });
+                    result.counts.strings += 1;
+                    result.status = "changed".into();
+                }
+                Err(e) => {
+                    self.report.unresolved_calls += 1;
+                    note(&mut result.reasons, &e.0);
+                }
+            }
+        }
+        self.report.evaluation_steps += evaluator.budget.steps;
+        if self.report.evaluation_steps > 1_000_000 {
+            return Err(Error::limit(
+                "Deobfuscation job exceeded one million evaluation steps",
+            ));
+        }
+        Ok(())
+    }
     /// Unwraps proxy/forwarder calls on top of the already written bytes. Forwarders
     /// are re-detected from the current image (tokens are stable) and call sites are
     /// rewritten in place. A failure keeps the input bytes and is reported.
