@@ -1,4 +1,5 @@
 import {test, expect} from './test'
+import {version} from '../../src/lib/version'
 import path from 'node:path'
 
 test('stylesheet applies the IDE layout, controls, editor and both themes', async ({page}, testInfo) => {
@@ -23,6 +24,7 @@ test('stylesheet applies the IDE layout, controls, editor and both themes', asyn
   await expect(page.locator('.toolbar')).toHaveCount(0)
   await expect(page.locator('.app-menubar')).toHaveCSS('height', '31px')
   await expect(page.locator('.app-menubar')).toHaveCSS('display', 'flex')
+  await expect(page.locator('.statusbar')).toContainText(`v${version}`)
   await expect(page.getByRole('menubar', {name: 'Main menu'})).toHaveCSS('display', 'flex')
   await expect(page.getByRole('menuitem', {name: 'File', exact: true})).toHaveCSS('border-radius', '4px')
   // The start page has no inspector; it appears with the first assembly.

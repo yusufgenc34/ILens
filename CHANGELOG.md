@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-10-26
+
+- Added Extras, a menu that collects the analysis tools: Deobfuscation Options, Function Mapper, Packed Assemblies, String Usage and Retry Missing Dependencies, each described in plain language.
+- Added deobfuscation: protected string decoding, constant and branch folding, dead-code removal, proxy/indirect call unwrapping, synthetic renaming of obfuscated names, switch-dispatcher control-flow straightening, and debugger queries answered as if no debugger is attached. Every pass also works on assemblies the general IL writer cannot rewrite, by patching call sites and literals in place without moving a single instruction offset.
+- Protected string decoding now follows byte and character arrays initialized from field data, `Convert.FromBase64String` and the `System.Text.Encoding` singletons, within the same bounded CIL evaluation that never runs the analyzed assembly.
+- Added a Fix it action on the obfuscation warning, and automatic download of missing Microsoft reference assemblies with a Retry Missing Dependencies command for the rest.
+- Added the Relationship Mapper: a mind map of types, functions, inheritance, fields, containment and calls. Clicking a node focuses it and its connections, search filters the whole map by name, string or `unused`, and double-clicking opens the member.
+- Added String Usage, which lists every method that loads a given literal across all loaded assemblies.
+- Added Packed Assemblies, which lists assemblies embedded in resources and opens them in the workspace without executing anything.
+- Declarations, attributes, usings and field types in the type view are now links to their definitions.
+- Unordered CIL float comparisons now read as C# negations rather than falling back to IL.
+- Protector marker detection now recognizes injected runtime type names and module initializers.
+
+## Earlier work in this release
 
 - C# views now read like dnSpy/ILSpy: usings and short names, token comments, records and `with`, async/iterator methods (including try/finally iterators and `IAsyncEnumerable`), cached lambdas and local functions, `?:`/`??`/`?.`, type patterns, string `switch`, `lock`, interpolated strings, object/collection initializers, definite assignment and multidimensional arrays. Every sample's exported project compiles, checked by a browser test.
 - IL editing now covers constructors and type initializers, generic methods and members of generic types, local structs, ref/out parameters and managed pointers, multidimensional arrays, try/catch/finally/fault regions, nested and protected access, and external types and members from loaded dependencies.

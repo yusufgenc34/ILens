@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "decompiler-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clrmeta",
  "goblin",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "decompiler-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "decompiler-core",
  "serde",
