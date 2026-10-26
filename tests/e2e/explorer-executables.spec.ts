@@ -67,7 +67,9 @@ test('a genuine SDK ReadyToRun assembly exposes its preserved IL with a read-onl
   const runtime=runtimes.split('\n').find(line=>line.startsWith('Microsoft.NETCore.App 10.'))!.match(/^Microsoft.NETCore.App (\S+) \[(.+)\]$/)!
   await page.goto('./')
   await page.getByLabel('Open assembly files').setInputFiles(path.join(runtime[2],runtime[1],'System.Console.dll'))
-  await expect(page.getByLabel('Loaded assemblies')).toHaveText('1')
+  // A real framework ReadyToRun image is far larger than the fixtures; indexing it on a
+  // loaded machine takes longer than the shared assertion timeout allows.
+  await expect(page.getByLabel('Loaded assemblies')).toHaveText('1',{timeout:30_000})
   await page.getByLabel('Assembly warnings').locator('summary').click()
   await expect(page.getByLabel('Assembly warnings')).toContainText('ReadyToRun image')
   await page.keyboard.press('ControlOrMeta+k');await page.getByLabel('Search members and strings').fill('get_IsOutputRedirected')

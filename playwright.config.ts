@@ -5,6 +5,8 @@ export default defineConfig({
   testDir: './tests/e2e',
   outputDir: 'test-results/dev',
   fullyParallel: false,
+  // A loaded machine can take longer than the 5s default to finish a WASM load.
+  expect: {timeout: 10_000},
   workers: process.env.CI ? 2 : undefined,
   reporter: [['list'], ['html', {outputFolder: 'playwright-report/dev', open: 'never'}]],
   use: {baseURL: 'http://localhost:5173', screenshot: 'only-on-failure', trace: 'retain-on-failure'},
