@@ -52,6 +52,11 @@ jobs:
         run: npm run typecheck
       - name: Lint TypeScript and Rust
         run: npm run lint
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - name: Install Chromium
         run: npx playwright install --with-deps chromium firefox webkit
       - name: Test development application
@@ -97,6 +102,11 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - name: Install browser test tools
         run: |
           npm ci
