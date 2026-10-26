@@ -174,6 +174,27 @@ pub(crate) fn hidden_character(c: char) -> bool {
     c.is_control()
         || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
 }
+/// Tool names that only appear as a declaration's own namespace or type name when that
+/// tool wrote it. This is a name marker, like the attribute markers: it does not verify
+/// provenance and it says nothing about whether ILens can clean the file.
+fn named_tool(full_name: &str) -> Option<&'static str> {
+    let prefix = |p: &str| full_name.starts_with(p);
+    if prefix("SmartAssembly.") {
+        Some("SmartAssembly")
+    } else if prefix("Eazfuscator.") {
+        Some("Eazfuscator.NET")
+    } else if prefix("Babel.") || prefix("BabelObfuscator.") {
+        Some("Babel Obfuscator")
+    } else if prefix("Confuser.") || prefix("ConfuserEx.") {
+        Some("Confuser family")
+    } else if prefix("NetReactor.") || prefix("Eziriz.") {
+        Some(".NET Reactor")
+    } else if prefix("Dotfuscator.") || prefix("PreEmptive.") {
+        Some("Dotfuscator")
+    } else {
+        None
+    }
+}
 fn name_evidence(nodes: &[Node]) -> Vec<Evidence> {
     let mut eligible = 0;
     let mut short = 0;
@@ -205,7 +226,32 @@ fn name_evidence(nodes: &[Node]) -> Vec<Evidence> {
             short += 1
         }
     }
-    let mut evidence = vec![];
+    let mut evidence: Vec<Evidence> = vec![];
+    // The module initializer runs before any other code in the file, which is where a
+    // packer or protection installs its runtime.
+    if let Some(n) = nodes
+        .iter()
+        .find(|n| n.token >> 24 == 6 && n.name == ".cctor" && n.parent == 0x02000001)
+    {
+        evidence.push(Evidence {kind: "module_initializer", tool: None, confidence: "heuristic", detail: "The module has an initializer (`<Module>..cctor`), which runs before any other code. Packers and protections use it to install their runtime; legitimate code uses it too.".into(), token: Some(n.token)});
+    }
+    for n in nodes {
+        if n.token >> 24 != 2 {
+            continue;
+        }
+        // An assembly that merely declares a tool's watermark attribute is not itself
+        // evidence; only an injected runtime type counts.
+        if n.name.ends_with("Attribute") {
+            continue;
+        }
+        let Some(tool) = named_tool(&n.full_name) else {
+            continue;
+        };
+        if evidence.iter().any(|e| e.tool == Some(tool)) {
+            continue;
+        }
+        evidence.push(Evidence {kind: "protector_type_name", tool: Some(tool), confidence: "marker", detail: format!("A declared type is named `{}`. This identifies a marker, not verified tool provenance.", n.full_name), token: Some(n.token)});
+    }
     if hidden > 0 {
         evidence.push(Evidence {kind: "hidden_identifier_characters", tool: None, confidence: "heuristic", detail: format!("{hidden} declaration names contain control, invisible, or bidirectional formatting characters. This can indicate renaming; it does not identify a particular tool."), token: first_hidden});
     }

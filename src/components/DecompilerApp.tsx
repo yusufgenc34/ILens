@@ -471,7 +471,7 @@ export default function DecompilerApp() {
     setPendingFix(null)
     if (assemblies.some(a => a.id === id)) {setPrimary(id); setDeobfuscateAuto(id); setDeobfuscateOpen(true)}
   }, [loadingFiles, pendingFix, assemblies])
-  async function cleanedOpened(loaded:Loaded,filename:string) {
+  async function cleanedOpened(loaded:Loaded,filename:string,status='Opened a cleaned analysis copy. The original remains available in Explorer.') {
     const version=generation.current, core=getClient()
     try {
       const declarations=await core.call('getTree',{assembly:loaded.id})
@@ -479,7 +479,7 @@ export default function DecompilerApp() {
       if(version!==generation.current)return
       setAssemblies(previous=>previous.some(a=>a.id===loaded.id)?previous:[...previous,{...loaded,filename,declarations,overview,elapsed:0}])
       navigate({assembly:loaded.id,token:0,view:'C#'})
-      setStatus('Opened a cleaned analysis copy. The original remains available in Explorer.')
+      setStatus(status)
     } catch(error) {await core.call('close',{assembly:loaded.id}).catch(()=>{});throw error}
   }
   async function closeAssembly(id: number) {
@@ -704,7 +704,7 @@ export default function DecompilerApp() {
     {tourOpen && <Tour steps={tourSteps} onClose={() => setTourOpen(false)} />}
     {projectOpen && primary && <ProjectExportDialog client={getClient()} assemblies={assemblies} primary={primary} onClose={() => setProjectOpen(false)} />}
     {functionMapOpen && active && <FunctionMapper key={active.id} client={getClient()} assembly={active.id} filename={active.filename} cached={functionMaps.current.get(active.id) ?? null} onLoaded={map => functionMaps.current.set(active.id, map)} onOpen={token => {setFunctionMapOpen(false); navigate({assembly: active.id, token, view: 'C#'})}} onClose={() => setFunctionMapOpen(false)} />}
-    {packedOpen && active && <PackedAssemblies key={active.id} client={getClient()} assembly={active.id} filename={active.filename} onOpened={cleanedOpened} onClose={()=>setPackedOpen(false)} />}
+    {packedOpen && active && <PackedAssemblies key={active.id} client={getClient()} assembly={active.id} filename={active.filename} onOpened={(loaded,filename)=>cleanedOpened(loaded,filename,`Opened ${filename} from the host assembly's resources. The host remains available in Explorer.`)} onClose={()=>setPackedOpen(false)} />}
     {deobfuscateOpen && active && <DeobfuscateDialog key={active.id} client={getClient()} assembly={active.id} filename={active.filename} autoStart={deobfuscateAuto === active.id} onOpened={cleanedOpened} onClose={()=>{setDeobfuscateOpen(false); setDeobfuscateAuto(null)}} />}
     {exportOpen && active && <ExportDialog key={`${active.id}-${exportOpen}`} mode={exportOpen} client={getClient()} assembly={active.id} info={active.info} filename={active.filename} member={activeDeclaration} method={busy || methodAssembly !== active.id ? null : method} onClose={() => setExportOpen(null)} />}
     {csharpEdit && <CSharpEditDialog key={`${csharpEdit.assembly}-${csharpEdit.token}`} client={getClient()} assembly={csharpEdit.assembly} token={csharpEdit.token} name={csharpEdit.name} settings={editorSettings} theme={theme} onClose={() => setCsharpEdit(null)} onApplied={reloaded => {

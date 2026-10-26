@@ -63,8 +63,9 @@ test('cancel releases a real in-flight job and a new job produces byte-identical
     }
   })
   await open(page);const dialog=page.getByRole('dialog',{name:'Deobfuscate assembly',exact:true})
-  // Proxy unwrapping would legitimately change this fixture; disable it for a true no-op.
-  await dialog.getByRole('checkbox',{name:/Unwrap proxy\/indirect calls/}).uncheck()
+  // These three legitimately change this fixture; disable them for a true no-op.
+  for(const pass of [/Unwrap proxy\/indirect calls/,/Straighten scrambled control flow/,/Answer debugger checks/])
+    await dialog.getByRole('checkbox',{name:pass}).uncheck()
   await dialog.getByRole('button',{name:'Run deobfuscation'}).click()
   await expect(dialog.locator('progress')).toBeVisible()
   await dialog.getByRole('button',{name:'Cancel deobfuscation'}).click()
@@ -139,4 +140,18 @@ test('proxy call unwrapping redirects a forwarder to its target in the cleaned c
   const viewer=page.getByLabel('C# code viewer')
   await expect(viewer).toContainText('Real(2, 3)')
   await expect(viewer).not.toContainText('Forward(2, 3)')
+})
+test('control-flow straightening and debugger answers are offered and reported',async({page})=>{
+  await open(page)
+  const dialog=page.getByRole('dialog',{name:'Deobfuscate assembly',exact:true})
+  // Both are on by default: they are the two passes a protected file usually needs.
+  await expect(dialog.getByRole('checkbox',{name:/Straighten scrambled control flow/})).toBeChecked()
+  await expect(dialog.getByRole('checkbox',{name:/Answer debugger checks/})).toBeChecked()
+  for(const other of [/Decode protected resource strings/,/Rename obfuscated symbols/,/Fold int32 constants/,/Simplify constant branches/,/Unwrap proxy/])
+    await dialog.getByRole('checkbox',{name:other}).uncheck()
+  await dialog.getByRole('button',{name:'Run deobfuscation'}).click()
+  const report=dialog.getByRole('region',{name:'Deobfuscation report'})
+  await expect(report).toContainText('3 control-flow steps',{timeout:20000})
+  await expect(report).toContainText('2 debugger checks')
+  await expect(report).toContainText('no debugger is attached')
 })

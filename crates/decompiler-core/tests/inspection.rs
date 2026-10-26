@@ -51,8 +51,20 @@ fn applied_watermarks_are_resolved_through_metadata_constructors() {
                 .is_some()
         );
     }
+    // An injected runtime type is a marker in its own right; the attribute
+    // declarations above are not, or every detector fixture would flag itself.
+    let injected = a
+        .info
+        .obfuscation
+        .evidence
+        .iter()
+        .find(|e| e.kind == "protector_type_name")
+        .expect("injected runtime type");
+    assert_eq!(injected.tool, Some("Eazfuscator.NET"));
+    assert_eq!(injected.confidence, "marker");
+    assert_eq!(injected.token.unwrap() >> 24, 2);
     assert!(a.info.obfuscation.scan_complete);
-    assert_eq!(a.info.obfuscation.evidence.len(), 4);
+    assert_eq!(a.info.obfuscation.evidence.len(), 5);
 }
 
 #[test]

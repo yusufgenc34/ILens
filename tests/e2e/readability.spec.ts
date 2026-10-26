@@ -35,7 +35,8 @@ test('worker output simplifies a message array and saves C# that compiles', asyn
   await fs.mkdir(directory, {recursive: true})
   await fs.writeFile(path.join(directory, 'Readability.csproj'), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><DebugType>none</DebugType><DebugSymbols>false</DebugSymbols></PropertyGroup></Project>')
   await fs.writeFile(path.join(directory, 'FormValues.cs'), `namespace ILens.Readability; public sealed class FormValues { public string Text { get; set; } = "fixture"; public bool Checked { get; set; } public string get_NotAProperty() => "method";\n${source}\n}`)
-  const build = execFileSync('dotnet', ['build', directory, '--nologo', '-p:UseSharedCompilation=false'], {encoding: 'utf8', timeout: 60_000})
+  // The summary is asserted in English, so the CLI must not localize it.
+  const build = execFileSync('dotnet', ['build', directory, '--nologo', '-p:UseSharedCompilation=false'], {encoding: 'utf8', timeout: 60_000, env: {...process.env, DOTNET_CLI_UI_LANGUAGE: 'en'}})
   expect(build).toContain('0 Error(s)')
   await page.getByRole('button', {name: 'Close export'}).click()
   await page.getByRole('tab', {name: 'IL', exact: true}).click()

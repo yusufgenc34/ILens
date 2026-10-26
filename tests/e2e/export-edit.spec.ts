@@ -25,7 +25,8 @@ test('downloads exact method output and a fixture project that compiles without 
   const directory = testInfo.outputPath('reconstructed'); await fs.mkdir(directory, {recursive: true})
   execFileSync('python3', ['-c', 'import sys,io,zipfile; zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())).extractall(sys.argv[1])', directory], {input: data})
   // This is only the repository-owned arithmetic fixture. Build it, never run it.
-  const build = execFileSync('dotnet', ['build', path.join(directory, 'ILens.Dependency.sln'), '--nologo', '-p:UseSharedCompilation=false', '-p:DebugType=none', '-p:DebugSymbols=false'], {encoding: 'utf8', timeout: 60_000})
+  // The summary is asserted in English, so the CLI must not localize it.
+  const build = execFileSync('dotnet', ['build', path.join(directory, 'ILens.Dependency.sln'), '--nologo', '-p:UseSharedCompilation=false', '-p:DebugType=none', '-p:DebugSymbols=false'], {encoding: 'utf8', timeout: 60_000, env: {...process.env, DOTNET_CLI_UI_LANGUAGE: 'en'}})
   expect(build).toContain('0 Error(s)')
   expect(execFileSync('dotnet', ['sln', path.join(directory, 'ILens.Dependency.sln'), 'list'], {encoding: 'utf8'})).toContain('ILens.Dependency.csproj')
   await expect(page.getByRole('button', {name: 'Close', exact: true})).toBeInViewport({ratio: 1})

@@ -42,10 +42,12 @@ export default function RelationshipGraph({map,onOpen}:{map:FunctionMap;onOpen:(
 
   const {nodes,links,matchCount}=useMemo(()=>{
     const q=query.trim().toLowerCase()
-    const hitType=(t:FunctionMap['types'][number])=>!!q&&(t.name.toLowerCase().includes(q)||t.namespace.toLowerCase().includes(q)||t.full_name.toLowerCase().includes(q))
+    const hitType=(t:FunctionMap['types'][number])=>!!q&&q!=='unused'&&(t.name.toLowerCase().includes(q)||t.namespace.toLowerCase().includes(q)||t.full_name.toLowerCase().includes(q))
     // Searching also looks inside the string literals each function loads, so a word
     // from a message finds the code that uses it.
-    const hitFn=(f:MappedFunction)=>!!q&&(f.name.toLowerCase().includes(q)||f.signature.toLowerCase().includes(q)||f.strings.some(s=>s.toLowerCase().includes(q)))
+    // `unused` is the one keyword search: it answers "what has no caller here?",
+    // which is as far as a static scan can go — reflection is invisible to it.
+    const hitFn=(f:MappedFunction)=>!!q&&(q==='unused'?f.tags.includes('unreferenced'):f.name.toLowerCase().includes(q)||f.signature.toLowerCase().includes(q)||f.strings.some(s=>s.toLowerCase().includes(q)))
 
     const fnVisible=new Set<number>()
     for(const owner of expanded)for(const f of (functionsByOwner.get(owner)??[]).slice(0,FUNCTIONS_PER_TYPE))fnVisible.add(f.token)
@@ -190,7 +192,7 @@ export default function RelationshipGraph({map,onOpen}:{map:FunctionMap;onOpen:(
   return <div className="relative h-full w-full overflow-hidden bg-[var(--surface)]">
     <div className="absolute left-2 top-2 z-1 flex max-w-[calc(100%-1rem)] flex-wrap items-center gap-2">
       <input className="h-8 w-64 rounded-md border border-solid border-border bg-[var(--popover)] px-2.5 text-[12px]" type="search"
-        placeholder="Search types, functions or strings…" aria-label="Search the map" value={query} onChange={e=>setQuery(e.target.value)}/>
+        placeholder="Search types, functions, strings or “unused”…" aria-label="Search the map" value={query} onChange={e=>setQuery(e.target.value)}/>
       {!!query.trim()&&<span className="rounded-md bg-[var(--popover)]/90 px-2 py-1 text-[11px] text-muted-foreground">{matchCount} match{matchCount===1?'':'es'}</span>}
       {focusLabel&&!query.trim()&&<span className="rounded-md bg-[var(--popover)]/90 px-2 py-1 text-[11px] text-muted-foreground">Focused on <strong className="font-mono text-foreground">{focusLabel}</strong></span>}
       {(focus!==null||!!query.trim()||expanded.size>0)&&<button className="h-8 rounded-md border border-solid border-border bg-[var(--popover)] px-2.5 text-[11px] hover:bg-hover" onClick={showAll}>Show whole map</button>}

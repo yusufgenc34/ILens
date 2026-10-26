@@ -63,6 +63,18 @@ test('searching the map filters by name and by string literal', async ({page}) =
   await expect(mapper.getByText(/Nothing matches/)).toBeVisible()
 })
 
+test('searching for unused shows the functions nothing in the assembly calls', async ({page}) => {
+  const mapper = await open(page, 'samples/fixtures/ILens.Patterns.dll')
+  const graph = mapper.getByRole('img', {name: 'Assembly relationship map'})
+  await mapper.getByLabel('Search the map').fill('unused')
+  await expect(mapper.getByText(/\d+ match/)).toBeVisible()
+  // Public API with no caller inside this assembly is exactly what this finds; a
+  // static scan cannot see reflection, so nothing is removed on the strength of it.
+  await expect(graph.getByRole('button', {name: /^function /}).first()).toBeVisible()
+  // A type name is not a tag, so it does not answer this search.
+  await expect(graph.getByRole('button', {name: 'Mode (enum)', exact: true})).toHaveCount(0)
+})
+
 test('a user string lists the methods that load it', async ({page}) => {
   await page.goto('./')
   await expect(page.getByLabel('Open assembly files')).toBeEnabled()

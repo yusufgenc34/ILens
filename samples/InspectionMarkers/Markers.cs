@@ -32,6 +32,15 @@ namespace SmartAssembly.Attributes
     }
 }
 
+#if MARKERS
+// An injected runtime type, the other shape a protector leaves behind. The
+// attribute declarations above are not evidence on their own; this is.
+namespace Eazfuscator.Runtime
+{
+    public static class Support { public static int Seed => 0; }
+}
+#endif
+
 // A configuration attribute and unused marker types are negative controls in
 // the NoTarget build. They must not imply that obfuscation was performed.
 [System.Reflection.Obfuscation(Exclude = true)]
